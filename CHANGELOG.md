@@ -44,6 +44,36 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **Library traversals of long lists run in bounded Lua stack** (crash).
+  `mapM (\x -> pure (x + 1)) [1 .. 5000]` overflowed the stack on LuaJIT
+  (about 1.5e5 elements on Lua 5.5), and so did `sequence`, `traverse`
+  and `forM` in IO, Maybe and Either; `mapM_`/`sequence_` in Maybe and
+  Either; `and`, `or`, `any`, `all`, `elem` and `notElem` from about
+  1.5e4 elements on LuaJIT; `concat`, `concatMap`, `foldMap` and
+  `mconcat` over long runs of empty fragments, which made a filtering
+  list comprehension (`[x | x <- xs, p x]`) overflow; walking the result
+  of `unzip`, `unzip3`, `partition`, `scanr` or `scanr1`; and
+  `Data.Set.fromList`/`union` from about 1.2e4 elements. GHC completes
+  all of them. Each was a recursion that grew the Lua stack per element:
+  a foldr step returning its suspended rest forces it from inside the
+  step, a right-nested `liftA2` runs the rest of the list inside each
+  step, and a strict match on a recursive result recurses to the end of
+  the list. They are now self tail calls over the structure's list view
+  (`and`/`or`/`any`/`all`/`elem`, `concat`, `mapM_`), GHC's lazy
+  definitions (`unzip`, `unzip3`, `scanr`, `scanr1`; `partition` as the
+  two filters of the list tagged with its decisions), `mconcat` of the
+  mapped list (`foldMap`; the list `mconcat` is `concat`), the runtime's
+  map builder and a strict left fold (`Data.Set`), and, for the list
+  `traverse`, a new `Applicative` method `list_traverse` that is GHC's
+  `foldr`/`liftA2` definition by default and an accumulating loop at IO,
+  LuaIO, ST, Maybe and Either. Laziness and short-circuiting are GHC's:
+  infinite lists, bottoms in unvisited positions, effect order, and a
+  user applicative's lazy traversal (`take 3 (runIdentity (traverse
+  Identity [1 ..]))`) are unchanged or now match. Everything named
+  completes at 1e6 elements on Lua 5.5 and LuaJIT. (`reverse` is now a
+  name the Prelude's own functions use, so a module that defines its own
+  `reverse` must hide the Prelude's, as for `map` or `foldr`.)
+
 - **The runtime calls a function it is handed at the arity the function
   was compiled at** (crash). A function stored in an IORef could not be
   modified: `modifyIORef r (\h -> \x -> h x * 2)` on an `IORef (Int ->

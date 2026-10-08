@@ -673,6 +673,12 @@ mll_test!(foldable_generic, "foldable_generic.mll");
 mll_test!(ioref_basic, "ioref_basic.mll");
 mll_test!(ioref_laziness, "ioref_laziness.mll");
 mll_test!(runtime_callback_arity, "runtime_callback_arity.mll");
+// L15: the library traversals (mapM/traverse/sequence in IO, Maybe, Either;
+// and/or/any/all/elem; concat; foldMap; unzip/partition/scanr; Data.Set)
+// at 1e6 elements, and their GHC laziness/short-circuit on infinite lists
+// and bottoms.
+mll_test!(library_traversals_deep, "library_traversals_deep.mll");
+mll_test!(library_traversals_lazy, "library_traversals_lazy.mll");
 mll_test!(let_seq_pure_function, "let_seq_pure_function.mll");
 mll_test!(integer_smallpath_bounds, "integer_smallpath_bounds.mll");
 mll_test!(integer_bigdiv, "integer_bigdiv.mll");

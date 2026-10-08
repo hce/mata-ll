@@ -120,8 +120,11 @@ reverse xs = go [] xs
         go acc (x:rest) = go (x:acc) rest
 
 -- List operations
+-- concatMap is concat of the mapped list view. (List comprehensions
+-- desugar to it, so a filtering comprehension is a concat of mostly
+-- empty fragments.)
 concatMap :: Foldable t => (a -> [b]) -> t a -> [b]
-concatMap f t = foldr (\x acc -> f x ++ acc) [] t
+concatMap f t = concat (map f (foldr (\x xs -> x : xs) [] t))
 
 -- Longest prefix of elements satisfying the predicate. Lazy in the spine,
 -- so it works on infinite lists (e.g. `takeWhile (< 5) [1..]`).
@@ -150,9 +153,19 @@ init []       = error "init: empty list"
 init [_]      = []
 init (x : xs) = x : init xs
 
--- Flatten a list of lists.
+-- Flatten a list of lists, lazily (GHC's foldr (++) []). An empty
+-- fragment is skipped by a self tail call: as `[] ++ rest` inside a foldr
+-- step it would force the rest from within the step, one nested force per
+-- empty fragment, and a long run of them would overflow the Lua stack
+-- where GHC runs in constant stack. `ys ++ go xss` suspends the rest, so
+-- the walk resumes only when the consumer reaches the end of `ys`.
 concat :: Foldable t => t [a] -> [a]
-concat t = foldr (\xs acc -> xs ++ acc) [] t
+concat t = go (foldr (\x xs -> x : xs) [] t)
+  where
+    go [] = []
+    go (xs : xss) = case xs of
+        [] -> go xss
+        (y : ys) -> y : (ys ++ go xss)
 
 -- n copies of x (empty when n <= 0).
 replicate :: Int -> a -> [a]
@@ -192,29 +205,46 @@ zip [] _ = []
 zip _ [] = []
 zip (x : xs) (y : ys) = (x, y) : zip xs ys
 
--- Inverse of zip.
+-- Inverse of zip. GHC's definition: a foldr whose step matches the pair
+-- and builds both conses at once, taking the unzipped rest LAZILY (GHC's
+-- `~(as, bs)`, here `fst r`/`snd r` in the suspended tails). Each tail is
+-- one step of the fold, so walking either component runs in constant
+-- stack and works on an infinite list; a strict match on the rest would
+-- unzip the whole list, one nested call per element, before returning.
 unzip :: [(a, b)] -> ([a], [b])
-unzip []         = ([], [])
-unzip (p : rest) = case unzip rest of
-    (as, bs) -> (fst p : as, snd p : bs)
+unzip xs = foldr (\(a, b) r -> (a : fst r, b : snd r)) ([], []) xs
 
--- Conjunction / disjunction of a Bool list. Short-circuiting.
--- Foldable-generic (A18), through explicit lambdas rather than the
--- first-class operators so the accumulator stays LAZY: the short-circuit
--- (`or (repeat True)` terminates) survives the instance's foldr.
+-- Conjunction / disjunction, and whether any / all elements satisfy p.
+-- Short-circuiting and lazy: `or (repeat True)` and `any (\x -> x > 3)
+-- [1 ..]` terminate, and elements after the deciding one are never
+-- forced. Foldable-generic through the structure's list view (its own
+-- lazy foldr), walked by a self tail call: a foldr whose step returns the
+-- suspended rest would force that rest from inside the step, one nested
+-- force per element, and overflow the Lua stack on a long list where
+-- GHC runs in constant stack.
 and :: Foldable t => t Bool -> Bool
-and t = foldr (\x acc -> if x then acc else False) True t
+and t = go (foldr (\x xs -> x : xs) [] t)
+  where
+    go [] = True
+    go (x : xs) = if x then go xs else False
 
 or :: Foldable t => t Bool -> Bool
-or t = foldr (\x acc -> if x then True else acc) False t
+or t = go (foldr (\x xs -> x : xs) [] t)
+  where
+    go [] = False
+    go (x : xs) = if x then True else go xs
 
--- Do any / all elements satisfy p? Short-circuiting and lazy:
--- `any (\x -> x > 3) [1 ..]` terminates.
 any :: Foldable t => (a -> Bool) -> t a -> Bool
-any p t = foldr (\x acc -> if p x then True else acc) False t
+any p t = go (foldr (\x xs -> x : xs) [] t)
+  where
+    go [] = False
+    go (x : xs) = if p x then True else go xs
 
 all :: Foldable t => (a -> Bool) -> t a -> Bool
-all p t = foldr (\x acc -> if p x then acc else False) True t
+all p t = go (foldr (\x xs -> x : xs) [] t)
+  where
+    go [] = True
+    go (x : xs) = if p x then go xs else False
 
 -- Sum and product of any Foldable of numbers, generic over Num exactly as
 -- GHC. The `0`/`1` seeds are polymorphic numeric literals (`fromInteger`).
@@ -306,8 +336,14 @@ sort = sortBy (\x y -> if x <= y then (if y <= x then EQ else LT) else GT)
 -- Map each element to a monoid and combine the results.
 -- Monoid instances: String (concatenation, mempty "") and lists
 -- (append, mempty []).
+-- GHC's foldr (mappend . f) mempty, spelled as mconcat of the mapped list
+-- view: the same right-nested combination for every lawful Monoid (mconcat
+-- = foldr mappend mempty is a Monoid law, and the class default), but it
+-- reaches the instance's own mconcat, so lists concatenate through concat
+-- and Strings through one table.concat instead of a nested force per
+-- element.
 foldMap :: (Monoid m, Foldable t) => (a -> m) -> t a -> m
-foldMap f t = foldr (\x acc -> mappend (f x) acc) mempty t
+foldMap f t = mconcat (map f (foldr (\x xs -> x : xs) [] t))
 
 -- The Semigroup and Monoid classes. Ordinary source classes: the compiler
 -- synthesizes each method's class constraint from these declarations (like
@@ -357,6 +393,7 @@ instance Monoid String where
 instance Monoid [a] where
     mempty = []
     mappend xs ys = xs ++ ys
+    mconcat xss = concat xss
 
 
 
@@ -423,9 +460,45 @@ ap_Either _ (Left e) = Left e
 -- Type -> Type, like Foldable's).
 -- Built on liftA2 rather than <$>/<*> so the applicative never carries
 -- a function-valued intermediate (which the IO runtime cannot represent).
+-- The list instance is the Applicative method `list_traverse` (see the
+-- compiler's class registry): GHC's foldr over liftA2 by default, an
+-- accumulating loop in the applicatives that override it below.
 instance Traversable [] where
-    traverse _ [] = pure []
-    traverse f (x:xs) = liftA2 (\y ys -> y : ys) (f x) (traverse f xs)
+    traverse f xs = list_traverse f xs
+
+-- The list traversals of IO (also LuaIO and ST), Maybe and Either. Each
+-- runs the step for one element, then continues through the bind as a
+-- tail call with the result consed onto an accumulator, and reverses at
+-- the end: the effects (or the first failure) come in list order and the
+-- rest of the list is not looked at after a failure, exactly as under
+-- liftA2, and the result list is complete when the traversal returns, as
+-- it is there. The results themselves stay unevaluated.
+-- The list applicative keeps GHC's definition (the class default's): its
+-- traversal is lazy in the rest, which a loop would not be.
+list_traverse_List :: (a -> [b]) -> [a] -> [[b]]
+list_traverse_List g xs = foldr (\x ys -> liftA2_List (\y zs -> y : zs) (g x) ys) [[]] xs
+
+list_traverse_IO :: (a -> IO b) -> [a] -> IO [b]
+list_traverse_IO g xs = go [] xs
+  where
+    go acc [] = pure (reverse acc)
+    go acc (y : ys) = g y >>= \r -> go (r : acc) ys
+
+list_traverse_Maybe :: (a -> Maybe b) -> [a] -> Maybe [b]
+list_traverse_Maybe g xs = go [] xs
+  where
+    go acc [] = Just (reverse acc)
+    go acc (y : ys) = case g y of
+        Nothing -> Nothing
+        Just r -> go (r : acc) ys
+
+list_traverse_Either :: (a -> Either e b) -> [a] -> Either e [b]
+list_traverse_Either g xs = go [] xs
+  where
+    go acc [] = Right (reverse acc)
+    go acc (y : ys) = case g y of
+        Left e -> Left e
+        Right r -> go (r : acc) ys
 
 instance Traversable Maybe where
     traverse _ Nothing = pure Nothing
@@ -580,9 +653,20 @@ infixl 1 >>, >>=
 infixr 0 $, `seq`
 
 -- Monadic combinators
--- Result-discarding traversal (works in any monad).
+-- Result-discarding traversal (works in any monad), over the structure's
+-- list view. Each step continues through `>>=` into a self call rather
+-- than `f x >> rest` with a suspended rest: a `>>` that returns its second
+-- argument (Maybe's, Either's, an Identity's) would force that rest from
+-- inside the step, one nested force per element, and overflow the Lua
+-- stack on a long list. Through the bind the continuation is a tail call
+-- in every monad whose bind tail-calls it (IO's runner, Maybe, Either).
+-- `m >>= \_ -> k` is `m >> k` by the Monad laws, and the default `>>`.
 mapM_ :: (Foldable t, Monad m) => (a -> m b) -> t a -> m ()
-mapM_ f t = foldr (\x k -> f x >> k) (pure ()) t
+mapM_ f t = go (foldr (\x xs -> x : xs) [] t)
+  where
+    go ys = case ys of
+        [] -> pure ()
+        (x : xs) -> f x >>= \_ -> go xs
 
 -- Result-collecting traversal (works in any monad).
 -- mapM = traverse and sequence = sequenceA at Monad, exactly GHC's
@@ -612,9 +696,12 @@ snd (_, y) = y
 
 
 -- Is the element in the structure? Short-circuiting and lazy, so it
--- terminates on infinite lists when the element occurs.
+-- terminates on infinite lists when the element occurs; walked like `any`.
 elem :: (Eq a, Foldable t) => a -> t a -> Bool
-elem a t = foldr (\x rest -> if a == x then True else rest) False t
+elem a t = go (foldr (\x xs -> x : xs) [] t)
+  where
+    go [] = False
+    go (x : xs) = if a == x then True else go xs
 
 
 -- Complement of `elem`, Foldable-generic like it.
@@ -669,7 +756,7 @@ x <$ m = fmap (const x) m
 
 -- Evaluate each action, discarding the results (Foldable-generic like mapM_).
 sequence_ :: (Foldable t, Monad m) => t (m a) -> m ()
-sequence_ t = foldr (\x k -> x >> k) (pure ()) t
+sequence_ t = mapM_ (\x -> x) t
 
 -- Greatest common divisor and least common multiple over any Integral,
 -- GHC's definitions: `gcd` is never negative, `gcd 0 0` is 0, and `lcm`
@@ -704,21 +791,29 @@ scanl1 :: (a -> a -> a) -> [a] -> [a]
 scanl1 _ [] = []
 scanl1 f (x:xs) = scanl f x xs
 
--- (Written with a case rather than `head rest` so `head` stays a name no
+-- GHC's definitions: the scanned rest `qs` is bound lazily (GHC's
+-- `qs@(q:_)` in a where), so the result's spine is one step of the scan
+-- per cell, constant stack to walk and productive on an infinite list.
+-- Only an element's VALUE demands the next one. (The head of the rest is
+-- taken with a local match rather than `head`, so `head` stays a name no
 -- Prelude code depends on: a user program may redefine it at a narrower
--- type, and a load-bearing `head` would turn that into a rejection.)
+-- type. The rest is never empty; its `[]` arm is unreachable.)
 scanr :: (a -> b -> b) -> b -> [a] -> [b]
 scanr _ acc [] = [acc]
-scanr f acc (x:xs) = case scanr f acc xs of
-    rest@(r : _) -> f x r : rest
-    [] -> []
+scanr f acc (x:xs) = next qs : qs
+  where
+    qs = scanr f acc xs
+    next (q : _) = f x q
+    next [] = error "Prelude.scanr: empty rest"
 
 scanr1 :: (a -> a -> a) -> [a] -> [a]
 scanr1 _ [] = []
 scanr1 _ [x] = [x]
-scanr1 f (x:xs) = case scanr1 f xs of
-    rest@(r : _) -> f x r : rest
-    [] -> []
+scanr1 f (x:xs) = next qs : qs
+  where
+    qs = scanr1 f xs
+    next (q : _) = f x q
+    next [] = error "Prelude.scanr1: empty rest"
 
 -- Folds without a seed: the structure must be non-empty. Foldable-generic
 -- through the same list view `maximum`/`minimum` use.
@@ -744,10 +839,13 @@ zipWith3 :: (a -> b -> c -> d) -> [a] -> [b] -> [c] -> [d]
 zipWith3 f (x : xs) (y : ys) (z : zs) = f x y z : zipWith3 f xs ys zs
 zipWith3 _ _ _ _ = []
 
+-- GHC's definition, lazy in the unzipped rest like `unzip`.
 unzip3 :: [(a, b, c)] -> ([a], [b], [c])
-unzip3 [] = ([], [], [])
-unzip3 ((a, b, c) : rest) = case unzip3 rest of
-    (as, bs, cs) -> (a : as, b : bs, c : cs)
+unzip3 xs = foldr (\(a, b, c) r -> (a : first r, b : second r, c : third r)) ([], [], []) xs
+  where
+    first (as, _, _) = as
+    second (_, bs, _) = bs
+    third (_, _, cs) = cs
 
 -- head, tail, map, filter, take, drop, zipWith are implemented in the
 -- Lua runtime to support lazy cons cells (infinite lists).

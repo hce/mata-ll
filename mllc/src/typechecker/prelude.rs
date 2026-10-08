@@ -473,10 +473,29 @@ impl Checker {
             &[Ty::fun(&[ta.clone(), tb.clone()], tc.clone()), fa.clone(), fb.clone()],
             fc,
         );
+        // list_traverse :: (a -> f b) -> [a] -> f [b] — the list instance
+        // of `traverse`, selected by the applicative's type. Not a GHC
+        // method: it exists so that the Traversable [] instance dispatches
+        // on `f` the way only a class method can. Its default is GHC's
+        // definition (`foldr` over `liftA2 (:)`), which every instance
+        // keeps unless it overrides it; IO/LuaIO/ST, Maybe and Either
+        // override it with an accumulating loop that continues through
+        // the bind as a tail call. In those applicatives the two are the
+        // same function (each step's effect, or failure, comes before the
+        // rest is looked at, and the result spine is complete when the
+        // traversal returns), but the right-nested `liftA2` runs the rest
+        // of the list INSIDE each step and overflows the Lua stack on a
+        // long list. A lazy applicative (a user Identity, the list
+        // applicative) keeps the default and with it GHC's laziness.
+        let list_traverse_ty = Ty::fun(
+            &[Ty::arrow(ta.clone(), fb.clone()), Ty::list(ta.clone())],
+            Ty::App(Box::new(tf.clone()), Box::new(Ty::list(tb.clone()))),
+        );
         self.register_builtin_class("Applicative", "f", &["Functor"], vec![
             ("pure", pure_ty.clone(), Some(vec![a.clone(), f.clone()]), vec![]),
             ("<*>", ap_ty, Some(vec![a.clone(), b.clone(), f.clone()]), vec![]),
             ("liftA2", lifta2_ty, Some(vec![a.clone(), b.clone(), c.clone(), f.clone()]), vec![]),
+            ("list_traverse", list_traverse_ty, Some(vec![a.clone(), b.clone(), f.clone()]), vec![]),
         ]);
         // `return`'s env entry is the Applicative `pure` scheme; the Monad
         // method of the same name (below) deliberately adds no second one.
@@ -485,19 +504,28 @@ impl Checker {
         // or `liftA2` (defining neither loops, as under GHC).
         self.register_builtin_default("Applicative", "<*>", "f <*> x = liftA2 id f x");
         self.register_builtin_default("Applicative", "liftA2", "liftA2 f x y = fmap f x <*> y");
+        self.register_builtin_default(
+            "Applicative",
+            "list_traverse",
+            "list_traverse g xs = foldr (\\x ys -> liftA2 (\\y zs -> y : zs) (g x) ys) (pure []) xs",
+        );
 
         // Applicative instances (empty context — see the Functor loop).
         for tc_name in &["IO", "LuaIO", "ST"] {
             self.register_builtin_instance_empty_ctx("Applicative", Ty::Con(tc_name.to_string()),
-                &[("pure", "pure"), ("<*>", "ap_IO"), ("liftA2", "liftA2_IO")]);
+                &[("pure", "pure"), ("<*>", "ap_IO"), ("liftA2", "liftA2_IO"),
+                  ("list_traverse", "list_traverse_IO")]);
         }
         self.register_builtin_instance("Applicative", Ty::Con("[]".to_string()),
-            &[("pure", "pure_List"), ("<*>", "ap_List"), ("liftA2", "liftA2_List")]);
+            &[("pure", "pure_List"), ("<*>", "ap_List"), ("liftA2", "liftA2_List"),
+              ("list_traverse", "list_traverse_List")]);
         self.register_builtin_instance("Applicative", Ty::Con("Maybe".to_string()),
-            &[("pure", "pure_Maybe"), ("<*>", "ap_Maybe"), ("liftA2", "liftA2_Maybe")]);
+            &[("pure", "pure_Maybe"), ("<*>", "ap_Maybe"), ("liftA2", "liftA2_Maybe"),
+              ("list_traverse", "list_traverse_Maybe")]);
         // Empty context, not None — see the Functor Either instance.
         self.register_builtin_instance_empty_ctx("Applicative", Ty::Con("Either".to_string()),
-            &[("pure", "pure_Either"), ("<*>", "ap_Either"), ("liftA2", "liftA2_Either")]);
+            &[("pure", "pure_Either"), ("<*>", "ap_Either"), ("liftA2", "liftA2_Either"),
+              ("list_traverse", "list_traverse_Either")]);
 
         // Built-in Monad typeclass (superclass: Applicative)
         // >>=    :: m a -> (a -> m b) -> m b

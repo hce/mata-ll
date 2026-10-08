@@ -184,6 +184,8 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_ioref_basic, "cases", "ioref_basic.mll"),
         (ghc_oracle_ioref_laziness, "cases", "ioref_laziness.mll"),
         (ghc_oracle_runtime_callback_arity, "cases", "runtime_callback_arity.mll"),
+        (ghc_oracle_library_traversals_deep, "cases", "library_traversals_deep.mll"),
+        (ghc_oracle_library_traversals_lazy, "cases", "library_traversals_lazy.mll"),
         (ghc_oracle_let_seq_pure_function, "cases", "let_seq_pure_function.mll"),
         (ghc_oracle_integer_smallpath_bounds, "cases", "integer_smallpath_bounds.mll"),
         (ghc_oracle_integer_bigdiv, "cases", "integer_bigdiv.mll"),

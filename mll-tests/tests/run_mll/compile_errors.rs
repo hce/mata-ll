@@ -4321,10 +4321,13 @@ fn prelude_same_type_duplicate_definition_rejected() {
     // (This used `sum :: [Int] -> Int` before sum was generalized to
     // `Foldable t => t Int -> Int`; the monomorphic signature is now a
     // DIFFERENT type, i.e. an allowed user-wins redefinition — see the test
-    // below — so the exact-duplicate case is probed with `reverse` instead.)
-    expect_compile_error("reverse :: [a] -> [a]\nreverse xs = xs\n\nmain :: IO ()\nmain = print (reverse [1, 2, 3])\n", &[], &[
-        "'reverse' is already provided by the Prelude and cannot be redefined",
-        "same type as the Prelude's 'reverse'",
+    // below — so the exact-duplicate case was probed with `reverse`; since the
+    // Prelude's list traversals use `reverse` themselves it takes the
+    // load-bearing branch above, and the probe is `last`, a Prelude function
+    // no Prelude code refers to.)
+    expect_compile_error("last :: [a] -> a\nlast xs = head xs\n\nmain :: IO ()\nmain = print (last [1, 2, 3])\n", &[], &[
+        "'last' is already provided by the Prelude and cannot be redefined",
+        "same type as the Prelude's 'last'",
     ]);
 }
 

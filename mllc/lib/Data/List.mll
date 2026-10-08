@@ -61,10 +61,22 @@ intersperse sep (x:xs) = x : sep : intersperse sep xs
 intercalate :: [a] -> [[a]] -> [a]
 intercalate sep xs = concat (intersperse sep xs)
 
+-- GHC's partition is a foldr whose step decides `p x` and passes the
+-- other component through lazily (`~(ts, fs)`); each component is then
+-- `filter` of the list by the shared decisions. Here the two components
+-- are those filters over the list tagged with its decisions (`p` runs once
+-- per element and both sides share the result), so each side is walked
+-- in constant stack however long a run of elements goes to the other
+-- side; the pass-through selector chain of the literal foldr would be
+-- forced one nested call per such element. The pair itself is defined
+-- exactly when GHC's is: on the list's first cell and its decision.
 partition :: (a -> Bool) -> [a] -> ([a], [a])
-partition _ [] = ([], [])
-partition p (x:xs) = case partition p xs of
-    (yes, no) -> if p x then (x : yes, no) else (yes, x : no)
+partition p xs = case tagged of
+    [] -> ([], [])
+    ((b, _) : _) -> seq b (pick True, pick False)
+  where
+    tagged = map (\x -> (p x, x)) xs
+    pick want = map snd (filter (\t -> fst t == want) tagged)
 
 unfoldr :: (b -> Maybe (a, b)) -> b -> [a]
 unfoldr f b = case f b of

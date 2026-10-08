@@ -1464,7 +1464,11 @@ Foldable (including user instances). `toList` lives in
 `Traversable` (method `traverse`; superclasses `Functor` and
 `Foldable`; the same three instances) provides applicative traversal,
 with `sequenceA` defined over it. `Applicative` additionally carries
-`liftA2` as a real method (as in GHC). User types join all three
+`liftA2` as a real method (as in GHC), and `list_traverse :: (a -> f b)
+-> [a] -> f [b]`, the list instance of `traverse` selected by the
+applicative's type: GHC's `foldr`/`liftA2` definition by default, an
+accumulating loop that runs in constant stack at IO, LuaIO, ST, Maybe
+and Either (not a GHC method; a user instance need not define it). User types join all three
 classes with ordinary `instance` declarations:
 
     data Tree a = Leaf | Node (Tree a) a (Tree a)

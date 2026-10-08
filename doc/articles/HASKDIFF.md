@@ -60,7 +60,17 @@ value built lazily inside `return` wants `` x `seq` return x `` (GHC's
 completion. The Prelude's own folds do not leak: `length`, `sum`,
 `product`, `maximum` and `minimum` are strict left folds (the Foldable
 `foldl'` method), as in GHC, so they complete on lists of any length the
-heap can hold.
+heap can hold, and the traversals GHC runs without a deep stack
+(`mapM`, `elem`, `concat`, ...; see "Foldable and Traversable are
+narrower than GHC's") do so here too.
+
+The same fixed stack has a second face: a function that returns a
+suspended argument (`foldr (\x r -> if p x then True else r)`, a `>>`
+that returns its second action) forces it from inside its own frame, so
+a chain of such returns nests one force per step where GHC enters the
+thunk as a tail call. User code written that way overflows on a long
+list; walk the list with a self tail call (`go (x:xs) = if p x then
+True else go xs`) instead, as the Prelude does.
 
 ## Strings and ByteStrings
 
@@ -690,6 +700,18 @@ generic over them, as in GHC. The differences:
 - **`and`/`or`/`any`/`all`/`concat`/`concatMap` are Foldable-generic**,
   as in GHC, short-circuiting included (`any (> 3) [1 ..]` and
   `or (repeat True)` terminate).
+- **The library traversals run in bounded Lua stack on long lists**:
+  `mapM`/`traverse`/`sequence`/`forM` (at IO, Maybe and Either),
+  `mapM_`/`sequence_`/`forM_`, `and`/`or`/`any`/`all`/`elem`/`notElem`,
+  `concat`/`concatMap` (and so list comprehensions), `foldMap`/`mconcat`
+  at lists and String, `unzip`/`unzip3`/`partition`/`scanr`/`scanr1`
+  (each walked spine), and `Data.Set.fromList`/`union` complete at a
+  million elements on Lua 5.5 and LuaJIT, with GHC's laziness. The list
+  `traverse` dispatches on its applicative through an extra
+  `Applicative` method, `list_traverse` (GHC's `foldr`/`liftA2`
+  definition by default; an accumulating loop at IO, LuaIO, ST, Maybe
+  and Either, where the two coincide), so a user applicative keeps GHC's
+  definition and its laziness. The name is taken by the Prelude.
 - **A fold over `Either` needs the `Left` type determined.**
   `length (Right 1)` is an ambiguity error (monomorphization must pin
   the instance's type); annotate:

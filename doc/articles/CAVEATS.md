@@ -237,8 +237,9 @@ misfire at run time even though GHC accepts it. Direct `<*>` chains in
 do-blocks are compiled specially and work; the caveat applies to
 `Applicative f =>`-generic bodies instantiated at IO. Write such code with
 `liftA2` (a real Applicative method here, as in GHC), which keeps only
-fully-applied values in the container — the Prelude's `traverse` is built on
-it for exactly this reason.
+fully-applied values in the container — the Prelude's list `traverse` is
+built on it (outside the applicatives that override it with a loop) for
+exactly this reason.
 
 ## Lazy evaluation can cause space leaks
 

@@ -36,21 +36,20 @@ size = hmSize
 null :: Set a -> Bool
 null s = hmSize s == 0
 
+-- One pass over the list into the runtime's map builder (Data.Map's
+-- fromList): constant stack at any length, like containers' strict fold.
 fromList :: Hashable a => [a] -> Set a
-fromList [] = hmEmpty
-fromList (x : xs) = insert x (fromList xs)
+fromList xs = hmFromList (map (\x -> (x, True)) xs)
 
 -- Ascending element order (scalars natively, structural elements by the
 -- A16 compare).
 toList :: Set a -> [a]
 toList s = hmKeys s
 
+-- The elements of s1 inserted into s2 by a strict left fold, one tail
+-- call per element.
 union :: Hashable a => Set a -> Set a -> Set a
-union s1 s2 = unionGo (toList s1) s2
-
-unionGo :: Hashable a => [a] -> Set a -> Set a
-unionGo [] s = s
-unionGo (x : xs) s = insert x (unionGo xs s)
+union s1 s2 = foldl' (\s x -> insert x s) s2 (toList s1)
 
 -- intersection/difference probe the second set per element (a hash
 -- lookup), O(n) overall — the Data.Map F15 discipline.
