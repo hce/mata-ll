@@ -183,7 +183,19 @@ fn hoist_from_loop(
         if *budget == 0 {
             return;
         }
-        let Expr::Func(params, fb) = e else { unreachable!("collect offers literals only") };
+        // The offered node is the literal, or the `Paren` the emitter put
+        // around a literal it calls or indexes at once (`(function … end)
+        // (d).show`): that paren exists for the literal and is replaced
+        // with it — a parenthesized NAME is redundant in every position,
+        // and the paren pass ran before this one (`(_h0)(d)` survived).
+        let (params, fb) = match e {
+            Expr::Func(params, fb) => (params, fb),
+            Expr::Paren(inner) => match inner.as_mut() {
+                Expr::Func(params, fb) => (params, fb),
+                _ => unreachable!("collect offers literals only"),
+            },
+            _ => unreachable!("collect offers literals only"),
+        };
         let free = free_names_func(params, fb.stmts());
         if !free.is_disjoint(&bound) {
             return;
@@ -191,7 +203,10 @@ fn hoist_from_loop(
         let name = fresh_h(used);
         used.insert(name.clone());
         *budget -= 1;
-        let lit = std::mem::replace(e, Expr::Name(name.clone()));
+        let lit = match std::mem::replace(e, Expr::Name(name.clone())) {
+            Expr::Paren(inner) => *inner,
+            lit => lit,
+        };
         hoisted.push(Stmt::Local(vec![name], Some(lit)));
     });
     hoisted
@@ -230,7 +245,12 @@ fn collect_block(stmts: &mut [Stmt], f: &mut impl FnMut(&mut Expr)) {
 }
 
 fn collect_expr(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
-    if matches!(e, Expr::Func(..)) {
+    let literal = match e {
+        Expr::Func(..) => true,
+        Expr::Paren(inner) => matches!(inner.as_ref(), Expr::Func(..)),
+        _ => false,
+    };
+    if literal {
         f(e);
         return;
     }
@@ -474,6 +494,19 @@ mod tests {
         let hoist_at = out.find("local _h0").unwrap();
         let loop_at = out.find("while true do").unwrap();
         assert!(hoist_at < loop_at, "hoist must precede the loop: {out}");
+    }
+
+    #[test]
+    fn parenthesized_literal_hoists_without_its_paren() {
+        // `(function … end)(x)` — a literal called at once is emitted in
+        // parens; the hoist takes the paren with the literal, since the
+        // paren pass has already run and `(_h0)(x)` would be the redundant
+        // paren it exists to remove.
+        let call = Expr::call(Expr::paren(lit_calling("x")), vec![Expr::name("x")]);
+        let (out, rewrote) = hoisted(loop_with_literal(call, vec![], vec![]));
+        assert!(rewrote);
+        assert!(out.contains("local _h0 = function"), "literal must hoist: {out}");
+        assert!(out.contains("return h(_h0(x))"), "use site is the bare name: {out}");
     }
 
     #[test]

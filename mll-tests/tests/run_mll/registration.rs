@@ -208,6 +208,12 @@ mll_test!(eta_padding_consumed, "eta_padding_consumed.mll");
 // G7: a first-class dict-passing reference in a DEAD generic original no
 // longer rejects the program — the diagnosis defers to DCE reachability.
 mll_test!(dict_dead_generic, "dict_dead_generic.mll");
+// T4: two constraints of one class get two dictionary parameters (named
+// by position), instead of one name that the second shadowed.
+mll_test!(dict_two_constraints_one_class, "dict_two_constraints_one_class.mll");
+// T12: the dictionary-form instance method is rewritten with the scoped
+// walk, so a binder named like a class method stays the binder.
+mll_test!(dictform_method_named_binders, "dictform_method_named_binders.mll");
 // First-class ($)/(.) sections emit real function values (the OpFunc
 // fallback wrote the operator verbatim into Lua — a syntax error); the
 // iife flattener declines vararg lambdas.

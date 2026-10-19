@@ -1343,7 +1343,12 @@ of being resolved statically. The emitted top-level call and the
 recursive call look like:
 
     showNested({ show = show_Int }, value)   -- from main
-    showNested(__dict_Show, rest)                -- the recursive call
+    showNested(__dict1_Show, rest)           -- the recursive call
+
+A function with several constraints takes one dictionary parameter per
+constraint, in declaration order, named by position and class
+(`__dict1_Show`, `__dict2_Show` for `(Show a, Show b)`), so two
+constraints of one class never share a parameter.
 
 Limitation — read this before relying on it. The dictionary is built
 from the concrete type at the outermost call site and threaded

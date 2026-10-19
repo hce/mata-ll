@@ -124,11 +124,14 @@ pub struct TFunction {
     /// function's identity (the list-pipeline fusion) resolve through
     /// this instead of parsing the mangled spelling.
     pub spec_origin: Option<String>,
-    /// Dictionary parameters for polymorphic-recursive functions
-    /// Each entry is (class_name, param_name), e.g. ("Show", "__dict_Show").
-    /// The parameter is a variable of the function's body like any other,
-    /// spelled in Lua through `sanitize_name` (a class's canonical name may
-    /// carry a module prefix: `__dict_JSON.GFields`).
+    /// Dictionary parameters of a dictionary-passing function (one per
+    /// constraint, in declaration order), each `(class_name, param_name)`:
+    /// `("Show", "__dict1_Show")`, `("Show", "__dict2_Show")` for `(Show a,
+    /// Show b)`. Minted by one function of the monomorphizer
+    /// (`dict_param_name`): the position keeps two constraints of one
+    /// class apart. The parameter is a variable of the function's body
+    /// like any other, spelled in Lua through `sanitize_name` (a class's
+    /// canonical name may carry a module prefix: `__dict1_JSON.GFields`).
     pub dict_params: Vec<(String, String)>,
     /// True only for compiler-DERIVED Eq/Ord instance methods (`eq_T`,
     /// `ord_compare__T`, `ord_lt__T`, …) from a `deriving` clause. Their

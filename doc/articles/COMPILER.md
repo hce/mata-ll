@@ -455,8 +455,10 @@ apart is done entirely in `modules.rs`, before the merge
   Lua refers to functions and constructors by slot and integer tag, a
   dictionary's fields by the methods' source names (one class per
   dictionary, `CodeGen::dict_field`); canonical names reach it only in
-  the spelling of a dictionary parameter (`__dict_` plus the class's
-  canonical name, through `sanitize_name`).
+  the spelling of a dictionary parameter (`__dict`, the constraint's
+  position, `_` and the class's canonical name — `__dict1_Show` —
+  through `sanitize_name`; one function of the monomorphizer,
+  `dict_param_name`, mints every such name).
 
 ---
 

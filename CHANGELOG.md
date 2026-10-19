@@ -44,6 +44,59 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **Two constraints of one class get two dictionary parameters in the
+  dictionary-passing fallback** (silent wrong output / crash). A
+  function the monomorphizer compiles with dictionary passing (past the
+  specialization limit, polymorphically recursive, or called at an
+  existential type) took one dictionary parameter per constraint, each
+  named `__dict_` plus the class: under `(Show a, Show b)` both were
+  `__dict_Show`, the second shadowed the first in Lua, and both `show`s
+  read the second dictionary — `both 20 () A B` printed `B/B` for GHC's
+  `A/B`, and `both 20 () (1 :: Int) "s"` crashed ("attempt to get length
+  of a number value") applying the String `show` to the Int. The
+  parameter is now named by the constraint's position and class
+  (`__dict1_Show`, `__dict2_Show`), and one function of the
+  monomorphizer mints every such name, for a dictionary-passing
+  function and for the dictionary form of a context instance's methods
+  alike (the two had their own spellings before). The per-class
+  fallback a method use takes when its variable name no longer matches
+  the signature's now picks the FIRST constraint of the class instead
+  of whichever the hash map kept. GHC-goldened case
+  `dict_two_constraints_one_class` (two and three constraints of one
+  class, two classes on one variable, a nested-only variable,
+  constraints declared in the opposite order to the parameters). Found
+  by the 2026-10 fresh-eyes review (T4).
+- **A binder named like a class method stays the binder in the
+  dictionary form of an instance method** (crash). The dictionary-form
+  copy of a context instance's method (`instance Describe a => Describe
+  (Box a)`, built when a dictionary-passing function uses the class at
+  `Box a`) was rewritten with a scope-blind walk, so a clause parameter
+  spelled like a method of the class — `describe (Box label other) =
+  describe label <> …` under a class with a `label` method — was
+  rewritten into a dictionary access of that method: "attempt to index a
+  function value (local '_arg0')" as soon as `deep 2 (5 :: Int)` reached
+  the dictionary form, where the specialized `describe (Box 1 2)` was
+  right. The rewrite now walks the clause with its binders in scope
+  (clause patterns, where-bound names and their parameters, let,
+  lambda and case binders), the discipline the dictionary-passing
+  function rewrite already followed. GHC-goldened case
+  `dictform_method_named_binders` (every binder site named after a
+  method, through the dictionary form and the specialized form). Found
+  by the 2026-10 fresh-eyes review (T12).
+- **The loop-invariant closure hoist takes the literal's parens with
+  it** (internal compiler error under the test harness; a redundant
+  paren in emitted Lua otherwise). A dictionary built and used at once
+  inside a tail loop — `(function(__cd1) return { show = … } end)(d)
+  .show(xs)`, the `[a]` dictionary of a dictionary-passing function
+  recursing over `[a]` — hoists as a loop-invariant closure, and the
+  hoist replaced only the function literal inside the parens the
+  emitter had put around it, leaving `(_h0)(d).show(xs)`. The paren
+  pass runs before the hoist, so the paren survived; the harness's
+  idempotence refutation reported it as a compiler bug on
+  `dict_two_constraints_one_class`. The hoist now replaces the
+  parenthesized literal as a whole (a parenthesized name is redundant in
+  every position). Unit test `parenthesized_literal_hoists_without_its_paren`.
+  Found while goldening T4.
 - **A GADT constructor pattern refines its index in a case alternative,
   so pattern guards on a GADT match typecheck** (rejected valid program).
   `ev :: E a -> a; ev (I n) | Just m <- Just n, m > 0 = m; ev (I n) =

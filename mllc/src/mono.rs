@@ -2519,6 +2519,52 @@ impl Monomorphizer {
         expr.for_each_child(&mut |c| Self::collect_expr_vars(c, vars));
     }
 
+    /// The name of the dictionary parameter standing for the `index`th
+    /// (1-based) constraint of a dictionary-passing function or a
+    /// dictionary-form instance method: `__dict1_Show` for a first
+    /// constraint `Show a`, `__dict2_Show` for a second `Show b`. The ONE
+    /// function that mints these names — every table that looks one up is
+    /// built from its output by `dict_param_tables`. The position is what
+    /// makes the name unique within a function: `(Show a, Show b)` once
+    /// produced two parameters both called `__dict_Show`, so the second
+    /// shadowed the first and both constraints read one dictionary (T4);
+    /// naming by class and variable would collide again on underscores
+    /// (`C_x y` against `C x_y`) and on two compound constraints of one
+    /// class (`GEncode (Rep a)`, whose `type_var` is an inert placeholder
+    /// anyway). The `__` prefix is the compiler's reserved namespace (the
+    /// lexer refuses it in source), so no program binder can capture a
+    /// dictionary parameter; the Lua spelling goes through `sanitize_name`
+    /// like any other variable of the body.
+    fn dict_param_name(index: usize, c: &TyConstraint) -> String {
+        format!("__dict{}_{}", index, c.class_name)
+    }
+
+    /// The three views of a constraint list's dictionary parameters, all
+    /// minted by `dict_param_name` in declaration order: the ordered
+    /// `(class, parameter)` pairs (`TFunction::dict_params`, the call
+    /// convention), the per-class fallback `class -> parameter` (the FIRST
+    /// constraint of the class, for a method use whose variable name the
+    /// body no longer matches), and the precise `(class, variable) ->
+    /// parameter` map a method use at exactly that variable resolves
+    /// through.
+    #[allow(clippy::type_complexity)]
+    fn dict_param_tables(
+        constraints: &[TyConstraint],
+    ) -> (Vec<(String, String)>, HashMap<String, String>, HashMap<(String, String), String>) {
+        let dict_params: Vec<(String, String)> = constraints.iter().enumerate()
+            .map(|(i, c)| (c.class_name.clone(), Self::dict_param_name(i + 1, c)))
+            .collect();
+        let mut class_to_dict: HashMap<String, String> = HashMap::new();
+        for (cls, param) in &dict_params {
+            class_to_dict.entry(cls.clone()).or_insert_with(|| param.clone());
+        }
+        let env: HashMap<(String, String), String> = constraints.iter()
+            .zip(dict_params.iter())
+            .map(|(c, (_, p))| ((c.class_name.clone(), c.type_var.clone()), p.clone()))
+            .collect();
+        (dict_params, class_to_dict, env)
+    }
+
     /// Rewrite a function to use dictionary-passing.
     fn rewrite_dict_passing_fn(&mut self, func: &mut TFunction) {
         let constraints = match self.fn_constraints.get(&func.name) {
@@ -2537,22 +2583,8 @@ impl Monomorphizer {
             self.in_dictform = saved_in_dictform;
             func.clauses = fresh.clauses;
         }
-        let dict_params: Vec<(String, String)> = constraints.iter().map(|c| {
-            (c.class_name.clone(), format!("__dict_{}", c.class_name))
-        }).collect();
+        let (dict_params, class_to_dict, env) = Self::dict_param_tables(&constraints);
         func.dict_params = dict_params.clone();
-
-        let class_to_dict: HashMap<String, String> = dict_params.iter()
-            .map(|(cls, param)| (cls.clone(), param.clone()))
-            .collect();
-        // The precise map: which (class, constrained VARIABLE) each
-        // dictionary parameter stands for, so a method use whose class
-        // variable is bound to that exact variable takes the parameter and
-        // anything else builds a dictionary.
-        let env: HashMap<(String, String), String> = constraints.iter()
-            .zip(dict_params.iter())
-            .map(|(c, (_, p))| ((c.class_name.clone(), c.type_var.clone()), p.clone()))
-            .collect();
 
         // The (class, argument type, parameter) triples for COMPOUND-constraint
         // routing: pair each constraint's structured argument (parallel, by
@@ -3928,16 +3960,7 @@ impl Monomorphizer {
         // instance) builds this same dictionary recursively.
         self.dictform_impls.insert(key.clone(), names.clone());
 
-        let dict_params: Vec<(String, String)> = ctx.iter()
-            .map(|c| (c.class_name.clone(), format!("__dictf_{}_{}", c.class_name, c.type_var)))
-            .collect();
-        let class_to_dict: HashMap<String, String> = dict_params.iter()
-            .map(|(cls, p)| (cls.clone(), p.clone()))
-            .collect();
-        let env: HashMap<(String, String), String> = ctx.iter()
-            .zip(dict_params.iter())
-            .map(|(c, (_, p))| ((c.class_name.clone(), c.type_var.clone()), p.clone()))
-            .collect();
+        let (dict_params, class_to_dict, env) = Self::dict_param_tables(&ctx);
 
         // The dictform's own dictionary parameters are current while its
         // bodies are rewritten — BOTH routing tables: the plain per-class
@@ -3970,8 +3993,14 @@ impl Monomorphizer {
             self.in_dictform = saved_in_dictform;
             f.dict_params = dict_params.clone();
             f.specialized = true;
+            // The SCOPED walk: a clause binder named like a method of the
+            // class (`describe (Box label other) = …` under a class with a
+            // `label` method) is that binder, not a dictionary access —
+            // the same discipline as `rewrite_dict_passing_fn` (T12).
             for clause in f.clauses.iter_mut() {
-                clause.map_exprs(&mut |e| self.rewrite_dict_expr(e, "", &class_to_dict, &env));
+                self.map_clause_exprs_scoped(clause, &mut |m, e| {
+                    m.rewrite_dict_expr(e, "", &class_to_dict, &env)
+                });
             }
             self.generated.push(f);
         }

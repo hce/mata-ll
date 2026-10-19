@@ -741,7 +741,7 @@ mod tests {
         for (name, lua_name) in [
             ("x", "x"), ("go'", "go_prime"), ("x''", "x_prime_prime"), ("fooBar_1", "fooBar_1"),
             ("_acc", "_usr_acc"), ("_", "_usr_"), ("__lam0", "__lam0"),
-            ("__local_error", "__local_error"), ("__dict_Show", "__dict_Show"),
+            ("__local_error", "__local_error"), ("__dict1_Show", "__dict1_Show"),
             ("end", "end_"), ("end_", "end__"), ("function", "function_"),
             ("<+>", "_usr_lt__plus__gt_"), ("==", "_usr_eq__eq_"), (">>=", "_usr_gt__gt__eq_"),
             ("Just", "Just"), ("map", "map"), ("not", "not_"), ("foldl'", "foldl_prime"),
