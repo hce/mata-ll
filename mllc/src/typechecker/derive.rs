@@ -78,6 +78,62 @@ impl Checker {
         );
     }
 
+    /// The context of a derived instance of `class` at `T a b …` — GHC's
+    /// rule: the instance wants `class` at every field type, which for a
+    /// field over a parameter (`a`, `[a]`, `Maybe a`) simplifies to
+    /// `class v`; so `class v` for each type parameter that occurs in a
+    /// field type, in parameter order, and nothing for a phantom parameter
+    /// (`data Tagged t = Tagged Int` at `Tagged Meters` needs no `Show
+    /// Meters`). The one rule for what a derived instance demands: the
+    /// solver reads it like a written context (`instance_context_demands`)
+    /// and the monomorphizer builds the instance's dictionary form from it.
+    fn derived_context(
+        &self,
+        class: &str,
+        type_vars: &[String],
+        constructors: &[Constructor],
+    ) -> Vec<TyConstraint> {
+        let field_tys: Vec<Ty> = constructors.iter()
+            .flat_map(|c| self.derived_field_tys(c))
+            .collect();
+        type_vars.iter()
+            .filter(|v| field_tys.iter().any(|t| Self::ty_mentions_var(t, v)))
+            .map(|v| TyConstraint { class_name: class.to_string(), type_var: v.clone() })
+            .collect()
+    }
+
+    /// Register a derived instance with its context, and the context as the
+    /// declared function context (`fn_contexts`) of each of its method
+    /// functions — the record a written instance's methods get from
+    /// `check_instance`, and what the monomorphizer's dictionary-passing
+    /// fallback builds a method's dictionary parameters from when the
+    /// method itself passes the specialization limit (T2).
+    fn register_derived_instance(
+        &mut self,
+        class_name: String,
+        target_type: Ty,
+        method_fns: HashMap<String, String>,
+        context: Vec<TyConstraint>,
+    ) {
+        if !context.is_empty() {
+            let declared: Vec<(String, Ty)> = context.iter().map(|c| (
+                c.class_name.clone(),
+                Ty::Var(TyVar { name: c.type_var.clone(), id: u32::MAX }),
+            )).collect();
+            for mangled in method_fns.values() {
+                self.fn_contexts.insert(mangled.clone(),
+                    FnContext { declared: declared.clone(), ..FnContext::default() });
+            }
+        }
+        self.register_instance(InstanceInfo {
+            class_name,
+            target_type,
+            method_fns,
+            context: Some(context),
+            derived: true,
+        });
+    }
+
     /// The registered field types of a constructor — the arity every
     /// derive walks and the types it matches on. Read from the constructor
     /// registry, NOT from the parser's `Constructor::fields`: that list is
@@ -447,12 +503,8 @@ impl Checker {
         let mut method_fns = HashMap::new();
         method_fns.insert("show".to_string(), mangled.clone());
         method_fns.insert("showsPrec".to_string(), shows_prec_mangled);
-        self.register_instance(InstanceInfo {
-            class_name: "Show".to_string(),
-            target_type: result_type.clone(),
-            method_fns,
-            context: None,
-        });
+        let context = self.derived_context("Show", type_vars, constructors);
+        self.register_derived_instance("Show".to_string(), result_type.clone(), method_fns, context);
 
         vec![TFunction {
             name: mangled,
@@ -609,12 +661,8 @@ impl Checker {
         let mut method_fns = HashMap::new();
         method_fns.insert("==".to_string(), mangled.clone());
         method_fns.insert("/=".to_string(), ne_mangled);
-        self.register_instance(InstanceInfo {
-            class_name: "Eq".to_string(),
-            target_type: result_type.clone(),
-            method_fns,
-            context: None,
-        });
+        let context = self.derived_context("Eq", type_vars, constructors);
+        self.register_derived_instance("Eq".to_string(), result_type.clone(), method_fns, context);
 
         vec![TFunction {
             name: mangled,
@@ -811,12 +859,19 @@ impl Checker {
                 // Non-enum: derive each relational op from `compare` so the
                 // lexicographic field ordering above is the single source of
                 // truth:  a < b = case compare a b of { LT -> True; _ -> False }
+                // The CLASS METHOD `compare` at this type, as GHC's default
+                // bodies spell it, not the mangled `compare` function by
+                // name: method dispatch resolves it to that function (and
+                // its specialization) on the specialized path, and the
+                // dictionary form of this instance reads it from the
+                // instance's own composed dictionary — a direct call by
+                // name would reach the unspecialized original there.
                 let cmp_call = TExpr::new(
                     TExprKind::App(
                         Box::new(TExpr::new(
                             TExprKind::App(
                                 Box::new(TExpr::new(
-                                    TExprKind::Var(compare_name.clone()),
+                                    TExprKind::Var("compare".into()),
                                     compare_fn_ty.clone(),
                                 )),
                                 Box::new(TExpr::new(TExprKind::Var("_a".into()), result_type.clone())),
@@ -888,7 +943,8 @@ impl Checker {
         //   max x y = if x <= y then y else x   -- tie: SECOND argument
         //   min x y = if x <= y then x else y   -- tie: FIRST argument
         // which in Ordering terms is: max is `_a` exactly on GT, min is `_b`
-        // exactly on GT.
+        // exactly on GT. The class method `compare`, as for the relational
+        // ops above.
         let sel_ty = Ty::fun(&[result_type.clone(), result_type.clone()], result_type.clone());
         for (method, on_gt, otherwise) in &[("max", "_a", "_b"), ("min", "_b", "_a")] {
             let mangled = minted(&format!("ord_{}_", method), type_name);
@@ -897,7 +953,7 @@ impl Checker {
                     Box::new(TExpr::new(
                         TExprKind::App(
                             Box::new(TExpr::new(
-                                TExprKind::Var(compare_name.clone()),
+                                TExprKind::Var("compare".into()),
                                 compare_fn_ty.clone(),
                             )),
                             Box::new(TExpr::new(TExprKind::Var("_a".into()), result_type.clone())),
@@ -956,12 +1012,8 @@ impl Checker {
         method_fns.insert("compare".to_string(), minted("ord_compare_", type_name));
         method_fns.insert("max".to_string(), minted("ord_max_", type_name));
         method_fns.insert("min".to_string(), minted("ord_min_", type_name));
-        self.register_instance(InstanceInfo {
-            class_name: "Ord".to_string(),
-            target_type: result_type,
-            method_fns,
-            context: None,
-        });
+        let context = self.derived_context("Ord", type_vars, constructors);
+        self.register_derived_instance("Ord".to_string(), result_type, method_fns, context);
 
         functions
     }
@@ -1409,12 +1461,8 @@ impl Checker {
         method_fns.insert("enumFromThen".to_string(), enum_from_then_name);
         method_fns.insert("enumFromTo".to_string(), enum_from_to_name);
         method_fns.insert("enumFromThenTo".to_string(), enum_from_then_to_name);
-        self.register_instance(InstanceInfo {
-            class_name: "Enum".to_string(),
-            target_type: result_type,
-            method_fns,
-            context: None,
-        });
+        // An enumeration has no fields, so the derived context is empty.
+        self.register_derived_instance("Enum".to_string(), result_type, method_fns, vec![]);
 
         functions
     }
@@ -1422,7 +1470,7 @@ impl Checker {
     pub(super) fn derive_bounded(
         &mut self,
         type_name: &str,
-        _type_vars: &[String],
+        type_vars: &[String],
         constructors: &[Constructor],
     ) -> Vec<TFunction> {
         let is_enum = constructors.iter().all(|c| self.derived_is_nullary(c));
@@ -1434,7 +1482,12 @@ impl Checker {
             let con = &constructors[0];
             let field_tys = self.derived_field_tys(con);
             let con_key = con.name.clone();
-            let result_type = Ty::Con(type_name.to_string());
+            // The instance is `Bounded a => Bounded (P a)`: the methods
+            // are typed at `P a` so a use at `P Bool` specializes each
+            // field's `minBound`/`maxBound` at Bool (typed at the bare
+            // `P`, they were monomorphic and the field methods fell to
+            // the runtime's generic nil — `P Nothing Nothing`).
+            let (_, result_type) = Self::data_result_type(type_name, type_vars);
             let mut functions = Vec::new();
             for (method, mangled) in [("minBound", minted("minBound", type_name)),
                                       ("maxBound", minted("maxBound", type_name))] {
@@ -1469,12 +1522,8 @@ impl Checker {
             let mut method_fns = HashMap::new();
             method_fns.insert("minBound".to_string(), minted("minBound", type_name));
             method_fns.insert("maxBound".to_string(), minted("maxBound", type_name));
-            self.register_instance(InstanceInfo {
-                class_name: "Bounded".to_string(),
-                target_type: Ty::Con(type_name.to_string()),
-                method_fns,
-                context: None,
-            });
+            let context = self.derived_context("Bounded", type_vars, constructors);
+            self.register_derived_instance("Bounded".to_string(), result_type, method_fns, context);
             return functions;
         }
         if !is_enum || constructors.is_empty() {
@@ -1532,12 +1581,8 @@ impl Checker {
         let mut method_fns = HashMap::new();
         method_fns.insert("minBound".to_string(), min_name);
         method_fns.insert("maxBound".to_string(), max_name);
-        self.register_instance(InstanceInfo {
-            class_name: "Bounded".to_string(),
-            target_type: result_type,
-            method_fns,
-            context: None,
-        });
+        // An enumeration has no fields, so the derived context is empty.
+        self.register_derived_instance("Bounded".to_string(), result_type, method_fns, vec![]);
 
         functions
     }
@@ -1903,12 +1948,12 @@ impl Checker {
         let mut method_fns = HashMap::new();
         method_fns.insert("fmap".to_string(), mangled.clone());
         method_fns.insert("<$>".to_string(), mangled.clone());
-        self.register_instance(InstanceInfo {
-            class_name: "Functor".to_string(),
-            target_type: Ty::Con(type_name.to_string()),
-            method_fns,
-            context: None,
-        });
+        // `instance Functor (T b …)`: the mapped parameter is not in the
+        // head, and the other parameters are carried through unchanged by
+        // the derived fmap (a field `f a` over a parameter `f` is not
+        // mappable here), so the context is empty — not `Functor b` for
+        // every parameter, which the structural rule would have asked.
+        self.register_derived_instance("Functor".to_string(), Ty::Con(type_name.to_string()), method_fns, vec![]);
 
         vec![TFunction {
             name: mangled,
@@ -2086,15 +2131,15 @@ impl Checker {
         out_fns.push(self.meta_string_fn(&dt_fn, self.source_name(type_name)));
         out_fns.push(self.meta_int_fn(&dc_fn, constructors.len() as i64));
         let gmethod = |checker: &Self, n: &str| checker.library_value("Data.Generics", n);
-        self.register_instance(InstanceInfo {
-            class_name: self.library_class("Data.Generics", "Datatype"),
-            target_type: Ty::Con(d_marker.clone()),
-            method_fns: HashMap::from([
+        self.register_derived_instance(
+            self.library_class("Data.Generics", "Datatype"),
+            Ty::Con(d_marker.clone()),
+            HashMap::from([
                 (gmethod(self, "datatypeName"), dt_fn),
                 (gmethod(self, "datatypeConCount"), dc_fn),
             ]),
-            context: None,
-        });
+            vec![],
+        );
 
         // Per constructor: gather field info, meta markers, and the C1 rep type.
         struct ConRep { rep_ty: Ty, field_tys: Vec<Ty>, con_key: String,
@@ -2124,16 +2169,16 @@ impl Checker {
             out_fns.push(self.meta_string_fn(&cn_fn, &self.con_tag(con)));
             out_fns.push(self.meta_int_fn(&ca_fn, arity as i64));
             out_fns.push(self.meta_bool_fn(&cr_fn, is_record));
-            self.register_instance(InstanceInfo {
-                class_name: self.library_class("Data.Generics", "Constructor"),
-                target_type: Ty::Con(c_marker.clone()),
-                method_fns: HashMap::from([
+            self.register_derived_instance(
+                self.library_class("Data.Generics", "Constructor"),
+                Ty::Con(c_marker.clone()),
+                HashMap::from([
                     (gmethod(self, "conName"), cn_fn),
                     (gmethod(self, "conArity"), ca_fn),
                     (gmethod(self, "conIsRecord"), cr_fn),
                 ]),
-                context: None,
-            });
+                vec![],
+            );
 
             // Selector metadata markers + instances, and each field's S1(K1 t).
             let mut s_markers = Vec::new();
@@ -2143,12 +2188,12 @@ impl Checker {
                 self.register_meta_type(&s_marker);
                 let sn_fn = meta_name("__meta_selName", &[type_name, &con.name, &fi.to_string()]);
                 out_fns.push(self.meta_string_fn(&sn_fn, &field_names[fi]));
-                self.register_instance(InstanceInfo {
-                    class_name: self.library_class("Data.Generics", "Selector"),
-                    target_type: Ty::Con(s_marker.clone()),
-                    method_fns: HashMap::from([(gmethod(self, "selName"), sn_fn)]),
-                    context: None,
-                });
+                self.register_derived_instance(
+                    self.library_class("Data.Generics", "Selector"),
+                    Ty::Con(s_marker.clone()),
+                    HashMap::from([(gmethod(self, "selName"), sn_fn)]),
+                    vec![],
+                );
                 field_reps.push(s1_t(Ty::Con(s_marker.clone()), k1_t(fty.clone())));
                 s_markers.push(s_marker);
             }
@@ -2266,15 +2311,17 @@ impl Checker {
             clauses: to_clauses, specialized: false, spec_origin: None,
             dict_params: vec![], derived_strict: false,
         });
-        self.register_instance(InstanceInfo {
-            class_name: self.library_class("Data.Generics", "Generic"),
-            target_type: result_type,
-            method_fns: HashMap::from([
+        // `Generic (T a)` has no context: from/to move the fields as they
+        // are.
+        self.register_derived_instance(
+            self.library_class("Data.Generics", "Generic"),
+            result_type,
+            HashMap::from([
                 (gmethod(self, "from"), from_fn),
                 (gmethod(self, "to"), to_fn),
             ]),
-            context: None,
-        });
+            vec![],
+        );
 
         out_fns
     }
@@ -3119,12 +3166,10 @@ impl Checker {
         let mut method_fns = HashMap::new();
         method_fns.insert(self.library_value("JSON", "fromJSON"), mangled.clone());
         method_fns.insert(self.library_value("JSON", "fromJSONField"), field_fn.clone());
-        self.register_instance(InstanceInfo {
-            class_name: self.library_class("JSON", "FromJSON"),
-            target_type: result_ty.clone(),
-            method_fns,
-            context: None,
-        });
+        // A codec derives for a type without parameters only
+        // (`json_derive_preamble`), so the context is empty.
+        self.register_derived_instance(
+            self.library_class("JSON", "FromJSON"), result_ty.clone(), method_fns, vec![]);
 
         vec![TFunction {
             name: mangled,
@@ -3352,12 +3397,10 @@ impl Checker {
         // Register the instance
         let mut method_fns = HashMap::new();
         method_fns.insert(self.library_value("JSON", "toJSON"), mangled.clone());
-        self.register_instance(InstanceInfo {
-            class_name: self.library_class("JSON", "ToJSON"),
-            target_type: result_ty.clone(),
-            method_fns,
-            context: None,
-        });
+        // A codec derives for a type without parameters only
+        // (`json_derive_preamble`), so the context is empty.
+        self.register_derived_instance(
+            self.library_class("JSON", "ToJSON"), result_ty.clone(), method_fns, vec![]);
 
         vec![TFunction {
             name: mangled,

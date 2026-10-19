@@ -167,6 +167,7 @@ impl Checker {
                 .map(|(m, f)| (m.as_ref().to_string(), f.as_ref().to_string()))
                 .collect(),
             context,
+            derived: false,
         });
     }
 

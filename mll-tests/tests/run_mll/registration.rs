@@ -218,6 +218,11 @@ mll_test!(dictform_method_named_binders, "dictform_method_named_binders.mll");
 // the declared context, so `==` under `Ord a` (and `show` under a class
 // with a Show superclass, fmap/pure under Monad) reads a dictionary.
 mll_test!(dict_superclass_closure, "dict_superclass_closure.mll");
+// T2: a derived instance of a parameterized type records GHC's derived
+// context and has a dictionary form, so it stays correct past the
+// specialization limit and inside dictionary-passing bodies; a phantom
+// parameter demands no instance.
+mll_test!(derived_dictform, "derived_dictform.mll");
 // First-class ($)/(.) sections emit real function values (the OpFunc
 // fallback wrote the operator verbatim into Lua — a syntax error); the
 // iife flattener declines vararg lambdas.

@@ -314,10 +314,9 @@ impl Monomorphizer {
                 class_methods.insert(method_name.clone());
                 instance_methods.insert((method_name.clone(), head.clone()), mangled.clone());
                 if mangled != method_name {
-                    // context: None marks builtin/derived registrations —
-                    // for a data type that means the deriving clause, which
-                    // is where the user can act on the error.
-                    let phrase = if inst.context.is_none() {
+                    // A derived instance comes from the deriving clause,
+                    // which is where the user can act on the error.
+                    let phrase = if inst.derived {
                         format!(
                             "the derived {} instance for '{}' (from its deriving clause)",
                             class_name, inst.target_type

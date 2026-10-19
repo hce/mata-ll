@@ -519,9 +519,13 @@ dictionary-passing form carries every dictionary the declared context
 entails, superclasses included — but pays a runtime dictionary
 indirection where the first 16 got fully specialised code. The fallback
 is a second implementation of method dispatch; its known remaining
-gaps (derived instances of parameterized types, operators and first-class
-operators at a still-polymorphic structured type, prefix negation) are
-tracked as open defects, not documented deviations.
+gaps (operators and first-class operators at a still-polymorphic
+structured type, prefix negation) are tracked as open defects, not
+documented deviations. A derived instance of a parameterized type takes
+part like a written one: `deriving` records GHC's derived context (the
+class at each parameter that occurs in a field, nothing for a phantom
+parameter), and the fallback composes the instance's dictionary from
+it.
 
 ## An import alias that names a data constructor loses its qualified form
 

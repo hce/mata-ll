@@ -406,14 +406,21 @@ pub struct InstanceInfo {
     pub target_type: Ty,
     /// Method name -> mangled function name
     pub method_fns: HashMap<String, String>,
-    /// The instance's declared context, over the same type-variable names as
+    /// The instance's context, over the same type-variable names as
     /// `target_type`: `instance (Show a, Eq a) => C (T a)` stores
-    /// [Show a, Eq a]. `Some(ctx)` (user-written instances) is exact — a use
-    /// of the instance at a concrete type must satisfy exactly these
-    /// constraints, an empty context requiring nothing. `None` (builtin and
-    /// derived instances, which have no declared context) falls back to the
-    /// structural rule: every type argument needs the class itself.
+    /// [Show a, Eq a]. `Some(ctx)` is exact — a use of the instance at a
+    /// concrete type must satisfy exactly these constraints, an empty
+    /// context requiring nothing. A user-written instance stores what it
+    /// declared; a derived instance stores GHC's derived context, `C v` for
+    /// each type parameter that occurs in a field type (`derived_context`),
+    /// so a phantom parameter demands nothing (T2). `None` (builtin
+    /// instances registered without one) falls back to the structural rule:
+    /// every type argument needs the class itself.
     pub context: Option<Vec<TyConstraint>>,
+    /// True for an instance a `deriving` clause produced — the phrase a
+    /// diagnostic uses to point the user at the clause (the context no
+    /// longer tells a derived instance from a written one).
+    pub derived: bool,
 }
 
 /// The declared class context of one function, across the variable-naming
@@ -1705,6 +1712,7 @@ impl Checker {
                 m
             },
             context: None,
+            derived: false,
         });
 
         // The two builtin integer types (both registered with kind Type

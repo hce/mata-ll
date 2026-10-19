@@ -155,6 +155,15 @@ Order matters because later passes depend on earlier registrations:
 - **Typeclass handling** (`typechecker/solve.rs`) — resolves which instance
   satisfies each constraint; this feeds monomorphization.
 - **Deriving** (`typechecker/derive.rs`) — auto-generates `Show`/`Eq`/etc.
+  A derived instance is registered like a written one: with GHC's derived
+  context (`derived_context` — the class at each type parameter that
+  occurs in a field type, nothing for a phantom parameter), recorded on
+  the `InstanceInfo` and as each method function's `fn_contexts` entry,
+  so the solver reads it through `instance_context_demands` and the
+  monomorphizer builds the instance's dictionary form from it exactly as
+  for `instance Show a => Show (Box a)`. Builtin instances registered
+  without a context (`context: None`) keep the structural rule (every
+  type argument needs the class).
 
 ---
 

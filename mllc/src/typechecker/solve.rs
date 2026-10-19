@@ -185,11 +185,14 @@ impl Checker {
                     }
                     // Other type constructors need a registered instance. What
                     // the instance then demands of the type ARGUMENTS depends
-                    // on its declared context: a user-written instance carries
-                    // its exact context (`instance Show a => Show (Tree a)` at
+                    // on its context: a user-written instance carries its
+                    // exact context (`instance Show a => Show (Tree a)` at
                     // `Tree X` demands precisely `Show X`, and a context-free
-                    // one demands nothing), while builtin/derived instances
-                    // (context: None) keep the structural rule — every
+                    // one demands nothing), a derived instance GHC's derived
+                    // context (`derived_context`: the class at each parameter
+                    // that occurs in a field, nothing for a phantom one),
+                    // while a builtin instance registered without one
+                    // (context: None) keeps the structural rule — every
                     // argument needs the class itself.
                     Ty::Con(_) => {
                         // A Con head always has an InstHead; treat it as
@@ -345,8 +348,8 @@ impl Checker {
 
     /// Collect the type-variable leaves a `class ty` constraint ultimately
     /// needs an instance for (a list/tuple/Maybe of `a` needs `class a`; a
-    /// derived `T a` needs `class a`; a context instance recurses at each
-    /// bound context type). Same entailment rules as `has_instance` — both
+    /// context instance, derived or written, recurses at each bound
+    /// context type). Same entailment rules as `has_instance` — both
     /// walk `entail_step` — so the two can no longer disagree about which
     /// demands a constraint decomposes into. Only variable leaves are
     /// collected; concrete constructors are assumed resolved (they passed
@@ -643,6 +646,7 @@ impl Checker {
             target_type: target_ty,
             method_fns,
             context: Some(ctx),
+            derived: false,
         });
     }
 
@@ -815,6 +819,7 @@ impl Checker {
             target_type: target_ty.clone(),
             method_fns: HashMap::new(),
             context: Some(ctx.clone()),
+            derived: false,
         };
 
         let mut result_fns = Vec::new();

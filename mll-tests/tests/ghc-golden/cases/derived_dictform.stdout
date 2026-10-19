@@ -1,0 +1,67 @@
+Box Red
+Box [Red]
+Box [[Red]]
+Box [[[Red]]]
+Box [[[[Red]]]]
+Box [[[[[Red]]]]]
+Box [[[[[[Red]]]]]]
+Box [[[[[[[Red]]]]]]]
+Box [[[[[[[[Red]]]]]]]]
+Box [[[[[[[[[Red]]]]]]]]]
+Box [[[[[[[[[[Red]]]]]]]]]]
+Box [[[[[[[[[[[Red]]]]]]]]]]]
+Box [[[[[[[[[[[[Red]]]]]]]]]]]]
+Box [[[[[[[[[[[[[Red]]]]]]]]]]]]]
+Box [[[[[[[[[[[[[[Red]]]]]]]]]]]]]]
+Box [[[[[[[[[[[[[[[Red]]]]]]]]]]]]]]]
+Box [[[[[[[[[[[[[[[[Red]]]]]]]]]]]]]]]]
+Box [[[[[[[[[[[[[[[[[Red]]]]]]]]]]]]]]]]]
+Box ()
+Box LT
+Box (Left 1)
+Box (W 1)
+Box (Box Green)
+Box 1
+Box "s"
+Box "c"
+Box True
+Box (Just Red)
+Box Nothing
+Box (1,"x")
+Box [1,2]
+Box (Q 1 2)
+Box (True,False)
+Box (Right "r")
+Box GT
+Box (Box (W 3))
+Box (Box ())
+Box (-1)
+Box [Red,Green]
+Box (Box (Box (Box (Box (Box (Box (Box (Box (Box (Box (Box (Box (Box (Box (Box (Box (Box Red)))))))))))))))))
+(True,False,True,False)
+(True,False,True,False)
+(True,False,True,False)
+(True,False,True,False)
+(True,False,True,True)
+(LT,LT,EQ,LT)
+(EQ,LT,EQ,LT)
+(EQ,LT,EQ,LT)
+(EQ,LT,EQ,LT)
+(EQ,LT,GT,True,True,Box V5!,Box V6!)
+Box V2! EQ Box V4! Box V2!
+Box V1! GT Box V1! Box V4!
+Box 3 LT Box 4 Box 3
+Box V5! EQ Box V5! Box V5!
+Box "c" EQ Box "c" Box "c"
+Deep (Box 3)
+Deep (Box (Box 3))
+Deep (Box (Box (Box 3)))
+Deep (Box (Box (Box V3!)))
+(True,False,LT,GT)
+(L [Red,Green] (Just Red),True,LT)
+(R {rx = Box Red, ry = -1},True,GT)
+(P False False,P True True,P EA EA,P (Box True) (Box True))
+[EA,EB,EC]
+(1,EB,True,EC,GT)
+(Pair "x",True,EQ)
+(Tagged 3,True,LT,Box (Tagged 1))

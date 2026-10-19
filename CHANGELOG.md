@@ -44,6 +44,47 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A derived instance of a parameterized type has a dictionary form, and
+  a phantom parameter demands no instance** (silent wrong output / crash
+  / rejection). `deriving` registered its instance without a context,
+  and only the solver knew the rule "every type argument needs the
+  class"; the monomorphizer composes a dictionary from a parameterized
+  instance only when it has a context, so a derived `Show (Box a)` fell
+  to the generic derived function whose field methods are the
+  type-erased runtime ones. Past the specialization limit every direct
+  caller got that function: `show (Box Red)` printed `Box 1` at 18 list
+  depths (GHC: `Box Red`, `Box [Red]`, …), and with 20 unrelated element
+  types `Box ()` printed `Box Nothing`, `Box LT` printed `Box 1`, `Box
+  (Left 1)` printed `Box (1,1)`, `Box (Box Green)` printed `Box (2)`.
+  Inside a dictionary-passing body (past the limit, polymorphically
+  recursive, or called at an existential type) `show (Box x)` at a type
+  with a written Show printed `Box (2)` for GHC's `Box W2!`, `compare
+  (Box x) (Box y)` crashed on a nil `compare`, and `showDeep` over `Deep
+  (Box a)` printed `Box (3)` for `Box (Box 3)`. The same missing context
+  rejected `data Tagged t = Tagged Int deriving (Show, Eq, Ord)` at
+  `Tagged Meters` with "No instance for 'Show (Tagged Meters)'", which
+  GHC accepts (the derived context covers only the parameters that occur
+  in field types). Every derive now records GHC's derived context (`C a`
+  for each type parameter that occurs in a field type, nothing for a
+  phantom one; empty for Enum, Functor and Generic) on the instance and
+  as its method functions' declared context — the one rule, read by the
+  solver like a written context and by the monomorphizer to build the
+  instance's dictionary form, the same path `instance Show a => Show
+  (Box a)` takes. Two consequences of the same change: the derived
+  relational operators and `max`/`min` call the class method `compare`
+  (GHC's default bodies) instead of the mangled `compare` function by
+  name, so the dictionary form reads it from the composed dictionary; and
+  a derived `Bounded` of a single-constructor product is typed at the
+  applied type (`P a`, not the bare `P`), so `minBound :: P Bool` is `P
+  False False` (it printed `P Nothing Nothing`). GHC-goldened case
+  `derived_dictform` (18 depths and 20 element types through derived
+  Show, Eq and Ord past the limit; show/compare/max/min of a derived type
+  in a dictionary-passing body, at an existential type and under
+  polymorphic recursion; nested derived types, fields under a list and a
+  Maybe, a record, a phantom parameter, a derived Bounded product, a
+  parameterized derived enumeration). SPEC.md's polymorphic-recursion
+  section, HASKDIFF.md's fallback gaps and COMPILER.md describe the
+  registration. Found by the 2026-10 fresh-eyes review (T2).
 - **A superclass method used under a subclass constraint reads its
   dictionary in the dictionary-passing fallback** (silent wrong output /
   crash). A function the monomorphizer compiles with dictionary passing

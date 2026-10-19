@@ -1364,25 +1364,22 @@ and the `Eq a` dictionaries) and a constrained existential constructor
 its hidden fields. GHC stores the superclass dictionaries inside the
 subclass dictionary instead; the observable behaviour is the same.
 
-Limitation — read this before relying on it. The dictionary is built
-from the concrete type at the outermost call site and threaded
-**unchanged** through the recursion; it is *not* re-derived at the
-growing type. So every level resolves its method at the outermost
-element type. That is correct when the method is faithful at the
-deeper types anyway — the runtime `show` renders lists, tuples and
-numbers structurally, which is why the example above prints correctly
-— but it is wrong when a derived instance differs per level. With
-`data Box a = Box a deriving (Show)` and `Deep (Box a)` recursion,
-`show (Box 2)` on its own correctly prints `Box 2`, yet inside the
-polymorphic recursion the threaded `show_Int` is applied to the
-`Box` value and it prints `(2)` instead. In other words, mata-ll
-compiles and runs genuinely polymorphic-recursive code, but the
-dictionary-passing fallback does not transform the dictionary at each
-recursive type, so class methods over a growing *user* type are
-resolved incorrectly. Polymorphic recursion whose class methods stay
-faithful under the outermost dictionary (structural `show`/`==` over
-built-in containers and primitives) works; polymorphic recursion that
-needs a genuinely different instance at each depth does not.
+The dictionary is built from the concrete type at the outermost call
+site, and the recursive call rebuilds it at the grown type from the
+instance of the type's head: the `[a]` dictionary of `showNested`'s
+recursion is the list instance's methods closed over the dictionary
+the body holds, and with `data Box a = Box a deriving (Show)` and a
+`Deep (Box a)` recursion each level's dictionary is the derived
+`Show (Box a)` instance's *dictionary form* — its methods taking the
+field's `Show` dictionary as a parameter — closed over the previous
+level's, so `showDeep 2 (Deep (Box 3))` prints
+`Deep (Box (Box (Box 3)))`, as under GHC. A derived instance of a
+parameterized type records the context GHC derives for it (the class
+at each type parameter that occurs in a field type, nothing for a
+phantom parameter: `data Tagged t = Tagged Int deriving (Show)` is
+usable at `Tagged Meters` without `Show Meters`), and that context is
+what its dictionary form closes over — the same convention a written
+`instance Show a => Show (Box a)` gets.
 
 # Module and import syntax
 
