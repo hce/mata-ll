@@ -1315,6 +1315,14 @@ local undefined = __thunk(function() error("Prelude.undefined", 0) end)
 -- `error "boom"` delivers "boom" to a catcher; level 1 prefixed every
 -- caught message with THIS function's own runtime line.
 local function error_(msg) error(__force(msg), 0) end
+-- MonadFail's IO/LuaIO `fail`: an ACTION that raises GHC's IOException
+-- text when run (GHC: `fail s = ioError (userError s)`), through the same
+-- raise `error_` uses, so `try`/`catch` deliver it exactly like an
+-- `error` message. Building the action raises nothing.
+local function fail_IO(msg)
+    return function() error("user error (" .. __force(msg) .. ")", 0) end
+end
+local fail_LuaIO = fail_IO
 -- Ord `max`/`min` instance methods. GHC's defaults are
 --   max x y = if x <= y then y else x
 --   min x y = if x <= y then x else y

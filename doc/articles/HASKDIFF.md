@@ -440,6 +440,39 @@ There is no exception type hierarchy. `error` throws a string,
 `try` catches it as `Either String a`. There are no custom exception
 types, `SomeException`, `IOException`, or `catches`.
 
+## Do-bind failure is MonadFail; the exception is a string
+
+A failable pattern on the left of `<-` in a do-block (`Just x <- action`)
+desugars as in GHC (Haskell 2010 §3.14): the mismatch arm calls the
+block's monad's `fail`, the method of the Prelude's `MonadFail` class
+(`class Monad m => MonadFail m where fail :: String -> m a`). The
+instances are GHC's: `[]` drops the element, `Maybe` yields `Nothing`,
+`IO` (and the scoped `LuaIO s`) raise. A monad without an instance —
+`Either e`, `ST s`, a user monad that declares none — rejects the bind
+at compile time ("No instance for 'MonadFail (Either String)'", with a
+note explaining the rule); bind the value to a variable and `case` on
+it, or write the instance. A pattern that cannot fail — a variable, `_`,
+a tuple, `()`, an as-pattern or parentheses over such, a constructor
+pattern of a single-constructor type or a newtype whose arguments are
+irrefutable — asks nothing of the monad, exactly as GHC's
+`isIrrefutableHsPat` decides.
+
+What differs is the exception, because error handling is string-based
+(above): GHC's `fail` in IO throws an `IOException` (`userError`), which
+`show`s as `user error (Pattern match failure in 'do' block at
+FILE:LINE:COL-COL)`. mata-ll raises that same text as the string `try`
+and `catch` deliver, with the file name the compiler was given (`mll
+foo.mll` reports `foo.mll:…`; a compile from a string reports the bare
+`LINE:COL-COL`). An uncaught failure ends the program with that text, as
+under GHC. `fail "boom" :: IO a` raises `user error (boom)`, when the
+action is run, not when it is built.
+
+`MonadFail` and `fail` are Prelude names. A program that defined its
+own top-level `fail` keeps working — the module's own name is the one
+its references denote, and `import Prelude hiding (fail)` is honoured;
+the do-bind desugaring reaches the Prelude's `fail` regardless, like the
+`>>=` it also writes.
+
 ## No deriving for all classes
 
 `deriving` supports `Show`, `Eq`, `Ord`, `Enum`, `Bounded`,

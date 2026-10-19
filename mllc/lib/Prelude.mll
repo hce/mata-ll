@@ -395,6 +395,32 @@ instance Monoid [a] where
     mappend xs ys = xs ++ ys
     mconcat xss = concat xss
 
+-- The MonadFail class, as in GHC's base: what a do-block does when a
+-- failable bind pattern (`Just x <- action`) does not match. The compiler
+-- desugars such a bind to a case whose fall-through arm calls `fail` with
+-- GHC's message, so the block's monad decides what a mismatch means:
+-- the list monad drops the element, Maybe yields Nothing, IO raises. A
+-- monad without an instance (Either, ST, a user State monad) rejects
+-- the bind at compile time, exactly as under GHC. An ordinary source
+-- class like Semigroup: a user monad gets an instance by writing one.
+class Monad m => MonadFail m where
+    fail :: String -> m a
+
+instance MonadFail [] where
+    fail _ = []
+
+instance MonadFail Maybe where
+    fail _ = Nothing
+
+-- IO raises GHC's IOException text, `user error (<message>)`, when the
+-- action is RUN, not when it is built: `fail_IO` is the runtime primitive
+-- that builds the raising action, so `try`/`catch` see it like any other
+-- exception. The scoped `LuaIO s` monad has the same instance, registered
+-- by the compiler beside its Monad instance (its constructor has no bare
+-- spelling in an instance head).
+instance MonadFail IO where
+    fail msg = fail_IO msg
+
 
 
 -- Functor instances

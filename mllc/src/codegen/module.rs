@@ -41,7 +41,7 @@ pub(super) const RUNTIME_VALUE_SEEDS: &[&str] = &[
             "__force", "__thunk", "__mll_seq", "__mll_cons", "__mll_lazy_cons", "__mll_head",
             "__mll_tail", "__mll_tail_lazy", "__mll_to_lua", "__lua_to_mll", "__mll_wrap_callback", "__mll_run", "__mll_run_tail", "__mll_run_st",
             "__mll_ffi_decode",
-            "not_", "engage", "liftIO", "show", "error_",
+            "not_", "engage", "liftIO", "show", "error_", "fail_IO", "fail_LuaIO",
             "pure", "return_", "Just",
             "minBound_Int", "maxBound_Int", "minBound_Bool", "maxBound_Bool",
             "show_Int", "show_Number", "show_String", "show_Bool",

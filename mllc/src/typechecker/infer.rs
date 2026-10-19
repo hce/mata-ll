@@ -1011,13 +1011,15 @@ impl Checker {
                 // what type — "No instance for 'Show (Tree Blob)'" alone
                 // hides that the real gap is 'Show Blob'.
                 let ctx_note = self.context_failure_note(&class, &rty);
+                let fail_note = monad_fail_note(&class);
                 self.push_error_span(
                     DiagnosticKind::NoInstance { class, ty: rty },
                     format!("definition of '{}'", name),
                     span,
                 );
-                if let (Some(note), Some(diag)) = (ctx_note, self.errors.last_mut()) {
-                    diag.notes.push(note);
+                if let Some(diag) = self.errors.last_mut() {
+                    diag.notes.extend(ctx_note);
+                    diag.notes.extend(fail_note);
                 }
             } else if is_structural_monad_class(&class) {
                 // The monad-hierarchy classes are resolved structurally for IO
@@ -1077,11 +1079,15 @@ impl Checker {
                                 let name = if trimmed.is_empty() { "a" } else { trimmed };
                                 TyVar { name: name.to_string(), id: v.id }
                             });
+                        let fail_note = monad_fail_note(&rc);
                         self.push_error_span(
                             DiagnosticKind::MissingContextConstraint { class: rc, ty: Ty::Var(shown) },
                             format!("definition of '{}'", name),
                             span,
                         );
+                        if let Some(diag) = self.errors.last_mut() {
+                            diag.notes.extend(fail_note);
+                        }
                     }
                 }
             }
@@ -3307,4 +3313,21 @@ impl Checker {
             }
         }
     }
+}
+
+/// Why a program that wrote no `fail` wants `MonadFail`: the do-bind
+/// desugaring asked for it. Said on the "No instance" diagnostics for the
+/// class, where the reader otherwise sees a constraint the source never
+/// mentions.
+fn monad_fail_note(class: &str) -> Option<String> {
+    (class == "MonadFail").then(|| {
+        "a pattern that can fail to match on the left of `<-` in a do-block (`Just x <- action`) \
+         calls the monad's `fail` when it does not match (Haskell 2010 §3.14, GHC's MonadFail \
+         desugaring), and only a monad with a MonadFail instance has one — [], Maybe, IO and \
+         LuaIO do; Either, ST and a user monad without an `instance MonadFail` do not. Bind \
+         the value to a variable and match it with `case`, or give the monad a MonadFail \
+         instance. A pattern that cannot fail — a variable, a tuple, a newtype or \
+         single-constructor pattern of such — asks for nothing"
+            .to_string()
+    })
 }

@@ -978,8 +978,8 @@ The compiler may inline functions whenever deemed necessary.
 
 Pattern matching is supported for function definitions, case blocks,
 and assignments. A monadic bind `pat <- action` accepts any pattern; a
-refutable one desugars with GHC's MonadFail-style fallback ("Pattern
-match failure in do expression at line:col"). Local-binding PARAMETERS
+failable one desugars with GHC's MonadFail fallback (the block's monad's
+`fail`, see Do-notation). Local-binding PARAMETERS
 (`let f (a, b) = e`, where-bindings) accept any pattern too, and a local
 function has as many equations as a top-level one, matched top to
 bottom with the partial-function fallback past the last. What remains
@@ -1099,7 +1099,17 @@ Do should be desugared just like in haskell.
         putStrLn (show y)
 
 Desugaring: `x <- e; rest` becomes `e >>= \x -> rest`,
-bare `e; rest` becomes `e >> rest`.
+bare `e; rest` becomes `e >> rest`, and a pattern bind `p <- e; rest`
+becomes `e >>= \v -> case v of { p -> rest; _ -> fail "…" }` (Haskell
+2010 §3.14), where `fail` is the Prelude's `MonadFail` method and the
+fall-through arm is present only when `p` can fail to match (GHC's
+`isIrrefutableHsPat`: a variable, `_`, a tuple, `()`, an as-pattern, or
+a single-constructor/newtype pattern of such cannot). The message is
+GHC's, `Pattern match failure in 'do' block at FILE:SPAN`. The Prelude
+declares `class Monad m => MonadFail m where fail :: String -> m a` with
+instances for `[]` (drops), `Maybe` (`Nothing`), `IO` and the scoped
+`LuaIO s` (raise `user error (…)` when run); a monad without an instance
+rejects a failable bind at compile time.
 
 # Case expressions
 
@@ -1186,8 +1196,8 @@ A generator desugars to the Prelude's `concatMap` and a guard to an
 or imports a `concatMap` of its own, hides the Prelude's, or has a local
 variable of that name. The same holds for the other names syntax stands
 for: the `enumFrom…` methods of a range, the `&&` of a comma between
-guard conditions, the `error` of a failed pattern match, the `>>=` of a
-`do` block.
+guard conditions, the `error` of a failed pattern match, the `>>=` and
+`fail` of a `do` block.
 
 # Literals
 
@@ -1421,7 +1431,7 @@ Functions: show, putStrLn, putStr, getLine, print, (++), (<>), ($), max, min,
            length, reverse, concat, replicate, iterate, sum, product,
            fst, snd, concatMap, mapM_, when, assert, seq, getArgs,
            exit, try, catch, foldMap, maximum, minimum, mempty,
-           mappend, traverse, sequenceA, liftA2
+           mappend, traverse, sequenceA, liftA2, fail
 
     (++)  :: [a] -> [a] -> [a]              -- list append only
     (<>)  :: Semigroup a => a -> a -> a     -- string concatenation
@@ -1431,6 +1441,7 @@ Functions: show, putStrLn, putStr, getLine, print, (++), (<>), ($), max, min,
     id    :: a -> a
     flip  :: (a -> b -> c) -> b -> a -> c
     error :: String -> a
+    fail  :: MonadFail m => String -> m a  -- a failed do-bind calls it
     getLine :: IO String  -- one line from stdin, without the newline
     otherwise :: Bool  -- defined as True
     seq   :: a -> b -> b  -- explicit forcing

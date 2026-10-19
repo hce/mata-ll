@@ -139,6 +139,9 @@ pub enum WiredIn {
     And,
     /// The statement sequencing of a `do` block.
     Bind,
+    /// The fall-through of a failable pattern bind in a `do` block: the
+    /// block's monad decides what a mismatch means (`MonadFail`).
+    Fail,
 }
 
 /// What a `WiredIn::reference` spelling starts with. `<` and the space
@@ -197,7 +200,7 @@ pub fn shown(name: &str) -> std::borrow::Cow<'_, str> {
 }
 
 impl WiredIn {
-    pub const ALL: [WiredIn; 8] = [
+    pub const ALL: [WiredIn; 9] = [
         WiredIn::ConcatMap,
         WiredIn::EnumFrom,
         WiredIn::EnumFromThen,
@@ -206,6 +209,7 @@ impl WiredIn {
         WiredIn::Error,
         WiredIn::And,
         WiredIn::Bind,
+        WiredIn::Fail,
     ];
 
     /// The entity's canonical name: the name the Prelude declares it under.
@@ -219,6 +223,7 @@ impl WiredIn {
             WiredIn::Error => "error",
             WiredIn::And => "&&",
             WiredIn::Bind => ">>=",
+            WiredIn::Fail => "fail",
         }
     }
 
@@ -772,8 +777,8 @@ impl Expr {
                         sig: ld.sig,
                     }).collect(),
                 },
-                DoStmt::PatternBind { pattern, expr, span } =>
-                    DoStmt::PatternBind { pattern, expr: f(expr), span },
+                DoStmt::PatternBind { pattern, expr, span, end } =>
+                    DoStmt::PatternBind { pattern, expr: f(expr), span, end },
             }).collect()),
             Expr::Ascription(x, t) => Expr::Ascription(Box::new(f(*x)), t),
             Expr::RecordCon { constructor, fields } => Expr::RecordCon {
@@ -876,7 +881,10 @@ pub enum DoStmt {
     /// `(a, b) <- expr` (pattern bind). A `let (a, b) = expr` statement is
     /// NOT a variant of its own: the parser desugars it into `DoLet`
     /// selector bindings, exactly like a let-expression's tuple binding.
-    PatternBind { pattern: Pattern, expr: Expr, span: Span },
+    /// `span` is the pattern's first source position and `end` its last
+    /// (the last column of its last token, inclusive): together they are
+    /// the span GHC names in a `MonadFail` message.
+    PatternBind { pattern: Pattern, expr: Expr, span: Span, end: Span },
 }
 
 /// Literal values.

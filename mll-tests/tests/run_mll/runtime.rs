@@ -1042,7 +1042,7 @@ main = do
     b <- try (print (pick 5 1))
     assert (message b == "non-exhaustive guards") "a where guard chain"
     c <- try (bound 1)
-    assert (message c == "Pattern match failure in do expression at 13:5") "a refutable bind"
+    assert (message c == "user error (Pattern match failure in 'do' block at 13:5-10)") "a refutable bind"
     d <- try (print limit)
     assert (message d == "Non-exhaustive guards in 'limit'") "a guarded value"
 "#;

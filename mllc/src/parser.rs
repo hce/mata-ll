@@ -4137,13 +4137,19 @@ impl Parser {
             // full pattern and commit only on `<-` (an expression statement
             // often starts like a pattern, so anything else rewinds). Plain
             // variables and `_` stay on the simple Bind path — the
-            // refutable-pattern desugar (a case with GHC's MonadFail-style
+            // refutable-pattern desugar (a case with GHC's MonadFail
             // fallback, see desugar.rs) is only for the shapes that need it.
             if self.is_pattern_start() {
                 let bind_loc = self.peek_loc().clone();
                 let save_pat = self.checkpoint();
                 if let Ok(pat) = self.parse_pattern()
                     && self.at(&Token::Bind) {
+                        // The pattern's last token: its end is the span's
+                        // end (inclusive last column, as GHC prints it).
+                        let pat_end = {
+                            let last = &self.tokens[self.pos - 1];
+                            Span::new(last.line, last.end_col.saturating_sub(1))
+                        };
                         self.check_linear(save_pat.pos, "a 'do' statement")?;
                         self.advance();
                         let expr = self.parse_stmt_expr()?;
@@ -4158,6 +4164,7 @@ impl Parser {
                                 pattern,
                                 expr,
                                 span: Span::new(bind_loc.line, bind_loc.col),
+                                end: pat_end,
                             }),
                         }
                         continue;

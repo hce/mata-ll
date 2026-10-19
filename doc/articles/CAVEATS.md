@@ -312,17 +312,18 @@ GHC.
 
 A monadic bind `pat <- action` accepts any pattern: a variable, `_`,
 tuples (nested too), `()`, constructor patterns, list patterns, literals.
-A REFUTABLE pattern gets GHC's MonadFail-style semantics — a mismatch
-raises `Pattern match failure in do expression at <line>:<col>`, catchable
-with `try` like any other `error`:
+A FAILABLE pattern gets GHC's MonadFail semantics — a mismatch calls the
+block's monad's `fail`: in IO it raises `user error (Pattern match
+failure in 'do' block at <file>:<line>:<col>-<col>)`, catchable with
+`try` like any other `error`; in the list monad it drops the element, in
+Maybe it yields `Nothing`; in a monad without a `MonadFail` instance
+(`Either`, `ST`, a user monad) the bind is a compile error:
 
-    Just x <- lookupThing k       -- raises if the lookup returns Nothing
-    (a : rest) <- readValues      -- raises on []
-    () <- checkThing              -- irrefutable: no failure path
+    Just x <- lookupThing k       -- IO: raises if the lookup returns Nothing
+    (a : rest) <- readValues      -- IO: raises on []
+    () <- checkThing              -- irrefutable: no failure path, any monad
 
-The message is mata-ll's `error` string; GHC renders the same failure as
-an `IOException` with a file-qualified span — same semantics, different
-formatting.
+See HASKDIFF.md, "Do-bind failure is MonadFail".
 
 ## Lua errors from FFI calls are not wrapped
 

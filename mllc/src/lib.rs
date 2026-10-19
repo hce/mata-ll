@@ -457,7 +457,7 @@ fn compile_impl(
     };
 
     // Desugar do-notation to >>= chains
-    desugar::desugar_module(&mut module);
+    desugar::desugar_module(&mut module, &decl_files);
 
     checker.set_decl_files(decl_files);
 

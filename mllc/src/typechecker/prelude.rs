@@ -548,6 +548,15 @@ impl Checker {
                 &[(">>=", ">>="), (">>", ">>"), ("return", "pure")]);
         }
 
+        // The MonadFail instance of the scoped `LuaIO s` monad. The class
+        // and its [], Maybe and IO instances are source declarations in
+        // Prelude.mll; this one is registered here because the parser
+        // spells `LuaIO` only applied (`LuaIO s a`, or the FFI form), so an
+        // instance head cannot name the constructor. Empty context, like
+        // the Monad instance above.
+        self.register_builtin_instance_empty_ctx("MonadFail", Ty::Con("LuaIO".to_string()),
+            &[("fail", "fail_LuaIO")]);
+
         // Monad instance for [] (lists)
         self.register_builtin_instance("Monad", Ty::Con("[]".to_string()),
             &[(">>=", "bind_List"), (">>", "then_List"), ("return", "pure_List")]);
@@ -945,6 +954,16 @@ impl Checker {
         // step, O(total bytes^2) for a flat concatenation.
         self.env_scheme("string_mconcat_prim", vec![],
             Ty::fun(&[Ty::List(Box::new(Ty::Con("String".into())))], Ty::Con("String".into())));
+        // The MonadFail IO/LuaIO primitives: the action that raises `user
+        // error (<message>)` when run, called by the Prelude's `instance
+        // MonadFail IO` / `LuaIO` bodies (the class itself is source, in
+        // Prelude.mll). IO's raise has no source-level spelling that raises
+        // on RUNNING rather than on forcing, which is why it is a primitive.
+        self.env_scheme("fail_IO", vec![a.clone()],
+            Ty::arrow(Ty::Con("String".into()), Ty::io(ta.clone())));
+        let fail_scope = TyVar { name: "s".into(), id: u32::MAX };
+        self.env_scheme("fail_LuaIO", vec![a.clone(), fail_scope.clone()],
+            Ty::arrow(Ty::Con("String".into()), Ty::lua_io(fail_scope, ta.clone())));
 
         // The Semigroup/Monoid classes and their String/[a] instances all
         // live in lib/Prelude.mll now. The deliberate mata-ll divergence —

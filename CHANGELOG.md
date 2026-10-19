@@ -44,6 +44,35 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A failable do-bind pattern calls the monad's `fail`, as under GHC**
+  (silent wrong output / crash). `Just x <- xs` in the list monad raised
+  "Pattern match failure in do expression" for a `Nothing` element where
+  GHC drops it (`[1,3]` for `[Just 1, Nothing, Just 3]`); the same bind in
+  Maybe raised where GHC yields `Nothing`. The desugarer's fall-through
+  arm was a literal `error` whatever the block's monad. It is now the
+  Prelude's `fail`, a method of the new `MonadFail` class (`class Monad m
+  => MonadFail m where fail :: String -> m a`, with the GHC instances:
+  `[]` drops, `Maybe` is `Nothing`, `IO`/`LuaIO` raise), reached as a
+  wired-in reference like the `>>=` of the block, so the block's monad
+  decides what a mismatch means. A monad without an instance — `Either`,
+  `ST`, a user monad — now rejects the bind at compile time ("No instance
+  for 'MonadFail (Either String)'", with a note that says where the
+  constraint comes from), exactly as GHC does; a user `instance MonadFail`
+  works in that monad's do-blocks. Only a FAILABLE pattern asks for the
+  instance (GHC's `isIrrefutableHsPat`): variables, wildcards, tuples,
+  unit, as-patterns and a constructor pattern of a single-constructor type
+  or a newtype (with irrefutable arguments) add nothing, so `(a, b) <- e`
+  and `W x <- e` compile in every monad. The IO failure carries GHC's
+  text, `user error (Pattern match failure in 'do' block at
+  FILE:LINE:COL-COL)` (the pattern's span, with the file name the compiler
+  was given), raised when the action runs and catchable with `try`/`catch`
+  like any `error`. `fail` is also an ordinary Prelude function
+  (`fail "boom" :: IO a`); `MonadFail` and `fail` are therefore Prelude
+  names now (HASKDIFF.md, "Do-bind failure is MonadFail"). GHC-goldened
+  cases `monadfail_list_maybe`, `monadfail_user_instance`,
+  `monadfail_irrefutable_binds`, `monadfail_io_try`; compile-error tests
+  for Either, ST, a user monad without an instance and a `Monad m`
+  signature. Found by the 2026-10 fresh-eyes review (F3).
 - **A local function has all its equations, in `let` as in `where`**
   (silent wrong output). A multi-equation function in a `let` or a
   do-`let` kept only its LAST equation: `let f 0 = "zero"; f _ =

@@ -6757,3 +6757,127 @@ fn adjacent_local_equations_stay_accepted() {
     let source = "main :: IO ()\nmain = do\n    let f :: Int -> Int\n        f 0 = 1\n        f n | n > 5 = 2\n        f n = n\n        g = f 2\n    print (f 0 + f 7 + f 3 + g)\n    let f = 10 :: Int\n    print f\n";
     compile(source, Path::new("."), &[]).expect("adjacent equations are one function");
 }
+
+// A failable pattern on the left of a do-bind calls the monad's `fail`
+// (Haskell 2010 §3.14, GHC's MonadFail desugaring), so a monad without a
+// MonadFail instance rejects the bind at compile time, with the note that
+// says where the constraint the source never wrote comes from. Either and
+// ST have no instance under GHC either; a user monad gets one by writing
+// it (monadfail_user_instance.mll).
+#[test]
+fn refutable_do_bind_in_either_is_rejected() {
+    let source = r#"
+get :: Either String (Maybe Int) -> Either String Int
+get e = do
+    Just x <- e
+    return x
+
+main :: IO ()
+main = print (get (Right (Just 1)))
+"#;
+    expect_compile_error(source, &[], &[
+        "No instance for 'MonadFail (Either String)'",
+        "note:",
+        "calls the monad's `fail`",
+        "give the monad a MonadFail instance",
+    ]);
+}
+
+#[test]
+fn refutable_do_bind_in_st_is_rejected() {
+    let source = r#"
+go :: Int
+go = runST (do
+    arr <- newSTArray 1 (0 :: Int)
+    0 <- readSTArray arr 0
+    return 5)
+
+main :: IO ()
+main = print go
+"#;
+    expect_compile_error(source, &[], &["No instance for 'MonadFail (ST s)'", "MonadFail instance"]);
+}
+
+#[test]
+fn refutable_do_bind_in_user_monad_without_instance_is_rejected() {
+    let source = r#"
+newtype State s a = State (s -> (a, s))
+
+runState :: State s a -> s -> (a, s)
+runState (State f) s = f s
+
+instance Functor (State s) where
+    fmap f (State g) = State (\s -> let (a, s') = g s in (f a, s'))
+
+instance Applicative (State s) where
+    pure x = State (\s -> (x, s))
+    liftA2 f (State ga) (State gb) = State (\s -> let (a, s1) = ga s in let (b, s2) = gb s1 in (f a b, s2))
+
+instance Monad (State s) where
+    (>>=) (State g) k = State (\s -> let (a, s') = g s in runState (k a) s')
+
+getS :: State (Maybe Int) (Maybe Int)
+getS = State (\s -> (s, s))
+
+use :: State (Maybe Int) Int
+use = do
+    Just x <- getS
+    return x
+
+main :: IO ()
+main = print (fst (runState use (Just 3)))
+"#;
+    expect_compile_error(source, &[], &[
+        "No instance for 'MonadFail (State (Maybe Int))'",
+        "MonadFail instance",
+    ]);
+}
+
+// Under a `Monad m` signature the bind wants `MonadFail m`, which the
+// signature does not provide: GHC's "could not deduce (MonadFail m)".
+#[test]
+fn refutable_do_bind_under_monad_signature_is_rejected() {
+    let source = r#"
+unwrap :: Monad m => m (Maybe Int) -> m Int
+unwrap e = do
+    Just x <- e
+    return x
+
+main :: IO ()
+main = print (unwrap [Just 1])
+"#;
+    expect_compile_error(source, &[], &[
+        "No instance for 'MonadFail m'",
+        "the signature does not require 'MonadFail m'",
+        "calls the monad's `fail`",
+    ]);
+}
+
+// The accept side: an irrefutable pattern asks nothing of the monad, so
+// the same shapes compile in Either and ST, where a failable one is
+// rejected above.
+#[test]
+fn irrefutable_do_bind_needs_no_monadfail_instance() {
+    let source = r#"
+newtype W = W Int
+data P = P Int Int
+
+get :: Either String (Int, W) -> Either String Int
+get e = do
+    (a, W b) <- e
+    P c _ <- return (P 1 2)
+    return (a + b + c)
+
+go :: Int
+go = runST (do
+    arr <- newSTArray 1 (0 :: Int)
+    (v, ()) <- fmap (\x -> (x, ())) (readSTArray arr 0)
+    return v)
+
+main :: IO ()
+main = do
+    print (get (Right (1, W 2)))
+    print go
+"#;
+    compile(source, Path::new("."), &[]).expect("irrefutable binds compile in every monad");
+}

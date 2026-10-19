@@ -2359,10 +2359,10 @@ impl Rename<'_> {
                 let binds = binds.iter().map(|ld| self.localdef(ld, bound)).collect();
                 DoStmt::DoLet { binds }
             }
-            DoStmt::PatternBind { pattern, expr, span } => {
+            DoStmt::PatternBind { pattern, expr, span, end } => {
                 let e = self.expr(expr, bound);
                 collect_pattern_vars(pattern, bound);
-                DoStmt::PatternBind { pattern: self.pattern(pattern), expr: e, span: *span }
+                DoStmt::PatternBind { pattern: self.pattern(pattern), expr: e, span: *span, end: *end }
             }
         }
     }

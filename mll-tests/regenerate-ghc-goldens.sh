@@ -141,7 +141,7 @@ excluded_reason() {
         cases/entities_runtime_spellings) echo "JSON FFI library, Generics substrate and LuaDict FFI (runtime spellings)";;
         cases/DupConEast)                echo "helper module (twinned for import, no main)";;
         cases/DupConWest)                echo "helper module (twinned for import, no main)";;
-        cases/do_pattern_bind_failure)   echo "MonadFail/partial-pattern failure messages: mata-ll error strings vs GHC IOException rendering (same semantics, different formatting)";;
+        cases/do_pattern_bind_failure)   echo "failure messages with source spans: GHC names the twin's temporary file, the harness compiles with no file name; the partial-pattern message is mata-ll's error string";;
         cases/ExportHelper)              echo "helper module (twinned for import, no main)";;
         cases/FixityOps)                 echo "helper module (twinned for import, no main)";;
         cases/OpQualDefs)                echo "helper module (twinned for import, no main)";;

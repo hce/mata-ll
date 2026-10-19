@@ -1,8 +1,10 @@
 -- A15, the failing side: a refutable do-bind pattern that does not match
--- raises GHC's MonadFail-style error, located at the bind. Catchable with
--- `try` like any other `error`. (Excluded from the GHC oracle: the message
--- is mata-ll's error string, where GHC renders an IOException with a
--- file-qualified span — same semantics, different formatting.)
+-- calls IO's `fail` (MonadFail), which raises GHC's IOException text with
+-- the pattern's span. Catchable with `try` like any other `error`.
+-- (Excluded from the GHC oracle: GHC's span names the source FILE, which
+-- is the twin's temporary path; the harness compiles this case with no
+-- file name, so the span is bare. The partial-function message below is
+-- mata-ll's error string too.)
 
 failing :: IO Int
 failing = do
@@ -27,6 +29,6 @@ main = do
         Left msg -> putStrLn msg
         Right _ -> putStrLn "unreachable"
 
--- expect: Pattern match failure in do expression at 9:5
+-- expect: user error (Pattern match failure in 'do' block at 11:5-10)
 -- expect: 3
 -- expect: Non-exhaustive patterns in g
