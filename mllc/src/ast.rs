@@ -489,6 +489,24 @@ pub struct LocalDef {
     pub sig: Option<Type>,
 }
 
+/// The name prefix of a pattern-guard JOIN POINT: the lazily `let`-bound
+/// "rest of the alternatives" the parser's guard lowering jumps to on a
+/// failed qualifier or a fall-through (`Parser::pg_join`). It lives in the
+/// compiler's reserved `__` namespace (the lexer rejects such names in
+/// source), so the prefix identifies the binding unambiguously. The
+/// typechecker needs to: a join point stands in RESULT position by
+/// construction, so it is checked against the enclosing expected type
+/// rather than inferred (`check_expr_typed`) — which is what carries a
+/// GADT refinement across the join.
+pub const JOIN_POINT_PREFIX: &str = "__pgj_";
+
+impl LocalDef {
+    /// Is this binding a pattern-guard join point (see `JOIN_POINT_PREFIX`)?
+    pub fn is_join_point(&self) -> bool {
+        self.patterns.is_empty() && self.sig.is_none() && self.name.starts_with(JOIN_POINT_PREFIX)
+    }
+}
+
 /// A method signature (and optional default implementation) in a class declaration
 #[derive(Debug, Clone)]
 pub struct ClassMethod {

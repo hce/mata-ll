@@ -246,6 +246,8 @@ mll_test!(where_func_order, "where_func_order.mll");
 mll_test!(local_fn_equations, "local_fn_equations.mll");
 mll_test!(local_guard_fallthrough, "local_guard_fallthrough.mll");
 mll_test!(where_fn_in_pattern_guard, "where_fn_in_pattern_guard.mll");
+mll_test!(gadt_pattern_guards, "gadt_pattern_guards.mll");
+mll_test!(gadt_case_refinement, "gadt_case_refinement.mll");
 mll_test!(where_group_mutual, "where_group_mutual.mll");
 mll_test!(type_alias, "type_alias.mll");
 mll_test!(selective_import, "selective_import.mll");

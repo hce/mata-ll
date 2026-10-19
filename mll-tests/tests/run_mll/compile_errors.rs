@@ -412,6 +412,29 @@ fn pattern_guard_clause_arity_mismatch_is_rejected() {
     );
 }
 
+// A GADT match refines its index only against a KNOWN result type (the
+// accept side: cases/gadt_case_refinement.mll and gadt_pattern_guards.mll,
+// GHC-goldened). With the result type inferred — a where-binding with no
+// signature — the first refined branch fixes it to that branch's concrete
+// type and the next branch's index contradicts it. GHC accepts this one
+// (its solver recovers the result type from the later use of `r`);
+// mata-ll rejects it with the note that says so and what to write.
+#[test]
+fn gadt_case_with_inferred_result_is_rejected_with_note() {
+    expect_compile_error(
+        "data E a where\n    I :: Int -> E Int\n    B :: Bool -> E Bool\n\n\
+         ev :: E a -> a\nev e = r\n  where\n    r = case e of\n        I n -> n\n        B b -> b\n\n\
+         main :: IO ()\nmain = print (ev (I 3))\n",
+        &[],
+        &[
+            "Cannot unify 'Int' with 'Bool'",
+            "where-binding 'r'",
+            "refines a GADT index",
+            "move the case expression into the body of a function with a type signature",
+        ],
+    );
+}
+
 // C6: a signature on a where/let binding is checked like a top-level
 // one (the accept side is cases/local_signatures.mll, GHC-goldened).
 // Rejected shapes: a body less general than its signature; a body that
@@ -5751,8 +5774,14 @@ fn existential_skolem_cannot_escape() {
     // existential's hidden value therefore fails as a mismatch between two rigid
     // variables — the signature's `a` and the existential's `a` — which is
     // exactly how GHC reports it ("Couldn't match expected type 'a' with actual
-    // type 'a1'"). Escape into a *concrete* return/case type still surfaces the
-    // dedicated existential-escape diagnostic (the two cases below).
+    // type 'a1'"). A case expression CHECKED against a concrete result type
+    // (the clause body under `useCase :: Foo -> Int`) fails the same way, as
+    // GHC reports it ("Couldn't match expected type 'Int' with actual type
+    // 'a', a rigid type variable bound by a pattern with constructor Foo"),
+    // with the provenance note naming the constructor. The dedicated
+    // existential-escape diagnostic surfaces where the leaking type is only
+    // INFERRED — a case in an unannotated where-binding, a where-function's
+    // type (the two cases after it).
     let e = expect_compile_error(
         r#"
 data Foo = forall a. Foo a
@@ -5776,14 +5805,37 @@ main = putStrLn "no"
         "the signature-rigidity note must explain the second 'a', got: {e}"
     );
 
-    // Escape through a case expression's result type.
-    expect_compile_error(
+    // A case checked against the signature's concrete result type: the
+    // hidden type is rigid there, mismatching `Int` (GHC's reading).
+    let e = expect_compile_error(
         r#"
 data Foo = forall a. Foo a
 
 useCase :: Foo -> Int
 useCase f = case f of
   Foo x -> x
+
+main :: IO ()
+main = putStrLn "no"
+"#,
+        &[],
+        &[
+            "Cannot match 'a' with 'Int'",
+        ],
+    );
+    assert!(e.contains("hidden by constructor 'Foo'"), "got: {e}");
+
+    // Escape through a case expression's INFERRED result type (an
+    // unannotated where-binding): the skolem leaks into the binding's
+    // type, which outlives the match.
+    expect_compile_error(
+        r#"
+data Foo = forall a. Foo a
+
+useCase :: Foo -> Int
+useCase f = r
+  where r = case f of
+          Foo x -> x
 
 main :: IO ()
 main = putStrLn "no"

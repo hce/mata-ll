@@ -44,6 +44,46 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A GADT constructor pattern refines its index in a case alternative,
+  so pattern guards on a GADT match typecheck** (rejected valid program).
+  `ev :: E a -> a; ev (I n) | Just m <- Just n, m > 0 = m; ev (I n) =
+  negate n; ev (B b) = b` failed with "Cannot match 'a' with 'Bool': a
+  rigid type variable …" where GHC gives 3, 3, True; the same clauses
+  with a boolean guard compiled. The refinement a GADT pattern
+  introduces (`a ~ Int` under `I n`) existed only for a top-level CLAUSE
+  pattern, checked while the signature's variable is still flexible; a
+  `case` over the same value inside the body saw the variable rigid and
+  rejected the constructor outright — `ev e = case e of { I n -> n; B b
+  -> b }` was a type error too — and the pattern-guard lowering
+  re-matches the clause patterns in exactly such cases, with the rest of
+  the alternatives in let-bound join points whose inferred type lost the
+  refinement. Matching a constructor now refines the scrutinee's rigid
+  index for its branch wherever the pattern stands (a case alternative,
+  a clause pattern, a pattern nested under an existential: `f (Box (I
+  n)) = n + 1` for `Box :: E a -> Box`), the equality applying to that
+  branch's view of the environment and result type and to nothing
+  outside it; the checker propagates the expected type into if/case
+  branches, let bodies and the join points, so the refinement reaches
+  every alternative of a guarded GADT clause. Other alternatives still
+  see every constructor (exhaustiveness at a rigid index is unchanged)
+  and the function keeps its declared type. A case whose result type is
+  only INFERRED (an unannotated where/let binding) still takes the first
+  refined branch's concrete type and rejects a second index — GHC's
+  solver recovers the type from a later use, mata-ll's cannot — with a
+  note that says what to write (HASKDIFF.md, "GADT matches need their
+  result type where they are checked"). One message moved with the
+  checking: an existential's value returned from a case checked against
+  a concrete result type (`useCase :: Foo -> Int; useCase f = case f of
+  Foo x -> x`) is now the rigid mismatch GHC reports ("Cannot match 'a'
+  with 'Int'", with the note naming the constructor that hides `a`); the
+  "escapes its scope" diagnostic remains for a leak into an inferred
+  type. GHC-goldened cases
+  `gadt_pattern_guards` (pattern guards next to boolean guards and
+  `otherwise`, a where binding used from a pattern guard, a guard
+  matching a GADT inside an existential, a case alternative with a
+  pattern guard over a GADT scrutinee, a pair constructor refining a
+  tuple result) and `gadt_case_refinement`; compile-error test for the
+  inferred-result shape. Found by the 2026-10 fresh-eyes review (F6).
 - **A failable do-bind pattern calls the monad's `fail`, as under GHC**
   (silent wrong output / crash). `Just x <- xs` in the list monad raised
   "Pattern match failure in do expression" for a `Nothing` element where

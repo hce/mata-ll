@@ -446,6 +446,18 @@ impl Ty {
         }
     }
 
+    /// Does any skolem constant occur in this type? The cheap pre-check
+    /// before a `demote_skolems` walk over a whole environment.
+    pub fn mentions_skolem(&self) -> bool {
+        match self {
+            Ty::Skolem(..) => true,
+            Ty::Con(_) | Ty::Unit | Ty::Promoted(_) | Ty::Var(_) => false,
+            Ty::Arrow(a, b, _) | Ty::App(a, b) => a.mentions_skolem() || b.mentions_skolem(),
+            Ty::List(a) | Ty::IO(a) | Ty::LuaIO(_, a) | Ty::Forall(_, a) => a.mentions_skolem(),
+            Ty::Tuple(elems) => elems.iter().any(|e| e.mentions_skolem()),
+        }
+    }
+
     /// Check if a specific skolem occurs in this type (for escape check)
     pub fn contains_skolem(&self, name: &str, id: u32) -> bool {
         match self {
@@ -1380,6 +1392,88 @@ pub fn reduce_type_families(ty: &Ty, fams: &TyFamilies) -> Result<Ty, Diagnostic
 /// `Subst::merge` and preserved for callers that never see family types.
 pub fn unify(t1: &Ty, t2: &Ty) -> Result<Subst, DiagnosticKind> {
     unify_tf(t1, t2, &TyFamilies::new())
+}
+
+/// A map from skolem id to the type that stands in for the skolem: the
+/// shape `Ty::demote_skolems` applies. It serves two purposes that never
+/// mix: DEMOTION (a signature skolem back to its flexible variable once the
+/// body has been checked) and GADT REFINEMENT (a rigid index to the concrete
+/// type a constructor pattern proves it equal to, for one match branch —
+/// the local type equality Haskell's GADT matching introduces).
+pub type SkolemMap = HashMap<u32, Ty>;
+
+/// Unification that may REFINE a skolem: the pattern-matching unifier for
+/// a GADT constructor. Matching `I :: Int -> E Int` against a scrutinee of
+/// type `E a` with `a` rigid is not a mismatch — inside that branch `a` IS
+/// `Int` (GHC's local type equality `a ~ Int`). The result is the ordinary
+/// substitution over flexible variables plus the branch's GIVENS: each
+/// skolem the match equates with another type, as a `SkolemMap` the caller
+/// applies to the branch's view of the environment and expected type and
+/// then forgets (the equality holds in that branch only; nothing outside
+/// it ever learns `a ~ Int`, which is what keeps the refinement local).
+///
+/// Mechanically, every skolem of either side becomes a bindable variable
+/// carrying the skolem's own (unique) id for the duration of one ordinary
+/// unification, and the resulting bindings are sorted afterwards: a binding
+/// OF such a variable is a given (with the variables mapped back to their
+/// skolems in its image), a binding of a flexible variable is an ordinary
+/// binding. A skolem variable that was equated with a bare flexible
+/// variable is turned around (`flex := skolem`): the flexible variable is
+/// the one that adopts the rigid type, no refinement is needed.
+pub fn unify_refining(t1: &Ty, t2: &Ty, fams: &TyFamilies) -> Result<(Subst, SkolemMap), DiagnosticKind> {
+    let mut sks: Vec<(String, u32)> = Vec::new();
+    t1.collect_skolems(&mut sks);
+    t2.collect_skolems(&mut sks);
+    if sks.is_empty() {
+        return Ok((unify_tf(t1, t2, fams)?, SkolemMap::new()));
+    }
+    let as_var = |name: &str, id: u32| TyVar { name: format!("__sk_{}", name), id };
+    let mut promote: SkolemMap = HashMap::new();
+    let mut back: HashMap<TyVar, Ty> = HashMap::new();
+    for (name, id) in &sks {
+        promote.insert(*id, Ty::Var(as_var(name, *id)));
+        back.insert(as_var(name, *id), Ty::Skolem(name.clone(), *id));
+    }
+    let back = Subst::from_map(back);
+    let raw = unify_tf(&t1.demote_skolems(&promote), &t2.demote_skolems(&promote), fams)
+        .map_err(|e| match e {
+            // Report the failure over the ORIGINAL types: the promoted
+            // variables are an internal device and must not be shown.
+            DiagnosticKind::Mismatch(a, b) => DiagnosticKind::Mismatch(a.apply_subst(&back), b.apply_subst(&back)),
+            DiagnosticKind::RigidMismatch(a, b) => DiagnosticKind::RigidMismatch(a.apply_subst(&back), b.apply_subst(&back)),
+            DiagnosticKind::OccursCheck(v, t) => {
+                let v = match back.map.get(&v) {
+                    Some(Ty::Skolem(n, i)) => TyVar { name: n.clone(), id: *i },
+                    _ => v,
+                };
+                DiagnosticKind::OccursCheck(v, t.apply_subst(&back))
+            }
+            other => other,
+        })?;
+    let mut map: HashMap<TyVar, Ty> = HashMap::new();
+    let mut givens = SkolemMap::new();
+    for (v, img) in &raw.map {
+        let img = img.apply_subst(&back);
+        if let Some(sk) = back.map.get(v) {
+            match img {
+                Ty::Var(flex) if !back.map.contains_key(&flex) => {
+                    map.insert(flex, sk.clone());
+                }
+                img => {
+                    givens.insert(v.id, img);
+                }
+            }
+        } else {
+            map.insert(v.clone(), img);
+        }
+    }
+    let subst = Subst::from_parts(map, raw.mults.clone());
+    // A given's image is resolved through the flexible bindings, so the
+    // caller may apply the two in either order.
+    for img in givens.values_mut() {
+        *img = img.apply_subst(&subst);
+    }
+    Ok((subst, givens))
 }
 
 /// Unification that reduces closed-type-family applications to normal form on

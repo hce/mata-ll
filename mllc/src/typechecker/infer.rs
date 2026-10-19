@@ -1205,6 +1205,7 @@ impl Checker {
         // the `Spanned` markers, which the caller uses to locate the diagnostic
         // instead of the clause head.
         self.error_span = None;
+        self.error_notes.clear();
         let mut local_env = self.env.clone();
         let mut remaining_ty = fun_ty.clone();
         let mut subst = Subst::empty();
@@ -1213,13 +1214,23 @@ impl Checker {
         // patterns or nested matches in the body) must not survive into the
         // function's own type; snapshot to know which ones are ours.
         let skolems_before = self.pattern_skolems.len();
+        // The GADT givens the argument patterns introduce. A signature
+        // variable is still FLEXIBLE here (skolemized only below), so a
+        // GADT pattern on a signature type refines it through `subst`
+        // itself; givens arise for a skolem that is already rigid at
+        // pattern time — an existential unpacked by an enclosing pattern
+        // (`f (Some (I n))` for `Some :: E a -> Some` proves that `a ~ Int`
+        // for this clause) — and apply to the clause's view of its
+        // environment and result type, exactly as in a case alternative.
+        let mut givens = SkolemMap::new();
 
         for pattern in &clause.patterns {
             match &remaining_ty {
                 Ty::Arrow(arg_ty, ret_ty, _) => {
-                    let arg_ty = arg_ty.apply_subst(&subst);
-                    let (tp, pat_subst) = self.check_pattern(pattern, &arg_ty, &mut local_env)?;
+                    let arg_ty = arg_ty.apply_subst(&subst).demote_skolems(&givens);
+                    let (tp, pat_subst, g) = self.check_pattern(pattern, &arg_ty, &mut local_env)?;
                     subst = subst.compose(&pat_subst);
+                    Self::extend_givens(&mut givens, g);
                     remaining_ty = *ret_ty.clone();
                     tpatterns.push(tp);
                 }
@@ -1260,7 +1271,10 @@ impl Checker {
         };
         subst = subst.compose(&body_skolems);
 
-        let expected_ret = remaining_ty.apply_subst(&subst);
+        if !givens.is_empty() {
+            local_env = local_env.refined(&givens);
+        }
+        let expected_ret = remaining_ty.apply_subst(&subst).demote_skolems(&givens);
 
         // Pre-register where-bound names so the group is mutually recursive
         // (a binding sees itself and its siblings at the shared monomorphic
@@ -1481,13 +1495,14 @@ impl Checker {
             let param_ty = self.fresh_var("_w");
             // On failure, record the error and continue with a wildcard
             // placeholder (see the recovery note in the doc comment).
-            let (tp, ps) = self.check_pattern(pat, &param_ty, env.to_mut()).unwrap_or_else(|e| {
+            // (No givens: a fresh parameter variable has no skolem to refine.)
+            let (tp, ps, _) = self.check_pattern(pat, &param_ty, env.to_mut()).unwrap_or_else(|e| {
                 self.push_error_span(
                     e,
                     format!("a pattern of the where-binding '{}' ({})", ld.name, ctx),
                     clause_span,
                 );
-                (TPattern::Wildcard, Subst::empty())
+                (TPattern::Wildcard, Subst::empty(), SkolemMap::new())
             });
             where_subst = where_subst.compose(&ps);
             param_tys.push(param_ty.apply_subst(&where_subst));
@@ -1793,7 +1808,8 @@ impl Checker {
         let skolems_before = self.pattern_skolems.len();
         for pat in &bind.patterns {
             let param_ty = self.fresh_var("_lp");
-            let (tp, ps) = self.check_pattern(pat, &param_ty, &mut local_env)?;
+            // (No givens: a fresh parameter variable has no skolem to refine.)
+            let (tp, ps, _) = self.check_pattern(pat, &param_ty, &mut local_env)?;
             s = s.compose(&ps);
             params.push((param_ty, self.fresh_mult()));
             tpatterns.push(tp);
@@ -1978,9 +1994,24 @@ impl Checker {
 
     // --- Pattern checking (returns typed pattern) ---
 
+    /// Check `pattern` against the type `expected` of the value it matches,
+    /// binding its variables in `env`. Returns the typed pattern, the
+    /// substitution the match determined, and the branch's GIVENS: the GADT
+    /// refinements the match introduces (`unify_refining`). A constructor
+    /// pattern whose result type is more specific than the scrutinee's
+    /// rigid index (`I :: Int -> E Int` against `E a`) does not fail — it
+    /// proves `a ~ Int` for the one branch it guards, and the caller that
+    /// owns that branch (a case alternative, a function clause) applies the
+    /// givens to its view of the environment and the expected result type
+    /// before checking the branch, then forgets them. Nested patterns see
+    /// the refinements of their enclosing ones already applied, so two
+    /// patterns of one match cannot refine the same index twice; a
+    /// contradictory pair (`MkP (I n) (B b)` for `MkP :: E a -> E a -> P
+    /// a`) is a plain mismatch. A caller for which no skolem can occur in
+    /// the expected type (fresh parameter variables) gets no givens.
     pub(super) fn check_pattern(
         &mut self, pattern: &Pattern, expected: &Ty, env: &mut TypeEnv,
-    ) -> Result<(TPattern, Subst), DiagnosticKind> {
+    ) -> Result<(TPattern, Subst, SkolemMap), DiagnosticKind> {
         match pattern {
             Pattern::Var(name) => {
                 // Rank-2: if expected type is forall-quantified, bind as polymorphic scheme
@@ -1989,9 +2020,9 @@ impl Checker {
                 // This binder's type variables are determined by how it is used,
                 // so record it for the ambiguity check at the function boundary.
                 self.binder_types.push(expected.clone());
-                Ok((TPattern::Var(name.clone(), expected.clone()), Subst::empty()))
+                Ok((TPattern::Var(name.clone(), expected.clone()), Subst::empty(), SkolemMap::new()))
             }
-            Pattern::Wildcard => Ok((TPattern::Wildcard, Subst::empty())),
+            Pattern::Wildcard => Ok((TPattern::Wildcard, Subst::empty(), SkolemMap::new())),
             // As-pattern `xs@p`: the binder holds the WHOLE scrutinee, so it
             // binds at the expected type exactly like a Var (rank-2 scheme
             // conversion and the ambiguity record included), and the inner
@@ -2001,8 +2032,8 @@ impl Checker {
                 let scheme = Self::forall_to_scheme(expected);
                 env.insert(name.clone(), scheme);
                 self.binder_types.push(expected.clone());
-                let (tinner, s) = self.check_pattern(inner, expected, env)?;
-                Ok((TPattern::As(name.clone(), Box::new(tinner)), s))
+                let (tinner, s, g) = self.check_pattern(inner, expected, env)?;
+                Ok((TPattern::As(name.clone(), Box::new(tinner)), s, g))
             }
             Pattern::LitPat(lit) => {
                 match lit {
@@ -2019,13 +2050,14 @@ impl Checker {
                         Ok((
                             TPattern::LitPat(Self::convert_literal(lit), expected.clone()),
                             Subst::empty(),
+                            SkolemMap::new(),
                         ))
                     }
                     _ => {
                         let lit_ty = self.literal_type(lit);
                         let s = self.unify(expected, &lit_ty)?;
                         let ty = expected.clone().apply_subst(&s);
-                        Ok((TPattern::LitPat(Self::convert_literal(lit), ty), s))
+                        Ok((TPattern::LitPat(Self::convert_literal(lit), ty), s, SkolemMap::new()))
                     }
                 }
             }
@@ -2075,17 +2107,23 @@ impl Checker {
                 }
                 let tv_subst = Subst::from_map(tv_map);
                 let result_ty = con_info.result_type.apply_subst(&tv_subst);
-                let mut subst = self.unify(expected, &result_ty)?;
+                // The refining unifier: a GADT constructor's result type may
+                // pin a rigid index of the scrutinee type for this branch.
+                let (mut subst, mut givens) = self.unify_refining(expected, &result_ty)?;
 
                 let mut targs = Vec::new();
                 for (arg_pat, field_ty) in args.iter().zip(&con_info.field_types) {
-                    let expected_field = field_ty.apply_subst(&tv_subst).apply_subst(&subst);
-                    let (tp, s) = self.check_pattern(arg_pat, &expected_field, env)?;
+                    let expected_field = field_ty
+                        .apply_subst(&tv_subst)
+                        .apply_subst(&subst)
+                        .demote_skolems(&givens);
+                    let (tp, s, g) = self.check_pattern(arg_pat, &expected_field, env)?;
                     subst = subst.compose(&s);
+                    Self::extend_givens(&mut givens, g);
                     targs.push(tp);
                 }
 
-                Ok((TPattern::Constructor { name: con_key, args: targs }, subst))
+                Ok((TPattern::Constructor { name: con_key, args: targs }, subst, givens))
             }
             Pattern::Paren(inner) => self.check_pattern(inner, expected, env),
             Pattern::Tuple(pats) => {
@@ -2094,15 +2132,45 @@ impl Checker {
                 let tuple_ty = Ty::Tuple(elem_types.clone());
                 let s = self.unify(expected, &tuple_ty)?;
                 let mut subst = s;
+                let mut givens = SkolemMap::new();
                 let mut tpats = Vec::new();
                 for (p, et) in pats.iter().zip(elem_types.iter()) {
-                    let et_resolved = et.apply_subst(&subst);
-                    let (tp, ps) = self.check_pattern(p, &et_resolved, env)?;
+                    let et_resolved = et.apply_subst(&subst).demote_skolems(&givens);
+                    let (tp, ps, g) = self.check_pattern(p, &et_resolved, env)?;
                     subst = subst.compose(&ps);
+                    Self::extend_givens(&mut givens, g);
                     tpats.push(tp);
                 }
-                Ok((TPattern::Tuple(tpats), subst))
+                Ok((TPattern::Tuple(tpats), subst, givens))
             }
+        }
+    }
+
+    /// Add the givens of a nested pattern to its enclosing match's. The
+    /// nested pattern was checked with the enclosing givens already applied
+    /// to its expected type, so the two sets refine disjoint skolems; an
+    /// earlier image may still mention a skolem the nested pattern refines
+    /// (`a ~ [b]` then `b ~ Int`), so the earlier images are resolved
+    /// through the new givens.
+    fn extend_givens(acc: &mut SkolemMap, new: SkolemMap) {
+        if new.is_empty() {
+            return;
+        }
+        for img in acc.values_mut() {
+            *img = img.demote_skolems(&new);
+        }
+        acc.extend(new);
+    }
+
+    /// `env` as one match branch sees it: the accumulated substitution
+    /// applied, then the branch's GADT givens (`TypeEnv::refined`). With no
+    /// givens this is `TypeEnv::applied`'s borrow-when-unchanged fast path.
+    fn branch_env<'a>(env: &'a TypeEnv, subst: &Subst, givens: &SkolemMap) -> std::borrow::Cow<'a, TypeEnv> {
+        let applied = env.applied(subst);
+        if givens.is_empty() {
+            applied
+        } else {
+            std::borrow::Cow::Owned(applied.refined(givens))
         }
     }
 
@@ -2434,112 +2502,7 @@ impl Checker {
                     final_ty, s1.compose(&s2).compose(&s3).compose(&s4),
                 ))
             }
-            Expr::Case { scrutinee, branches } => {
-                let (ts, scrut_ty, s1) = self.infer_expr(scrutinee, env)?;
-                let result_ty = self.fresh_var("_c");
-                let mut subst = s1;
-                let mut tbranches = Vec::new();
-
-                for branch in branches {
-                    // Cow fast path (see `TypeEnv::applied`): the whole env
-                    // is rebuilt only when the accumulated substitution
-                    // actually touches it — `to_mut` clones on first
-                    // pattern binding, so branch-local bindings still never
-                    // leak into the next branch's env.
-                    let mut branch_env = env.applied(&subst);
-                    let scrut_ty = scrut_ty.apply_subst(&subst);
-                    // Any existential skolem this branch's pattern mints must
-                    // stay inside the branch; snapshot to check that below.
-                    let skolems_before = self.pattern_skolems.len();
-                    let (tp, pat_subst) = self.check_pattern(&branch.pattern, &scrut_ty, branch_env.to_mut())?;
-                    subst = subst.compose(&pat_subst);
-
-                    // A branch may carry guards (`pat | g1 -> e1 | g2 -> e2`).
-                    // Each guard condition must be Bool and each guard body must
-                    // agree with the case result type, exactly as for function
-                    // clause guards. When guards are present the branch body is
-                    // structurally absent (`None`) — the guard chain IS the
-                    // body.
-                    debug_assert!(
-                        branch.guards.is_empty() == branch.body.is_some(),
-                        "case branch violates the body/guards exclusion                          (guards: {}, body: {})",
-                        branch.guards.len(),
-                        if branch.body.is_some() { "Some" } else { "None" },
-                    );
-                    let mut tguards = Vec::new();
-                    if !branch.guards.is_empty() {
-                        for guard in &branch.guards {
-                            let genv = branch_env.applied(&subst);
-                            let (tcond, cond_ty, gs1) = self.infer_expr(&guard.condition, &genv)?;
-                            let gs2 = self.unify(&cond_ty.apply_subst(&gs1), &Ty::Con("Bool".into()))?;
-                            subst = subst.compose(&gs1).compose(&gs2);
-                            let genv2 = branch_env.applied(&subst);
-                            let (tgbody, gbody_ty, gbs) = self.infer_expr(&guard.body, &genv2)?;
-                            subst = subst.compose(&gbs);
-                            let gu = self.unify(&result_ty.apply_subst(&subst), &gbody_ty)
-                                .inspect_err(|_| self.latch_stmt_span(&guard.body))?;
-                            subst = subst.compose(&gu);
-                            tguards.push(TGuard { condition: tcond, body: tgbody });
-                        }
-                    }
-
-                    let tb = match &branch.body {
-                        Some(body) => {
-                            let (tb, body_ty, body_subst) = self.infer_expr(body, &branch_env)?;
-                            subst = subst.compose(&body_subst);
-                            // The branch body inferred cleanly; a mismatch here
-                            // is the branch's type disagreeing with the case
-                            // result, so locate it at this branch, not the
-                            // clause head.
-                            let s = self.unify(&result_ty.apply_subst(&subst), &body_ty)
-                                .inspect_err(|_| self.latch_stmt_span(body))?;
-                            subst = subst.compose(&s);
-                            Some(tb)
-                        }
-                        // A guarded branch: its guard bodies were checked
-                        // against the result type above; there is no body.
-                        None => None,
-                    };
-                    // The case's result outlives the branch, so an unpacked
-                    // existential's skolem must not appear in it (e.g.
-                    // `case s of Foo x -> x`). Leaks into longer-lived types
-                    // that are not the result (an outer binder's type) are
-                    // caught by the same check at the clause boundary.
-                    self.check_existential_escape(&result_ty.apply_subst(&subst), skolems_before)?;
-                    tbranches.push(TCaseBranch { pattern: tp, guards: tguards, body: tb });
-                }
-
-                // Check exhaustiveness of case patterns
-                let case_patterns: Vec<&Pattern> = branches.iter()
-                    .map(|b| &b.pattern)
-                    .collect();
-                let resolved_scrut_ty = scrut_ty.apply_subst(&subst);
-                let missing = self.check_exhaustiveness(&case_patterns, Some(&resolved_scrut_ty));
-                if !missing.is_empty() {
-                    let fn_name = self.current_fn.clone().unwrap_or_else(|| "<expr>".into());
-                    self.push_error_ctx(
-                        DiagnosticKind::NonExhaustive(format!(
-                            "case expression in '{}': missing patterns for {}",
-                            fn_name, missing.join(", ")
-                        )),
-                        format!("definition of '{}'", fn_name),
-                    );
-                } else {
-                    let fn_name = self.current_fn.clone().unwrap_or_else(|| "<expr>".into());
-                    let warn_rows: Vec<Vec<PatCell<'_>>> = case_patterns.iter()
-                        .map(|p| vec![PatCell::P(p)])
-                        .collect();
-                    self.warn_literal_fallthrough(
-                        &format!("the case expression in '{}'", fn_name), &fn_name,
-                        &warn_rows, &[Some(resolved_scrut_ty.clone())], None);
-                }
-
-                let final_ty = result_ty.apply_subst(&subst);
-                Ok((
-                    TExpr::new(TExprKind::Case { scrutinee: Box::new(ts), branches: tbranches }, final_ty.clone()),
-                    final_ty, subst,
-                ))
-            }
+            Expr::Case { scrutinee, branches } => self.check_case(scrutinee, branches, None, env),
             Expr::Let { .. } => {
                 // Process the whole spine of directly nested `let`s
                 // ITERATIVELY, threading one owned environment and one
@@ -3018,6 +2981,186 @@ impl Checker {
     // Depth-guard wrapper; see `infer_expr`. Bidirectional checking recurses
     // into itself (lambda bodies, branches) without passing through
     // `infer_expr`, so it maintains the same counter.
+    /// A case expression: INFERRED when `expected` is `None` (the result
+    /// type is a fresh variable every branch unifies with) or CHECKED
+    /// against a known result type. The two differ only for a branch whose
+    /// pattern refines a GADT index (`check_pattern`'s givens): the branch
+    /// is checked in a view of the environment and of the result type with
+    /// the refinement applied — `case e of I n -> n` against a result type
+    /// `a` with `e :: E a` checks `n :: Int` against `Int`, since `a ~ Int`
+    /// holds there — and the refinement goes no further than the branch.
+    /// Only a KNOWN result type can be refined; inferring one makes the
+    /// first refined branch's concrete type the case's result (GHC rejects
+    /// the shape outright: the result variable is untouchable under the
+    /// local equality), which a second branch at another index then
+    /// contradicts. Checking mode reaches a case through every result
+    /// position the checker propagates an expected type to
+    /// (`check_expr_typed`): a clause body or guard body, the branches of
+    /// an if or case, the body of a let, a pattern-guard join point.
+    fn check_case(
+        &mut self,
+        scrutinee: &Expr,
+        branches: &[CaseBranch],
+        expected: Option<&Ty>,
+        env: &TypeEnv,
+    ) -> Result<(TExpr, Ty, Subst), DiagnosticKind> {
+        let (ts, scrut_ty, s1) = self.infer_expr(scrutinee, env)?;
+        let checking = expected.is_some();
+        let result_ty = match expected {
+            Some(t) => t.clone(),
+            None => self.fresh_var("_c"),
+        };
+        let mut subst = s1;
+        let mut tbranches = Vec::new();
+        // Has some branch refined the scrutinee's index so far? With the
+        // result type INFERRED, that is the cause of a later mismatch
+        // against it (see `inferred_result_refinement_note`).
+        let mut refined = false;
+
+        for branch in branches {
+            // Cow fast path (see `TypeEnv::applied`): the whole env
+            // is rebuilt only when the accumulated substitution
+            // actually touches it — `to_mut` clones on first
+            // pattern binding, so branch-local bindings still never
+            // leak into the next branch's env.
+            let mut branch_env = env.applied(&subst);
+            let scrut_ty = scrut_ty.apply_subst(&subst);
+            // Any existential skolem this branch's pattern mints must
+            // stay inside the branch; snapshot to check that below.
+            let skolems_before = self.pattern_skolems.len();
+            let (tp, pat_subst, givens) =
+                self.check_pattern(&branch.pattern, &scrut_ty, branch_env.to_mut())?;
+            subst = subst.compose(&pat_subst);
+            refined |= !givens.is_empty();
+
+            // A branch may carry guards (`pat | g1 -> e1 | g2 -> e2`).
+            // Each guard condition must be Bool and each guard body must
+            // agree with the case result type, exactly as for function
+            // clause guards. When guards are present the branch body is
+            // structurally absent (`None`) — the guard chain IS the
+            // body.
+            debug_assert!(
+                branch.guards.is_empty() == branch.body.is_some(),
+                "case branch violates the body/guards exclusion                          (guards: {}, body: {})",
+                branch.guards.len(),
+                if branch.body.is_some() { "Some" } else { "None" },
+            );
+            let mut tguards = Vec::new();
+            for guard in &branch.guards {
+                let genv = Self::branch_env(&branch_env, &subst, &givens);
+                let (tcond, cond_ty, gs1) = self.infer_expr(&guard.condition, &genv)?;
+                let gs2 = self.unify(&cond_ty.apply_subst(&gs1), &Ty::Con("Bool".into()))?;
+                subst = subst.compose(&gs1).compose(&gs2);
+                let genv2 = Self::branch_env(&branch_env, &subst, &givens);
+                let ret = result_ty.apply_subst(&subst).demote_skolems(&givens);
+                let (tgbody, gbs) = self.check_branch_body(&guard.body, &ret, &genv2, checking, refined)?;
+                subst = subst.compose(&gbs);
+                tguards.push(TGuard { condition: tcond, body: tgbody });
+            }
+
+            let tb = match &branch.body {
+                Some(body) => {
+                    let benv = Self::branch_env(&branch_env, &subst, &givens);
+                    let ret = result_ty.apply_subst(&subst).demote_skolems(&givens);
+                    let (tb, body_subst) = self.check_branch_body(body, &ret, &benv, checking, refined)?;
+                    subst = subst.compose(&body_subst);
+                    Some(tb)
+                }
+                // A guarded branch: its guard bodies were checked
+                // against the result type above; there is no body.
+                None => None,
+            };
+            // The case's result outlives the branch, so an unpacked
+            // existential's skolem must not appear in it (e.g.
+            // `case s of Foo x -> x`). Leaks into longer-lived types
+            // that are not the result (an outer binder's type) are
+            // caught by the same check at the clause boundary.
+            self.check_existential_escape(&result_ty.apply_subst(&subst), skolems_before)?;
+            tbranches.push(TCaseBranch { pattern: tp, guards: tguards, body: tb });
+        }
+
+        // Check exhaustiveness of case patterns
+        let case_patterns: Vec<&Pattern> = branches.iter()
+            .map(|b| &b.pattern)
+            .collect();
+        let resolved_scrut_ty = scrut_ty.apply_subst(&subst);
+        let missing = self.check_exhaustiveness(&case_patterns, Some(&resolved_scrut_ty));
+        if !missing.is_empty() {
+            let fn_name = self.current_fn.clone().unwrap_or_else(|| "<expr>".into());
+            self.push_error_ctx(
+                DiagnosticKind::NonExhaustive(format!(
+                    "case expression in '{}': missing patterns for {}",
+                    fn_name, missing.join(", ")
+                )),
+                format!("definition of '{}'", fn_name),
+            );
+        } else {
+            let fn_name = self.current_fn.clone().unwrap_or_else(|| "<expr>".into());
+            let warn_rows: Vec<Vec<PatCell<'_>>> = case_patterns.iter()
+                .map(|p| vec![PatCell::P(p)])
+                .collect();
+            self.warn_literal_fallthrough(
+                &format!("the case expression in '{}'", fn_name), &fn_name,
+                &warn_rows, &[Some(resolved_scrut_ty.clone())], None);
+        }
+
+        let final_ty = result_ty.apply_subst(&subst);
+        Ok((
+            TExpr::new(TExprKind::Case { scrutinee: Box::new(ts), branches: tbranches }, final_ty.clone()),
+            final_ty, subst,
+        ))
+    }
+
+    /// The deviation note for a branch body that failed against an
+    /// INFERRED case result after some branch refined the scrutinee's GADT
+    /// index: the refined branch fixed the result to its concrete type.
+    /// GHC solves the outer equalities first, so a later use of the value
+    /// (`r` in `ev e = r where r = case e of …`) can still determine the
+    /// result type before the branches are judged; mata-ll's checker
+    /// unifies as it goes and cannot. Recorded on `error_notes`, attached
+    /// when the diagnostic is pushed.
+    fn inferred_result_refinement_note(&mut self) {
+        self.error_notes.push(
+            "the result type of this case expression is inferred, and a branch whose \
+             constructor pattern refines a GADT index (`a ~ Int` under `I n`) fixes the \
+             inferred result to that branch's concrete type; another branch at another \
+             index then cannot agree with it. GHC can still recover the intended result \
+             type from a later use of the value; mata-ll needs it where the match is \
+             checked — move the case expression into the body of a function with a type \
+             signature (the clause body here), where its result type is known"
+                .to_string(),
+        );
+    }
+
+    /// The body of one case branch or guard against the branch's view of
+    /// the result type: checked when the case is, inferred and unified
+    /// otherwise. A mismatch is located at the branch (the statement
+    /// marker on the body), not the clause head; when the result type is
+    /// inferred and a branch has refined the scrutinee's index (`refined`),
+    /// the mismatch carries the deviation note.
+    fn check_branch_body(
+        &mut self,
+        body: &Expr,
+        ret: &Ty,
+        env: &TypeEnv,
+        checking: bool,
+        refined: bool,
+    ) -> Result<(TExpr, Subst), DiagnosticKind> {
+        if checking {
+            return self.check_expr_typed(body, ret, env)
+                .inspect_err(|_| self.latch_stmt_span(body));
+        }
+        let (tb, body_ty, body_subst) = self.infer_expr(body, env)?;
+        let s = self.unify(&ret.apply_subst(&body_subst), &body_ty)
+            .inspect_err(|_| {
+                self.latch_stmt_span(body);
+                if refined {
+                    self.inferred_result_refinement_note();
+                }
+            })?;
+        Ok((tb, body_subst.compose(&s)))
+    }
+
     pub(super) fn check_expr_typed(&mut self, expr: &Expr, expected: &Ty, env: &TypeEnv) -> Result<(TExpr, Subst), DiagnosticKind> {
         if self.expr_depth >= crate::MAX_NESTING_DEPTH {
             return Err(Self::expr_too_deep());
@@ -3028,16 +3171,121 @@ impl Checker {
         r
     }
 
+    /// Check `expr` against a KNOWN type. The expected type is pushed into
+    /// the forms whose value is one of their sub-expressions — a statement
+    /// marker, parentheses, the branches of an if or a case, the body of a
+    /// let — so a case alternative deep inside a clause body is checked
+    /// against the clause's result type (what a GADT refinement needs; see
+    /// `check_case`). A let's join points (`LocalDef::is_join_point`: the
+    /// lazily bound "rest of the alternatives" the parser's pattern-guard
+    /// lowering produces) stand in result position by construction, so
+    /// they are checked against the same expected type instead of being
+    /// inferred — the refinement a later alternative needs would otherwise
+    /// be lost at the join. Every other form is inferred and unified with
+    /// the expected type, as before.
     pub(super) fn check_expr_typed_inner(&mut self, expr: &Expr, expected: &Ty, env: &TypeEnv) -> Result<(TExpr, Subst), DiagnosticKind> {
-        let (te, inferred, subst) = self.infer_expr(expr, env)?;
-        let s = self.unify(&inferred.apply_subst(&subst), &expected.apply_subst(&subst))?;
-        let final_ty = inferred.apply_subst(&subst).apply_subst(&s);
-        // Apply the full composed substitution to inner types so that type
-        // variables resolved by the expected type (e.g. monad type from function
-        // sig) propagate into sub-expressions through variable chains
-        let full_subst = subst.compose(&s);
-        let resolved_te = te.apply_subst(&full_subst);
-        Ok((TExpr { kind: resolved_te.kind, ty: final_ty }, full_subst))
+        match expr {
+            Expr::Spanned(span, inner) => {
+                let r = self.check_expr_typed(inner, expected, env);
+                if r.is_err() && self.error_span.is_none() {
+                    self.error_span = Some(*span);
+                }
+                r
+            }
+            Expr::Paren(inner) => {
+                let (te, s) = self.check_expr_typed(inner, expected, env)?;
+                let ty = te.ty.clone();
+                Ok((TExpr::new(TExprKind::Paren(Box::new(te)), ty), s))
+            }
+            Expr::If { cond, then_branch, else_branch } => {
+                let (tc, cond_ty, s1) = self.infer_expr(cond, env)?;
+                let sb = self.unify(&cond_ty, &Ty::Con("Bool".into()))?;
+                let s1 = s1.compose(&sb);
+                let env2 = env.applied(&s1);
+                let (tt, s2) = self.check_expr_typed(then_branch, &expected.apply_subst(&s1), &env2)
+                    .inspect_err(|_| self.latch_stmt_span(then_branch))?;
+                let s12 = s1.compose(&s2);
+                let env3 = env.applied(&s12);
+                let (te, s3) = self.check_expr_typed(else_branch, &expected.apply_subst(&s12), &env3)
+                    .inspect_err(|_| self.latch_stmt_span(else_branch))?;
+                let subst = s12.compose(&s3);
+                let final_ty = expected.apply_subst(&subst);
+                Ok((
+                    TExpr::new(TExprKind::If {
+                        cond: Box::new(tc), then_branch: Box::new(tt), else_branch: Box::new(te),
+                    }, final_ty),
+                    subst,
+                ))
+            }
+            Expr::Case { scrutinee, branches } => {
+                let (te, _, s) = self.check_case(scrutinee, branches, Some(expected), env)?;
+                Ok((te, s))
+            }
+            // A tuple against a tuple type of its arity: each component is
+            // checked against its component type (`(ev e, case e of …)`
+            // against `(a, a)` reaches the case with `a` known).
+            Expr::Tuple(elems) if matches!(expected, Ty::Tuple(ts) if ts.len() == elems.len()) => {
+                let Ty::Tuple(elem_tys) = expected else { unreachable!() };
+                let mut telems = Vec::new();
+                let mut subst = Subst::empty();
+                for (e, ety) in elems.iter().zip(elem_tys) {
+                    let env2 = env.applied(&subst);
+                    let (te, s) = self.check_expr_typed(e, &ety.apply_subst(&subst), &env2)?;
+                    subst = subst.compose(&s);
+                    telems.push(te);
+                }
+                let tuple_ty = expected.apply_subst(&subst);
+                Ok((TExpr::new(TExprKind::Tuple(telems), tuple_ty), subst))
+            }
+            Expr::Let { .. } => {
+                // The iterative spine walk of the inferring arm (see there),
+                // with the body — and each join point — checked.
+                let mut env_acc = env.clone();
+                let mut subst = AccSubst::new();
+                let mut tgroups: Vec<Vec<TLocalDef>> = Vec::new();
+                let mut cur: &Expr = expr;
+                while let Expr::Let { binds, body } = cur {
+                    if let [join] = binds.as_slice() && join.is_join_point() {
+                        let ret = expected.apply_subst(&subst);
+                        let (te, s) = self.check_expr_typed(&join.body, &ret, &env_acc)?;
+                        subst.compose_with(&s);
+                        env_acc.apply_subst_mut(&s);
+                        env_acc.insert(join.name.clone(), Scheme::mono(ret.apply_subst(&s)));
+                        tgroups.push(vec![TLocalDef { name: join.name.clone(), patterns: Vec::new(), body: te }]);
+                    } else {
+                        let (tbinds, new_env, new_subst) =
+                            self.infer_let_group(binds, env_acc, subst)?;
+                        env_acc = new_env;
+                        subst = new_subst;
+                        tgroups.push(tbinds);
+                    }
+                    cur = body;
+                }
+                let ret = expected.apply_subst(&subst);
+                let (tbody, s) = self.check_expr_typed(cur, &ret, &env_acc)?;
+                subst.compose_with(&s);
+                let body_ty = ret.apply_subst(&s);
+                let mut te = tbody;
+                for tbinds in tgroups.into_iter().rev() {
+                    te = TExpr::new(
+                        TExprKind::Let { binds: tbinds, body: Box::new(te) },
+                        body_ty.clone(),
+                    );
+                }
+                Ok((te, subst.into_subst()))
+            }
+            _ => {
+                let (te, inferred, subst) = self.infer_expr(expr, env)?;
+                let s = self.unify(&inferred.apply_subst(&subst), &expected.apply_subst(&subst))?;
+                let final_ty = inferred.apply_subst(&subst).apply_subst(&s);
+                // Apply the full composed substitution to inner types so that type
+                // variables resolved by the expected type (e.g. monad type from function
+                // sig) propagate into sub-expressions through variable chains
+                let full_subst = subst.compose(&s);
+                let resolved_te = te.apply_subst(&full_subst);
+                Ok((TExpr { kind: resolved_te.kind, ty: final_ty }, full_subst))
+            }
+        }
     }
 
     /// Generate a TIR function for an FFI declaration.

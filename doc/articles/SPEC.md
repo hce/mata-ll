@@ -161,6 +161,20 @@ equalities into scope for that branch. For example:
 
 In the `LitI` branch, the compiler knows `a ~ Int`, so returning
 `n :: Int` as `a` is valid. In the `LitB` branch, `a ~ Bool`.
+The equality holds wherever the constructor is matched: as a clause
+pattern, in a case alternative over a value of type `Expr a`, nested
+under another constructor (an existential's hidden type is refined the
+same way, `f (Box (LitI n)) = n + 1` for `Box :: Expr a -> Box`), and
+under pattern guards and `otherwise` chains on the clause — and only
+in that branch: the other alternatives still see every constructor,
+and the function's own type stays `Expr a -> a`. A case alternative
+refines against the result type the case is CHECKED against (the
+clause's result under its signature, the branches of an enclosing
+if/case, the body of a let); a case whose result type is only inferred
+(an unannotated where/let binding) takes the first refined branch's
+concrete type as its result, which a second index then contradicts —
+the message says so and what to write (HASKDIFF.md, "GADT matches need
+their result type where they are checked").
 This refinement is purely compile-time; the runtime representation is
 identical to standard ADTs (tag at index 1, fields after). The above
 could translate to:

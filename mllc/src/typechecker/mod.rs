@@ -261,6 +261,30 @@ impl TypeEnv {
         out
     }
 
+    /// `self` with the GADT refinement `givens` applied to every scheme
+    /// (`Ty::demote_skolems`): the view of the environment one match branch
+    /// has, in which a refined rigid index reads as the concrete type the
+    /// branch's constructor pattern proved. Only entries mentioning a
+    /// skolem are rewritten; the rest are shared.
+    pub fn refined(&self, givens: &SkolemMap) -> TypeEnv {
+        let mut out = TypeEnv::new();
+        for (k, entry) in &self.bindings {
+            let new_entry = if entry.scheme.ty.mentions_skolem() {
+                EnvEntry::new(Scheme {
+                    vars: entry.scheme.vars.clone(),
+                    mult_vars: entry.scheme.mult_vars.clone(),
+                    ty: entry.scheme.ty.demote_skolems(givens),
+                })
+            } else {
+                entry.clone()
+            };
+            count_entry(&new_entry, &mut out.fv_counts, &mut out.rigid_counts, &mut out.mult_id_counts);
+            Self::index_entry(&new_entry, k, &mut out.fv_index, &mut out.mult_id_index);
+            out.bindings.insert(k.clone(), new_entry);
+        }
+        out
+    }
+
     /// Apply `subst` in place, rewriting ONLY the entries it can affect —
     /// found through the reverse indexes, so nothing else is even visited.
     /// When the aggregate check says the whole environment is untouched,
@@ -478,6 +502,12 @@ pub struct Checker {
     /// handler `take()`s it, falling back to the clause span when no statement
     /// marker was crossed. Reset per clause in `check_clause`.
     pub(super) error_span: Option<crate::ast::Span>,
+    /// `note:` lines for the error currently propagating out of expression
+    /// inference, recorded where the cause is known (deep in a case branch)
+    /// and attached when the clause-level handler pushes the diagnostic
+    /// (`push_error_span` / `push_error_ctx` drain it). Reset per clause
+    /// with `error_span`, so a note never outlives the error it explains.
+    pub(super) error_notes: Vec<String>,
     /// Current recursion depth of `ast_type_to_ty`, bounded by
     /// `crate::MAX_NESTING_DEPTH`. Type-alias and type-family expansion can
     /// deepen a type far beyond its written form (and a self-referential
@@ -731,6 +761,7 @@ impl Checker {
         let mut checker = Checker {
             expr_depth: 0,
             error_span: None,
+            error_notes: Vec::new(),
             type_depth: 0,
             alias_fuel: 0,
             alias_reported: false,
@@ -1167,6 +1198,13 @@ impl Checker {
         unify_tf(t1, t2, &self.ty_families)
     }
 
+    /// `types::unify_refining` with the checker's type families: the
+    /// unifier a constructor PATTERN uses against its scrutinee type, which
+    /// may refine a rigid GADT index for the branch (see `check_pattern`).
+    pub(super) fn unify_refining(&self, t1: &Ty, t2: &Ty) -> Result<(Subst, SkolemMap), DiagnosticKind> {
+        unify_refining(t1, t2, &self.ty_families)
+    }
+
     /// Expand a type alias application: `AliasName arg1 arg2` → substituted body.
     fn try_expand_type_alias(&mut self, ty: &Type) -> Option<Ty> {
         let mut args = Vec::new();
@@ -1452,7 +1490,8 @@ impl Checker {
 
     fn push_error_ctx(&mut self, kind: DiagnosticKind, ctx: String) {
         let baseline = self.checking_prelude;
-        let notes = self.existential_provenance_notes(&kind);
+        let mut notes = self.existential_provenance_notes(&kind);
+        notes.append(&mut self.error_notes);
         let file = self.cur_file.clone();
         self.errors.push(Diagnostic { kind, context: Some(ctx), span: None, file, notes, baseline, excerpt: None, names: None });
     }
@@ -1471,7 +1510,8 @@ impl Checker {
 
     fn push_error_span(&mut self, kind: DiagnosticKind, ctx: String, span: Span) {
         let baseline = self.checking_prelude;
-        let notes = self.existential_provenance_notes(&kind);
+        let mut notes = self.existential_provenance_notes(&kind);
+        notes.append(&mut self.error_notes);
         let file = self.cur_file.clone();
         self.errors.push(Diagnostic { kind, context: Some(ctx), span: Some(span), file, notes, baseline, excerpt: None, names: None });
     }

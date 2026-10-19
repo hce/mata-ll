@@ -836,6 +836,28 @@ accepted at one type and failing at a second. Drop the context (the
 binding is then inferred at the one type it is used at) or bind at the
 top level.
 
+## GADT matches need their result type where they are checked
+
+A GADT constructor pattern refines the scrutinee's index for its branch
+as in GHC — in a clause pattern, a case alternative, a nested pattern
+under an existential, and under pattern guards (SPEC.md, "GADTs"). The
+deviation is WHEN the result type must be known. GHC's solver collects
+the branch equalities as implications and solves the outer equalities
+first, so a use that comes later in the source can still determine the
+result type of the match: `ev e = r where r = case e of { I n -> n; B
+b -> b }` typechecks under GHC because `r` is used at `a`. mata-ll's
+checker unifies as it goes: the case in the unannotated `r` is
+inferred, the `I n` branch fixes the inferred result to `Int`, and the
+`B b` branch cannot agree with it. The rejection carries a note saying
+so; write the case where its result type is known (the clause body of
+`ev`, whose signature gives `a`). For the same reason a lambda whose
+parameter is matched on a GADT constructor needs its parameter type
+from an annotation, not from the argument it is later applied to, and a
+`where`/`let` function with a GADT signature of its own (`go :: E b ->
+b`) is checked against that signature only after its body has been
+inferred, so its constructor patterns do not refine `b` (rejected as a
+signature mismatch; GHC accepts it).
+
 ## Linear types match GHC's `LinearTypes`
 
 mata-ll implements GHC's linear arrows. A function arrow may carry a

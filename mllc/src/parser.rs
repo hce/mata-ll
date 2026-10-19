@@ -4346,7 +4346,8 @@ impl Parser {
         if matches!(fail, Expr::Var(_)) {
             return (None, fail);
         }
-        let name = self.pg_fresh_name("j");
+        self.pg_fresh += 1;
+        let name = format!("{}{}", JOIN_POINT_PREFIX, self.pg_fresh);
         (
             Some(LocalDef { name: name.clone(), patterns: vec![], body: fail, sig: None }),
             Expr::Var(name),
