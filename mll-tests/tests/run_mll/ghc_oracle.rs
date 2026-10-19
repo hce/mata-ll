@@ -316,6 +316,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_dict_dead_generic, "cases", "dict_dead_generic.mll"),
         (ghc_oracle_dict_two_constraints_one_class, "cases", "dict_two_constraints_one_class.mll"),
         (ghc_oracle_dictform_method_named_binders, "cases", "dictform_method_named_binders.mll"),
+        (ghc_oracle_dict_superclass_closure, "cases", "dict_superclass_closure.mll"),
         (ghc_oracle_opfunc_dollar_compose, "cases", "opfunc_dollar_compose.mll"),
         (ghc_oracle_div_exact_and_zero, "cases", "div_exact_and_zero.mll"),
         (ghc_oracle_div_large_exact, "cases", "div_large_exact.mll"),

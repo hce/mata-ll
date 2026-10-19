@@ -177,7 +177,16 @@ constant folding (§7) can then recognize them.
   ad infinitum → unbounded specializations). For those cases the compiler
   falls back to passing typeclass dictionaries at runtime. So the model is
   "monomorphize by default, dictionary-pass when specialization wouldn't
-  terminate."
+  terminate." The dictionary convention: one parameter per constraint of
+  the **superclass closure** of the declared context (`superclass_closure`
+  in `mono.rs`; `Ord a` gives an `Ord` and an `Eq` dictionary, in that
+  order), each dictionary one class's method table. The typechecker
+  discharges a superclass demand by entailment (`class_satisfies`), which
+  leaves no runtime evidence, so the closure is what makes `x == y` under
+  `Ord a` read a dictionary. The same closure gives a context instance's
+  dictionary form its parameters and an existential constructor its
+  hidden dictionary fields; `TFunction::dict_params` is the call
+  convention every DictCall site agrees with.
 - Type substitution into specialized bodies is what makes the copies concrete.
 
 If you ever see runtime `nil` where a method should be, suspect a missing

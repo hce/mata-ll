@@ -1348,7 +1348,21 @@ recursive call look like:
 A function with several constraints takes one dictionary parameter per
 constraint, in declaration order, named by position and class
 (`__dict1_Show`, `__dict2_Show` for `(Show a, Show b)`), so two
-constraints of one class never share a parameter.
+constraints of one class never share a parameter. The constraint list
+the parameters are built from is the *superclass closure* of the
+declared context: each declared constraint is followed by its
+superclasses, depth-first, deduplicated per class and variable, so
+`Ord a =>` takes `(__dict1_Ord, __dict2_Eq)`, `Monad m =>` takes
+`(__dict1_Monad, __dict2_Applicative, __dict3_Functor)`, and
+`(Eq a, Ord a) =>` takes `(__dict1_Eq, __dict2_Ord)` — one dictionary
+per class and variable, never two. A dictionary is one class's method
+table; a superclass method (`==` under `Ord a`, `show` under a class
+declared `class Show a => Named a`) reads its own class's parameter.
+The same closure rule gives a context instance's dictionary form its
+parameters (`instance Ord a => Ord (Box a)` closes over the `Ord a`
+and the `Eq a` dictionaries) and a constrained existential constructor
+its hidden fields. GHC stores the superclass dictionaries inside the
+subclass dictionary instead; the observable behaviour is the same.
 
 Limitation — read this before relying on it. The dictionary is built
 from the concrete type at the outermost call site and threaded

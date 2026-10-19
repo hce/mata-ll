@@ -44,6 +44,38 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A superclass method used under a subclass constraint reads its
+  dictionary in the dictionary-passing fallback** (silent wrong output /
+  crash). A function the monomorphizer compiles with dictionary passing
+  (past the specialization limit, polymorphically recursive, or called
+  at an existential type) took one dictionary per DECLARED constraint.
+  The typechecker discharges `Eq a` from a declared `Ord a` by
+  entailment, which leaves no runtime evidence, so `x == y` in `same ::
+  Ord a => a -> a -> Bool` reached codegen as a raw operator — Lua's
+  `==`, table identity: `same` at 18 list depths printed `True` then
+  seventeen `False`s (GHC: eighteen `True`s), `same (W 2) (W 4)` with a
+  `mod 2` equality printed `False` once an existential call put it in
+  the fallback, `show x` under `class Show a => Named a` fell to the
+  type-erased runtime show (`(7)` for `W 7`), and `fmap`/`pure` under
+  `Monad m` crashed ("attempt to call a nil value"). Every constraint
+  list a dictionary convention is built from is now the superclass
+  closure of the declared context, computed by one function
+  (`superclass_closure`): a dictionary-passing function's parameters
+  (`Ord a` takes `__dict1_Ord, __dict2_Eq`; `Monad m` takes Monad,
+  Applicative, Functor), the dictionary arguments at every call site, a
+  context instance's dictionary form (`instance Ord a => Ord (Box a)`
+  using `==` closes over the `Eq a` dictionary too), and a constrained
+  existential constructor's hidden fields (which already expanded
+  superclasses, now through the same function). A superclass that is
+  also declared explicitly keeps its first position, so `(Eq a, Ord a)`
+  and `(Ord a, Eq a)` each take exactly one `Eq` and one `Ord`
+  dictionary. GHC-goldened case `dict_superclass_closure` (Eq under Ord
+  past the limit and at an existential type, Show under a user class,
+  a two-level user chain, two superclasses, explicit duplicates in both
+  orders, the builtin containers' Eq, Functor/Applicative under Monad,
+  the Eq step inside a context instance's dictionary form, the Integral
+  and Fractional chains). SPEC.md, HASKDIFF.md and COMPILER.md describe
+  the convention. Found by the 2026-10 fresh-eyes review (T1).
 - **Two constraints of one class get two dictionary parameters in the
   dictionary-passing fallback** (silent wrong output / crash). A
   function the monomorphizer compiles with dictionary passing (past the

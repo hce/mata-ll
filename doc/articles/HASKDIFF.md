@@ -514,8 +514,14 @@ the substrate's proof of fidelity.
 A performance note, not a semantic one: a polymorphic function is
 specialised at up to 16 distinct types; past that the monomorphiser
 switches it (and the generic-instance methods it uses) to dictionary
-passing, which stays correct at any number of types but pays a runtime
-dictionary indirection where the first 16 got fully specialised code.
+passing, which is meant to stay correct at any number of types — the
+dictionary-passing form carries every dictionary the declared context
+entails, superclasses included — but pays a runtime dictionary
+indirection where the first 16 got fully specialised code. The fallback
+is a second implementation of method dispatch; its known remaining
+gaps (derived instances of parameterized types, operators and first-class
+operators at a still-polymorphic structured type, prefix negation) are
+tracked as open defects, not documented deviations.
 
 ## An import alias that names a data constructor loses its qualified form
 

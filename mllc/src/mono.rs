@@ -65,10 +65,56 @@ enum MethodDispatch {
 struct ExCtor {
     /// The declared field types, over the existential variables by NAME.
     field_types: Vec<Ty>,
-    /// The dictionaries captured, in order: each declared constraint's
-    /// (class, existential variable) followed by the class's superclasses
-    /// (an `Ord a` given also answers `==`), deduplicated.
+    /// The dictionaries captured, in order: the superclass closure of the
+    /// declared context (`superclass_closure` — an `Ord a` given also
+    /// answers `==`), as (class, existential variable).
     captures: Vec<(String, String)>,
+}
+
+/// The transitive superclass closure of a constraint list — THE order every
+/// dictionary convention of this module follows, for a dictionary-passing
+/// function's parameters, a context instance's dictionary-form parameters
+/// (and the sub-dictionaries its constructed dictionary closes over) and a
+/// constrained existential constructor's captured fields alike. Each
+/// declared constraint is followed by its superclasses, depth-first in the
+/// class's declaration order: `Sortable a` under `class Eq a => Ord a` and
+/// `class Ord a => Sortable a` gives `[Sortable a, Ord a, Eq a]`, and `Monad
+/// m` gives `[Monad m, Applicative m, Functor m]`. Deduplicated on (class,
+/// variable, argument), so a superclass that is also declared explicitly
+/// keeps the position it first appeared at: `(Eq a, Ord a)` is `[Eq a, Ord
+/// a]`, `(Ord a, Eq a)` is `[Ord a, Eq a]` — one dictionary per class and
+/// variable, never two. The structured argument of a compound constraint
+/// (`GEncode (Rep a)`) travels with the superclasses it introduces, so
+/// `fn_constraint_args` stays parallel.
+///
+/// The typechecker discharges a superclass demand (`Eq a` from a declared
+/// `Ord a`) by entailment, `class_satisfies`; that step leaves no runtime
+/// evidence, so the dictionary-passing fallback must carry the superclass
+/// dictionaries itself — exactly what GHC's dictionary layout provides by
+/// storing them inside the subclass dictionary. mata-ll passes them as
+/// separate parameters instead, which keeps a dictionary one class's
+/// method table (`SpecKind::Dict`/`DictCtor`, `CodeGen::dict_field`) and
+/// lets a method use resolve its (class, variable) in one lookup (T1).
+fn superclass_closure(
+    classes: &HashMap<String, ClassInfo>,
+    declared: Vec<(TyConstraint, Option<Ty>)>,
+) -> Vec<(TyConstraint, Option<Ty>)> {
+    let mut out: Vec<(TyConstraint, Option<Ty>)> = Vec::new();
+    for (c, arg) in declared {
+        let mut stack = vec![c.class_name.clone()];
+        while let Some(cls) = stack.pop() {
+            if out.iter().any(|(k, a)| k.class_name == cls && k.type_var == c.type_var && *a == arg) {
+                continue;
+            }
+            out.push((TyConstraint { class_name: cls.clone(), type_var: c.type_var.clone() }, arg.clone()));
+            if let Some(ci) = classes.get(&cls) {
+                for sup in ci.superclasses.iter().rev() {
+                    stack.push(sup.clone());
+                }
+            }
+        }
+    }
+    out
 }
 
 pub struct Monomorphizer {
@@ -174,7 +220,10 @@ pub struct Monomorphizer {
     /// the original (generic or dictionary-passing) function in `run` —
     /// otherwise they reference functions that no longer exist.
     purged_specs: HashMap<String, String>,
-    /// Typeclass constraints per function (from type signatures)
+    /// Typeclass constraints per function: the superclass closure of the
+    /// declared context, in `superclass_closure` order — one entry per
+    /// dictionary the function's dictionary-passing form takes, which is
+    /// the one convention every call site and body rewrite is built from.
     fn_constraints: HashMap<String, Vec<TyConstraint>>,
     /// Class definitions (class_name -> ClassInfo)
     classes: HashMap<String, ClassInfo>,
@@ -298,33 +347,69 @@ impl Monomorphizer {
         }
 
         // Constrained existential constructors: the dictionaries each one
-        // captures (declared constraints plus superclasses, deduplicated,
-        // in declaration order).
+        // captures — the superclass closure of its declared context.
         let classes_ref = checker.get_classes();
         let mut ex_ctors: HashMap<String, ExCtor> = HashMap::new();
         for (cname, info) in checker.get_constructors() {
             if info.existential_constraints.is_empty() {
                 continue;
             }
-            let mut captures: Vec<(String, String)> = Vec::new();
-            for c in &info.existential_constraints {
-                let mut queue = vec![c.class_name.clone()];
-                while let Some(cls) = queue.pop() {
-                    if captures.iter().any(|(k, v)| *k == cls && *v == c.type_var) {
-                        continue;
-                    }
-                    captures.push((cls.clone(), c.type_var.clone()));
-                    if let Some(ci) = classes_ref.get(&cls) {
-                        for sup in ci.superclasses.iter().rev() {
-                            queue.push(sup.clone());
-                        }
-                    }
-                }
-            }
+            let captures = superclass_closure(
+                classes_ref,
+                info.existential_constraints.iter().map(|c| (c.clone(), None)).collect(),
+            ).into_iter().map(|(c, _)| (c.class_name, c.type_var)).collect();
             ex_ctors.insert(cname.clone(), ExCtor {
                 field_types: info.field_types.clone(),
                 captures,
             });
+        }
+
+        // Every constraint list a dictionary convention is built from is
+        // the SUPERCLASS CLOSURE of what was declared (see
+        // `superclass_closure`): a function's context (`fn_constraints`,
+        // with `fn_constraint_args` kept parallel) and a context instance's
+        // context (`instances`). The checker discharges `Eq a` from a
+        // declared `Ord a` by entailment (`class_satisfies`), which leaves
+        // no runtime evidence; the dictionary-passing fallback must carry
+        // the `Eq` dictionary itself, or `x == y` under `Ord a` reaches
+        // codegen as a raw operator — Lua's `==`, table identity (T1).
+        // Prefer the final-name spelling of each function's constraints
+        // (the names its checked type actually uses); fall back to the
+        // source-name record for functions the checker did not re-express
+        // (none today, defensively).
+        let mut fn_constraints = checker.get_fn_constraints();
+        for (name, use_cs) in checker.get_fn_dict_constraints() {
+            fn_constraints.insert(name, use_cs);
+        }
+        let mut fn_constraint_args = checker.get_fn_constraint_args();
+        for (name, cs) in fn_constraints.iter_mut() {
+            let args = fn_constraint_args.get(name).cloned().unwrap_or_default();
+            // The argument types are parallel to the constraints by
+            // declaration order; a (defensive) length mismatch leaves the
+            // arguments unexpanded rather than pairing them wrongly.
+            let paired: Vec<(TyConstraint, Option<Ty>)> = if args.len() == cs.len() {
+                cs.iter().cloned().zip(args.into_iter().map(|(_, t)| Some(t))).collect()
+            } else {
+                cs.iter().cloned().map(|c| (c, None)).collect()
+            };
+            let closed = superclass_closure(classes_ref, paired);
+            if closed.iter().all(|(_, arg)| arg.is_some()) {
+                fn_constraint_args.insert(
+                    name.clone(),
+                    closed.iter()
+                        .map(|(c, arg)| (c.class_name.clone(), arg.clone().unwrap()))
+                        .collect(),
+                );
+            }
+            *cs = closed.into_iter().map(|(c, _)| c).collect();
+        }
+        for inst in instances.values_mut() {
+            if let Some(ctx) = inst.context.take() {
+                inst.context = Some(
+                    superclass_closure(classes_ref, ctx.into_iter().map(|c| (c, None)).collect())
+                        .into_iter().map(|(c, _)| c).collect(),
+                );
+            }
         }
 
         Monomorphizer {
@@ -353,21 +438,11 @@ impl Monomorphizer {
             purged_specs: HashMap::new(),
             gen_stack: Vec::new(),
             cur_dict_params: Vec::new(),
-            fn_constraints: {
-                // Prefer the final-name spelling of each function's
-                // constraints (the names its checked type actually uses);
-                // fall back to the source-name record for functions the
-                // checker did not re-express (none today, defensively).
-                let mut cs = checker.get_fn_constraints();
-                for (name, use_cs) in checker.get_fn_dict_constraints() {
-                    cs.insert(name, use_cs);
-                }
-                cs
-            },
+            fn_constraints,
             classes: checker.get_classes().clone(),
             method_to_class,
             locals: HashSet::new(),
-            fn_constraint_args: checker.get_fn_constraint_args(),
+            fn_constraint_args,
             cur_dict_by_arg: Vec::new(),
             in_dictform: false,
             ty_families: checker.get_ty_families().clone(),
@@ -2540,7 +2615,8 @@ impl Monomorphizer {
     }
 
     /// The three views of a constraint list's dictionary parameters, all
-    /// minted by `dict_param_name` in declaration order: the ordered
+    /// minted by `dict_param_name` in the list's order (the list is a
+    /// superclass closure, see `superclass_closure`): the ordered
     /// `(class, parameter)` pairs (`TFunction::dict_params`, the call
     /// convention), the per-class fallback `class -> parameter` (the FIRST
     /// constraint of the class, for a method use whose variable name the
@@ -3923,7 +3999,8 @@ impl Monomorphizer {
 
     /// Make sure dictionary-form methods exist for the parameterized
     /// instance (class, head): each instance method rewritten to take its
-    /// declared context's dictionaries as leading parameters, with every
+    /// context's dictionaries (the superclass closure of the declared
+    /// context — `instances` holds it closed) as leading parameters, with every
     /// still-polymorphic method use inside routed through them. Returns the
     /// per-method function names in class-declaration order, or None when
     /// the instance (or a polymorphic original) cannot be found.

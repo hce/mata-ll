@@ -214,6 +214,10 @@ mll_test!(dict_two_constraints_one_class, "dict_two_constraints_one_class.mll");
 // T12: the dictionary-form instance method is rewritten with the scoped
 // walk, so a binder named like a class method stays the binder.
 mll_test!(dictform_method_named_binders, "dictform_method_named_binders.mll");
+// T1: every dictionary convention is built from the superclass closure of
+// the declared context, so `==` under `Ord a` (and `show` under a class
+// with a Show superclass, fmap/pure under Monad) reads a dictionary.
+mll_test!(dict_superclass_closure, "dict_superclass_closure.mll");
 // First-class ($)/(.) sections emit real function values (the OpFunc
 // fallback wrote the operator verbatim into Lua — a syntax error); the
 // iife flattener declines vararg lambdas.
