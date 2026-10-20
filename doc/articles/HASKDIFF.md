@@ -517,10 +517,17 @@ switches it (and the generic-instance methods it uses) to dictionary
 passing, which is meant to stay correct at any number of types — the
 dictionary-passing form carries every dictionary the declared context
 entails, superclasses included — but pays a runtime dictionary
-indirection where the first 16 got fully specialised code. The fallback
-is a second implementation of method dispatch; its known remaining
-gaps (operators and first-class operators at a still-polymorphic
-structured type, prefix negation) are tracked as open defects, not
+indirection where the first 16 got fully specialised code. Method
+dispatch in the fallback is the same decision the specialising path
+makes, for every form a method use takes (named, infix on either
+operand, first-class, prefix negation, an overloaded literal): a
+binding that still contains a type variable or an existential type
+goes through a dictionary, and the container shapes (list, Maybe,
+tuple) compose their Eq, Ord and Show dictionaries from the elements'.
+The fallback's remaining known gaps (an existential nested inside
+another, an unconstrained function past the limit used at more arrows
+than it declares, a dictionary built before one of its methods itself
+switched to dictionary passing) are tracked as open defects, not
 documented deviations. A derived instance of a parameterized type takes
 part like a written one: `deriving` records GHC's derived context (the
 class at each parameter that occurs in a field, nothing for a phantom

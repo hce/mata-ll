@@ -38,18 +38,60 @@ struct SpecKey {
     ty: Ty,
 }
 
-/// The outcome of dispatching a class-method use site.
+/// What a class-method use lowers to — the ONE decision for every form a
+/// method takes (a named use, an infix operator on either operand, a
+/// first-class operator or section, prefix negation, an overloaded
+/// literal), made by `dispatch_method` for the main walk and the
+/// dictionary rewrite alike. The invariant it keeps: a use whose
+/// class-variable binding contains a type variable or an existential
+/// skolem is dispatched through EVIDENCE (a dictionary parameter, a
+/// captured existential dictionary, or a dictionary composed from them)
+/// whenever evidence is in scope; a native or specialized lowering is
+/// chosen only for a binding that needs none (`needs_evidence`). Before
+/// this, each syntactic
+/// form had its own copy of the decision and each copy missed cases —
+/// structural operators over a polymorphic element resolved to a
+/// type-erased shape implementation, a first-class `(==)` and a prefix
+/// `-x` kept the native Lua operator, a literal at an existential type
+/// stayed a machine number, an operator whose class variable sits in the
+/// right operand was never rewritten (T5, X1, X2, L14).
 #[derive(Debug)]
-enum MethodDispatch {
-    /// Resolved to this implementation function.
-    Resolved(String),
-    /// The class variable is still polymorphic here (or carries a rigid
-    /// skolem): dispatch is deferred — to the enclosing specialization, the
-    /// dictionary-passing rewrite, or the retained generic fallback copy.
+enum MethodUse {
+    /// The implementation IS the operator (the builtin `+` at Int/Number,
+    /// IO's `>>=`): the node stays as written and codegen emits it
+    /// natively — byte-identical to the pre-overloading compiler.
+    Native,
+    /// A named implementation function: a specialized instance method, a
+    /// generated structural implementation, or (for a binding that will
+    /// never see evidence) the type-erased generic copy.
+    Impl(String),
+    /// A dictionary read — a parameter access, a captured existential
+    /// dictionary, or a method of a composed dictionary — applied to the
+    /// method's own extra dictionaries when the method carries
+    /// method-level constraints (`traverse`'s `Applicative f`).
+    Evidence(TExprKind),
+    /// No decision here: the binding is polymorphic and the evidence
+    /// arrives with the dictionary rewrite of this body (or, in a generic
+    /// copy, never — the node keeps codegen's type-erased lowering).
     Deferred,
     /// The class variable is bound to this concrete type, and no instance
     /// exists for it.
     Missing(Ty),
+}
+
+/// The dictionary evidence a dictionary-form body carries: its own
+/// dictionary parameters, as the precise `(class, variable) -> parameter`
+/// map a method use at exactly that variable resolves through (`env`) and
+/// the per-class fallback `class -> parameter` (the FIRST constraint of the
+/// class, for a use whose variable name the body no longer matches). Both
+/// views are minted by `dict_param_tables`. The main walk carries the EMPTY
+/// environment: there, evidence comes only from the captured dictionaries
+/// of an enclosing existential match (`Monomorphizer::skolem_dicts`), and
+/// `dict_evidence_for` answers "no" for every type variable.
+#[derive(Debug, Clone, Default)]
+struct DictEnv {
+    class_to_dict: HashMap<String, String>,
+    env: HashMap<(String, String), String>,
 }
 
 /// A constrained existential constructor (`data Box = forall a. Show a =>
@@ -147,8 +189,6 @@ pub struct Monomorphizer {
     specializations: HashMap<SpecKey, String>,
     /// Generated specialized functions
     generated: Vec<TFunction>,
-    /// Typeclass method -> set of class names it belongs to
-    class_methods: HashSet<String>,
     /// Instance dispatch table, shared with the typechecker's canonical
     /// registry: (method_name, instance head) -> implementation function.
     /// The head is the structured identity of the instance's target type
@@ -229,6 +269,17 @@ pub struct Monomorphizer {
     classes: HashMap<String, ClassInfo>,
     /// Method name -> class name (reverse lookup)
     method_to_class: HashMap<String, String>,
+    /// The constraints a class method carries BEYOND its class's own
+    /// (`traverse :: (Traversable t, Applicative f) => …` carries
+    /// `Applicative f`), as their superclass closure — one dictionary
+    /// each, in this order. GHC's dictionary layout: the method's entry in
+    /// the class dictionary is a function of those dictionaries first.
+    /// Here, the method's dictionary form takes them after the instance
+    /// context's dictionaries (`ensure_dictform`), and every
+    /// dictionary-routed use applies the entry to the dictionaries built
+    /// for the method's own variables at that use (`dict_method_use`).
+    /// Only methods with such constraints are present.
+    method_dict_constraints: HashMap<String, Vec<TyConstraint>>,
     /// Locally-bound names (lambda params, let binds, case pattern vars)
     /// that should NOT be resolved as typeclass methods
     locals: HashSet<String>,
@@ -345,6 +396,27 @@ impl Monomorphizer {
             }
         }
 
+        // A method's own constraints beyond its class's (see the field):
+        // the checker records every constraint a method use emits,
+        // including the class's own `C classvar`; drop that one and close
+        // the rest over superclasses, the convention every dictionary
+        // list follows.
+        let mut method_dict_constraints: HashMap<String, Vec<TyConstraint>> = HashMap::new();
+        for (method, cs) in checker.get_method_constraints() {
+            let Some(class_name) = method_to_class.get(method) else { continue };
+            let Some(info) = checker.get_classes().get(class_name) else { continue };
+            let extra: Vec<(TyConstraint, Option<Ty>)> = cs.iter()
+                .filter(|c| !(c.class_name == *class_name && c.type_var == info.type_var))
+                .map(|c| (c.clone(), None))
+                .collect();
+            if extra.is_empty() {
+                continue;
+            }
+            let closed = superclass_closure(checker.get_classes(), extra)
+                .into_iter().map(|(c, _)| c).collect();
+            method_dict_constraints.insert(method.clone(), closed);
+        }
+
         // Constrained existential constructors: the dictionaries each one
         // captures — the superclass closure of its declared context.
         let classes_ref = checker.get_classes();
@@ -420,7 +492,6 @@ impl Monomorphizer {
             arity_only_fns: HashSet::new(),
             specializations: HashMap::new(),
             generated: Vec::new(),
-            class_methods,
             instance_methods,
             instances,
             instance_fn_ctx,
@@ -440,6 +511,7 @@ impl Monomorphizer {
             fn_constraints,
             classes: checker.get_classes().clone(),
             method_to_class,
+            method_dict_constraints,
             locals: HashSet::new(),
             fn_constraint_args,
             cur_dict_by_arg: Vec::new(),
@@ -734,68 +806,200 @@ impl Monomorphizer {
         }
     }
 
-    /// Dispatch a class-method use at the method type recorded on its TIR
-    /// node. Deterministic: bind the class variable (`class_var_binding`),
-    /// then resolve the instance for that binding — no positional guessing.
-    fn resolve_method_use(&mut self, method: &str, use_ty: &Ty) -> MethodDispatch {
-        // The class-variable binding is read from the RAW method type (its
-        // injective positions — `class_var_binding` blanks family apps), then
-        // the binding itself is reduced: `f := Rep T` becomes the concrete
-        // representation the instance is registered under. Specialization of a
-        // parameterized instance body, in contrast, must match against a
-        // use type whose families are ALSO reduced, so `Sum a b` lines up with
-        // the real representation instead of the un-reduced `Rep T`.
-        let Some(binding) = self.class_var_binding(method, use_ty) else {
-            return MethodDispatch::Deferred;
+    /// THE dispatch decision for a class-method use — see `MethodUse`.
+    /// `use_ty` is the instantiated method type the typechecker recorded
+    /// on the node (for an operator, `lhs -> rhs -> result`; for prefix
+    /// negation, `t -> t`; for a literal, `Integer -> t` or `Number ->
+    /// t`); `ev` is the dictionary environment of the enclosing
+    /// dictionary-form body, empty in the main walk. Called from every
+    /// arm of `mono_expr_node` and `rewrite_dict_expr` where a method can
+    /// appear, so the two passes make one decision:
+    ///
+    ///   1. the class-variable binding is read off `use_ty`
+    ///      (`class_var_binding`) and family-reduced;
+    ///   2. a binding that needs no evidence (`needs_evidence`: fully
+    ///      concrete, or a head whose instance demands nothing of the
+    ///      variable parts — `ST s`, `Either e`) resolves to its
+    ///      implementation (`resolve_at_type`): `Native` when the
+    ///      implementation is the operator itself, `Impl` otherwise,
+    ///      `Missing` with no instance;
+    ///   3. a binding over type variables or existential skolems is
+    ///      `Evidence` when every dictionary it needs is in scope
+    ///      (`dict_evidence_for`): the parameter, the captured binder, or
+    ///      a dictionary composed from them (`dict_method_use`);
+    ///   4. with no evidence in scope, inside the main walk of a body that
+    ///      is about to be rewritten to dictionary form (`in_dictform`)
+    ///      the use is `Deferred` to that rewrite — the node must stay as
+    ///      written so the rewrite finds it;
+    ///   5. otherwise no evidence will ever come (the retained generic
+    ///      copy of a polymorphic function, a rank-2 skolem): the
+    ///      type-erased best effort, `erased_method_impl`, or `Deferred`
+    ///      to codegen's erased lowering.
+    fn dispatch_method(&mut self, method: &str, use_ty: &Ty, ev: &DictEnv) -> MethodUse {
+        let Some(class) = self.method_to_class.get(method).cloned() else {
+            return MethodUse::Deferred;
         };
+        let Some(binding) = self.class_var_binding(method, use_ty) else {
+            // The binding could not be recovered (an unusual method
+            // shape): the enclosing body's parameter for the class, if it
+            // has one, else nothing to decide on.
+            return match ev.class_to_dict.get(&class) {
+                Some(p) => MethodUse::Evidence(TExprKind::DictAccess {
+                    dict_param: p.clone(),
+                    method_name: method.to_string(),
+                }),
+                None => MethodUse::Deferred,
+            };
+        };
+        // The binding is read from the RAW method type (its injective
+        // positions — `class_var_binding` blanks family apps), then the
+        // binding itself is reduced: `f := Rep T` becomes the concrete
+        // representation the instance is registered under. Specialization
+        // of a parameterized instance body, in contrast, must match
+        // against a use type whose families are ALSO reduced, so `Sum a b`
+        // lines up with the real representation instead of the un-reduced
+        // `Rep T`.
         let binding = self.reduce_families(&binding).unwrap_or(binding);
-        if !binding.free_vars().is_empty() || Self::contains_skolem(&binding) {
-            return MethodDispatch::Deferred;
+        if !self.needs_evidence(&class, &binding) {
+            let reduced_use_ty = self.reduce_families(use_ty).unwrap_or_else(|| use_ty.clone());
+            return match self.resolve_at_type(method, &binding, &reduced_use_ty) {
+                Some(name) if name == method => MethodUse::Native,
+                Some(name) => MethodUse::Impl(name),
+                None => MethodUse::Missing(binding),
+            };
         }
-        let reduced_use_ty = self.reduce_families(use_ty).unwrap_or_else(|| use_ty.clone());
-        match self.resolve_at_type(method, &binding, &reduced_use_ty) {
-            Some(name) => MethodDispatch::Resolved(name),
-            None => MethodDispatch::Missing(binding),
+        if self.dict_evidence_for(&class, &binding, ev) {
+            return MethodUse::Evidence(self.dict_method_use(&class, method, use_ty, ev));
+        }
+        if self.in_dictform {
+            return MethodUse::Deferred;
+        }
+        match self.erased_method_impl(method, &binding) {
+            Some(name) if name == method => MethodUse::Native,
+            Some(name) => MethodUse::Impl(name),
+            None => MethodUse::Deferred,
         }
     }
 
-    /// Dispatch an infix operator that is a class method. Same as
-    /// `resolve_method_use`, with one addition kept from the previous
-    /// behavior: at a *still-polymorphic* class-variable binding whose head
-    /// constructor is known (e.g. `==` on a `Tree a` field inside the
-    /// polymorphic derived `eq_Tree`), dispatch by head — the instance choice
-    /// depends only on the head — without specializing anything.
-    fn resolve_op_use(&mut self, method: &str, use_ty: &Ty) -> MethodDispatch {
-        // The shared concrete path first; only a still-polymorphic binding
-        // (Deferred) falls through to the operator-only dispatch below.
-        match self.resolve_method_use(method, use_ty) {
-            MethodDispatch::Deferred => {}
-            decided => return decided,
+    /// Does a `class` method at binding `ty` need runtime evidence — is
+    /// its instance, or something that instance's context demands, still
+    /// polymorphic? A ground binding needs none; a type variable or an
+    /// existential skolem always does; a structural shape of Eq/Ord/Show
+    /// needs what its elements need; a type with an instance for its head
+    /// needs what the instance's context demands of the bound arguments
+    /// (`ST s`, `Either e` and `LuaIO s` under Monad demand nothing of
+    /// their variable argument, so the head decides and the use lowers
+    /// natively — the same decision the specializing path always made
+    /// for them; a derived `Eq (Either a b)` at a class variable demands
+    /// `Eq a`); a builtin instance registered without a context (the
+    /// structural rule: every argument needs the class) needs evidence
+    /// for every argument that is not ground.
+    fn needs_evidence(&self, class: &str, ty: &Ty) -> bool {
+        if ty.free_vars().is_empty() && !Self::contains_skolem(ty) {
+            return false;
         }
-        let Some(binding) = self.class_var_binding(method, use_ty) else {
-            return MethodDispatch::Deferred;
-        };
-        let binding = self.reduce_families(&binding).unwrap_or(binding);
-        // Polymorphic binding: structural eq still specializes by shape
-        // (element eq degrades to the raw-equality runtime fallback), other
-        // methods dispatch by instance head alone.
-        if method == "=="
-            && let Some(name) = self.structural_eq_impl(&binding) {
-                return MethodDispatch::Resolved(name);
+        match ty {
+            Ty::Var(_) | Ty::Skolem(..) => true,
+            _ => {
+                if Self::is_structural_class(class)
+                    && let Some((_, elems)) = Self::structural_shape(ty)
+                {
+                    return elems.iter().any(|e| self.needs_evidence(class, e));
+                }
+                let Some(head) = InstHead::of(ty) else { return true };
+                let Some(inst) = self.instances.get(&(class.to_string(), head)) else {
+                    return true;
+                };
+                match &inst.context {
+                    Some(ctx) => {
+                        let mut bind: HashMap<String, Ty> = HashMap::new();
+                        Self::collect_subst_by_name(&inst.target_type, ty, &mut bind);
+                        ctx.iter().any(|c| match bind.get(&c.type_var) {
+                            Some(sub) => self.needs_evidence(&c.class_name, sub),
+                            None => true,
+                        })
+                    }
+                    None => true,
+                }
             }
-        if method == "/="
-            && let Some(name) = self.structural_ne_impl(&binding) {
-                return MethodDispatch::Resolved(name);
+        }
+    }
+
+    /// Is every dictionary a `class` dictionary for `ty` would be composed
+    /// from in scope? The side-effect-free twin of `build_dict_expr`'s
+    /// decision tree, so a use is routed through evidence exactly when the
+    /// evidence can be built: a type variable needs the body's parameter
+    /// for (class, variable) — or the body's parameter for the class — an
+    /// existential skolem needs a captured dictionary for the class, a
+    /// ground type is always buildable (a static dictionary), a structural
+    /// shape of Eq/Ord/Show needs its elements', and a parameterized
+    /// instance needs what its context demands of the bound arguments.
+    fn dict_evidence_for(&self, class: &str, ty: &Ty, ev: &DictEnv) -> bool {
+        match ty {
+            Ty::Var(v) => ev.env.contains_key(&(class.to_string(), v.name.clone()))
+                || ev.class_to_dict.contains_key(class),
+            Ty::Skolem(_, id) => self.skolem_dict_for(class, *id).is_some(),
+            _ if ty.free_vars().is_empty() && !Self::contains_skolem(ty) => true,
+            _ => {
+                // A compound binding (`Rep a`) that IS one of the enclosing
+                // function's constraints (`GEncode (Rep a)`) has the
+                // dictionary PARAMETER standing for it (`dict_method_use`).
+                if self.cur_dict_by_arg.iter()
+                    .any(|(cls, arg, _)| cls == class && Self::arg_matches(arg, ty))
+                {
+                    return true;
+                }
+                if Self::is_structural_class(class)
+                    && let Some((_, elems)) = Self::structural_shape(ty)
+                {
+                    return elems.iter().all(|e| self.dict_evidence_for(class, e, ev));
+                }
+                let Some(head) = InstHead::of(ty) else { return false };
+                let Some(inst) = self.instances.get(&(class.to_string(), head)) else {
+                    return false;
+                };
+                match &inst.context {
+                    Some(ctx) => {
+                        let mut bind: HashMap<String, Ty> = HashMap::new();
+                        Self::collect_subst_by_name(&inst.target_type, ty, &mut bind);
+                        ctx.iter().all(|c| match bind.get(&c.type_var) {
+                            Some(sub) => self.dict_evidence_for(&c.class_name, sub, ev),
+                            None => false,
+                        })
+                    }
+                    // A builtin instance registered without a context: its
+                    // head-keyed static dictionary.
+                    None => true,
+                }
             }
-        if matches!(method, "compare" | "<" | "<=" | ">" | ">=" | "max" | "min")
-            && let Some(name) = self.structural_ord_impl(method, &binding) {
-                return MethodDispatch::Resolved(name);
-            }
-        if let Some(head) = InstHead::of(&binding)
-            && let Some(mangled) = self.instance_methods.get(&(method.to_string(), head)) {
-                return MethodDispatch::Resolved(mangled.clone());
-            }
-        MethodDispatch::Deferred
+        }
+    }
+
+    /// The type-erased best effort for a method use whose binding is still
+    /// polymorphic and will never see evidence (step 5 of
+    /// `dispatch_method`): the structural shape's own implementation with
+    /// erased element dispatch (`__mll_eq`/`__mll_cmp` for the element,
+    /// which is right for scalars) — `==` on a `[a]`, `compare` on a
+    /// `Maybe a` — or the instance for the binding's head constructor
+    /// (`==` on a `Tree a` field inside the generic derived `eq_Tree`, whose
+    /// instance choice depends only on the head). `None` leaves the node as
+    /// written, codegen's erased lowering.
+    fn erased_method_impl(&mut self, method: &str, binding: &Ty) -> Option<String> {
+        match method {
+            "==" => if let Some(name) = self.structural_eq_impl(binding) {
+                return Some(name);
+            },
+            "/=" => if let Some(name) = self.structural_ne_impl(binding) {
+                return Some(name);
+            },
+            "compare" | "<" | "<=" | ">" | ">=" | "max" | "min" =>
+                if let Some(name) = self.structural_ord_impl(method, binding) {
+                    return Some(name);
+                },
+            _ => {}
+        }
+        let head = InstHead::of(binding)?;
+        self.instance_methods.get(&(method.to_string(), head)).cloned()
     }
 
     /// Resolve the implementation of `method` for a CONCRETE class-variable
@@ -1415,10 +1619,18 @@ impl Monomorphizer {
         fn take(e: &mut TExpr) -> TExpr {
             std::mem::replace(e, TExpr::new(TExprKind::Lit(TLiteral::Unit), Ty::Unit))
         }
+        // The clause's existential captures scope over the same expressions
+        // as its binders (the patterns were extended by the main walk; this
+        // re-reads their dictionary binders, see `ex_rewrite_pattern`), so
+        // a method use the rewrite reaches at a hidden type — one the main
+        // walk deferred because its binding ALSO contains this body's class
+        // variable — finds the captured dictionary.
+        let mut caps = Vec::new();
+        clause.patterns = self.ex_rewrite_patterns(std::mem::take(&mut clause.patterns), &mut caps);
         let scope: Vec<String> = clause.patterns.iter().flat_map(TPattern::bound_vars)
             .chain(clause.where_binds.iter().map(|ld| ld.name.clone()))
             .collect();
-        self.with_locals(scope, |m| {
+        self.with_ex_scope(caps, |m| m.with_locals(scope, |m| {
             for g in &mut clause.guards {
                 g.condition = f(m, take(&mut g.condition));
                 g.body = f(m, take(&mut g.body));
@@ -1430,7 +1642,7 @@ impl Monomorphizer {
                 let body = take(&mut wb.body);
                 wb.body = m.with_locals(params, |m| f(m, body));
             }
-        });
+        }));
     }
 
     /// One level of binder-scoped descent for the dictionary rewrite passes:
@@ -1638,23 +1850,17 @@ impl Monomorphizer {
                 // method type the typechecker recorded on this node.
                 // Skip if the name is a locally-bound variable (parameter, let,
                 // case pattern).
-                if self.class_methods.contains(name) && !self.locals.contains(name) {
-                    match self.resolve_method_use(name, &ty) {
-                        MethodDispatch::Resolved(mangled) => {
+                if self.method_to_class.contains_key(name) && !self.locals.contains(name) {
+                    match self.dispatch_method(name, &ty, &DictEnv::default()) {
+                        MethodUse::Impl(mangled) => {
                             return TExpr { kind: TExprKind::Var(mangled), ty };
                         }
-                        MethodDispatch::Missing(binding) => {
-                            self.push_no_instance(name, &binding);
-                        }
-                        MethodDispatch::Deferred => {
-                            // A method at an EXISTENTIAL type (a skolem
-                            // bound by an enclosing constructor match):
-                            // dispatch through the dictionary the
-                            // constructor captured for it.
-                            if let Some(kind) = self.ex_method_use(name, &ty) {
-                                return TExpr { kind, ty };
-                            }
-                        }
+                        // A method at an EXISTENTIAL type (a skolem bound
+                        // by an enclosing constructor match): the
+                        // dictionary the constructor captured for it.
+                        MethodUse::Evidence(kind) => return TExpr { kind, ty },
+                        MethodUse::Missing(binding) => self.push_no_instance(name, &binding),
+                        MethodUse::Native | MethodUse::Deferred => {}
                     }
                 }
                 // A constrained polymorphic function used FIRST-CLASS at an
@@ -1799,7 +2005,7 @@ impl Monomorphizer {
                 // arguments (see ExCtor). Checked on the un-rewritten spine
                 // so an infeasible pack leaves the node untouched.
                 if let Some(ex_name) = self.ex_saturated_ctor(&whole)
-                    && let Some(packed) = self.ex_pack_saturated(ex_name, whole.clone(), true, &HashMap::new(), &HashMap::new())
+                    && let Some(packed) = self.ex_pack_saturated(ex_name, whole.clone(), true, &DictEnv::default())
                 {
                     return packed;
                 }
@@ -1835,7 +2041,7 @@ impl Monomorphizer {
             // (the field types are read off this node's instantiated type).
             TExprKind::Con(ref name) if self.ex_ctors.contains_key(name) => {
                 let name = name.clone();
-                match self.ex_eta_expand(&name, ty.clone(), &HashMap::new(), &HashMap::new()) {
+                match self.ex_eta_expand(&name, ty.clone(), &DictEnv::default()) {
                     Some(kind) => kind,
                     None => TExprKind::Con(name),
                 }
@@ -1851,20 +2057,19 @@ impl Monomorphizer {
                 // Lua syntax error). Only a successful resolution rewrites;
                 // deferred/missing uses keep the old fallback.
                 let op = op.clone();
-                if self.class_methods.contains(&op)
-                    && !self.locals.contains(&op)
-                    && !self.is_polymorphic(&ty)
-                    && let MethodDispatch::Resolved(mangled) = self.resolve_op_use(&op, &ty)
-                {
-                    // A self-mapping instance (mangled == op) is a builtin Lua
-                    // operator (`+`/`-`/`*`/`/` at Int/Number, the numeric
-                    // classes' operators): keep it as an OpFunc so codegen emits
-                    // the native operator lambda — byte-identical to before the
-                    // operator became a class method, and never a reference to a
-                    // nonexistent `_plus_`-style global. Only a real instance fn
-                    // (a user Num type, `<>`, …) rewrites to a Var call.
-                    if mangled != op {
-                        return TExpr { kind: TExprKind::Var(mangled), ty };
+                if self.method_to_class.contains_key(&op) && !self.locals.contains(&op) {
+                    match self.dispatch_method(&op, &ty, &DictEnv::default()) {
+                        // A real instance function (a user Num type, `<>`,
+                        // …) or a dictionary read becomes the value; a
+                        // NATIVE operator (`+` at Int/Number) stays an
+                        // OpFunc so codegen emits the operator lambda —
+                        // byte-identical to before the operator became a
+                        // class method, and never a reference to a
+                        // nonexistent `_plus_`-style global.
+                        MethodUse::Impl(mangled) => return TExpr { kind: TExprKind::Var(mangled), ty },
+                        MethodUse::Evidence(kind) => return TExpr { kind, ty },
+                        MethodUse::Missing(binding) => self.push_no_instance(&op, &binding),
+                        MethodUse::Native | MethodUse::Deferred => {}
                     }
                 }
                 expr.kind
@@ -1874,51 +2079,26 @@ impl Monomorphizer {
                 // the operator's own instantiated type, but it is exactly
                 // `lhs.ty -> rhs.ty -> result_ty` — reconstruct it and
                 // dispatch the same way as a named method use.
-                if self.class_methods.contains(&op) && !self.locals.contains(&op) {
-                    let lookup_op = op.clone();
+                if self.method_to_class.contains_key(&op) && !self.locals.contains(&op) {
                     let use_ty = Ty::fun(&[lhs.ty.clone(), rhs.ty.clone()], ty.clone());
-
-                    // The resolved method as an expression: the mangled
-                    // implementation name, or — at an existential skolem
-                    // with a captured dictionary — the dictionary method
-                    // read (see ex_method_use). `self_mapped` marks a
-                    // builtin whose implementation IS the operator.
-                    let resolved: Option<(TExpr, bool)> = match self.resolve_op_use(&lookup_op, &use_ty) {
-                        MethodDispatch::Resolved(mangled) => {
-                            let self_mapped = mangled == op;
-                            Some((TExpr::new(TExprKind::Var(mangled), Ty::Unit), self_mapped))
-                        }
-                        MethodDispatch::Missing(binding) => {
+                    // The method as an expression: the implementation
+                    // name, or a dictionary read at an existential skolem
+                    // with a captured dictionary. A NATIVE operator (IO's
+                    // `>>=`, `+` at Int) stays an InfixApp for the normal
+                    // handling below.
+                    let method_expr: Option<TExpr> = match self.dispatch_method(&op, &use_ty, &DictEnv::default()) {
+                        MethodUse::Impl(mangled) => Some(TExpr::new(TExprKind::Var(mangled), Ty::Unit)),
+                        MethodUse::Evidence(kind) => Some(TExpr::new(kind, use_ty.clone())),
+                        MethodUse::Missing(binding) => {
                             self.push_no_instance(&op, &binding);
                             None
                         }
-                        MethodDispatch::Deferred => self
-                            .ex_method_use(&lookup_op, &use_ty)
-                            .map(|kind| (TExpr::new(kind, use_ty.clone()), false)),
+                        MethodUse::Native | MethodUse::Deferred => None,
                     };
-
-                    if let Some((method_expr, self_mapped)) = resolved {
-                        // If the mangled name matches the operator, keep as InfixApp
-                        // (e.g. IO monad's >>= stays >>=)
-                        if self_mapped {
-                            // fall through to normal InfixApp handling below
-                        } else {
-                            let mono_lhs = self.mono_expr(*lhs);
-                            let mono_rhs = self.mono_expr(*rhs);
-                            return TExpr {
-                                kind: TExprKind::App(
-                                    Box::new(TExpr::new(
-                                        TExprKind::App(
-                                            Box::new(method_expr),
-                                            Box::new(mono_lhs),
-                                        ),
-                                        Ty::Unit,
-                                    )),
-                                    Box::new(mono_rhs),
-                                ),
-                                ty,
-                            };
-                        }
+                    if let Some(method_expr) = method_expr {
+                        let mono_lhs = self.mono_expr(*lhs);
+                        let mono_rhs = self.mono_expr(*rhs);
+                        return Self::method_operator_app(method_expr, mono_lhs, mono_rhs, ty);
                     }
                 }
                 // A non-class-method operator that names a polymorphic function
@@ -1953,24 +2133,16 @@ impl Monomorphizer {
                 }
             }
             TExprKind::Negate(inner) => {
-                // Prefix minus. Int/Number negate inline to Lua unary `-`; every
-                // other Num type (Integer, user instances) has no `__unm`, so it
-                // must dispatch to that instance's `negate` — same rule the
-                // InfixApp arm applies to `+ - *`.
+                // Prefix minus is the `negate` method at `t -> t`: Int and
+                // Number keep Lua's unary `-`; every other Num type (Integer,
+                // a user instance, a dictionary-bound or existential type)
+                // has no `__unm`, so it dispatches like any method — the
+                // same decision the InfixApp arm makes for `+ - *`.
                 let inner = self.mono_expr(*inner);
-                let prim = matches!(&ty, Ty::Con(c) if c == "Int" || c == "Number");
-                if !prim
-                    && let Some(head) = InstHead::of(&ty)
-                    && let Some(neg) = self.instance_methods.get(&("negate".to_string(), head)) {
-                    return TExpr {
-                        kind: TExprKind::App(
-                            Box::new(TExpr::new(TExprKind::Var(neg.clone()), Ty::Unit)),
-                            Box::new(inner),
-                        ),
-                        ty,
-                    };
+                match self.negate_use(&ty, inner, &DictEnv::default()) {
+                    Ok(e) => return e,
+                    Err(inner) => TExprKind::Negate(Box::new(inner)),
                 }
-                TExprKind::Negate(Box::new(inner))
             }
             TExprKind::Lambda { params, body } => {
                 let names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
@@ -2005,89 +2177,15 @@ impl Monomorphizer {
                     TExprKind::Let { binds, body }
                 })
             }
-            // Numeric-literal overloading, GHC-faithful. A polymorphic integer
-            // literal is `fromInteger (n :: Integer)`; a fractional literal is
-            // `fromRational (n :: Number)`. At a concrete Int/Number type the
-            // conversion is the identity, so the raw literal is emitted directly
-            // (byte-identical to the pre-overloading compiler). Otherwise:
-            //   * target Integer  -> `fromInteger_Integer n`  (machine -> bignum)
-            //   * a USER Num type -> `fromInteger_T (fromInteger_Integer n)` —
-            //     the user's `fromInteger` receives an actual Integer, as in GHC.
-            // The fractional path is unchanged (fromRational takes a Number).
-            TExprKind::Lit(lit @ (TLiteral::Integer(_) | TLiteral::Number(_))) => {
-                let is_frac = matches!(lit, TLiteral::Number(_));
-                let method = if is_frac { "fromRational" } else { "fromInteger" };
-                let lit_src_ty = if is_frac { "Number" } else { "Int" };
-                match self.numeric_literal_conversion(method, &ty) {
-                    Some(conv_fn) => {
-                        // An integer literal bound for a real fromInteger must
-                        // arrive EXACT. Emitted as a bare Lua numeral it is read
-                        // back by the host, and a doubles-only host (LuaJIT)
-                        // rounds anything past 2^53 — `9223372036854775807 ::
-                        // Integer` became 2^63 before the bignum ever saw it.
-                        // Past 2^53, re-dispatch as a BigInteger literal, which
-                        // codegen emits through the exact `__mll_biglit`
-                        // decimal pool on every host. (At machine Int/Number
-                        // types the conversion is None and the raw literal
-                        // remains the documented host representation.)
-                        if let TLiteral::Integer(n) = lit {
-                            if n.unsigned_abs() > (1u64 << 53) {
-                                return self.mono_expr(TExpr {
-                                    kind: TExprKind::Lit(TLiteral::BigInteger(n.to_string())),
-                                    ty,
-                                });
-                            }
-                        }
-                        // The literal in its source (Int/Number) representation.
-                        let raw = TExpr::new(
-                            TExprKind::Lit(lit),
-                            Ty::Con(lit_src_ty.to_string()),
-                        );
-                        // For a user Num type, first lift the machine literal to
-                        // an Integer so `fromInteger_T` is fed an Integer.
-                        let arg = if !is_frac && conv_fn != "fromInteger_Integer" {
-                            TExpr::new(
-                                TExprKind::App(
-                                    Box::new(TExpr::new(
-                                        TExprKind::Var("fromInteger_Integer".into()),
-                                        Ty::Unit,
-                                    )),
-                                    Box::new(raw),
-                                ),
-                                Ty::Con("Integer".into()),
-                            )
-                        } else {
-                            raw
-                        };
-                        return TExpr {
-                            kind: TExprKind::App(
-                                Box::new(TExpr::new(TExprKind::Var(conv_fn), Ty::Unit)),
-                                Box::new(arg),
-                            ),
-                            ty,
-                        };
-                    }
-                    None => TExprKind::Lit(lit),
-                }
-            }
-            // A big (> i64) integer literal is already an Integer value (codegen
-            // emits `__int_from_decimal`). At Integer it is emitted bare; at any
-            // other Num type it is converted by that type's `fromInteger` (which
-            // for Int/Number narrows the bignum).
-            TExprKind::Lit(lit @ TLiteral::BigInteger(_)) => {
-                let raw = TExpr::new(TExprKind::Lit(lit), Ty::Con("Integer".into()));
-                match InstHead::of(&ty)
-                    .and_then(|h| self.instance_methods.get(&("fromInteger".to_string(), h))) {
-                    Some(conv) if conv != "fromInteger_Integer" => {
-                        return TExpr {
-                            kind: TExprKind::App(
-                                Box::new(TExpr::new(TExprKind::Var(conv.clone()), Ty::Unit)),
-                                Box::new(raw),
-                            ),
-                            ty,
-                        };
-                    }
-                    _ => return raw,
+            // Numeric-literal overloading, GHC-faithful: `fromInteger (n ::
+            // Integer)` / `fromRational (r :: Number)` through the one
+            // dispatch decision (see `literal_use`). At Int/Number the
+            // conversion is the identity and the raw literal is emitted
+            // (byte-identical to the pre-overloading compiler).
+            TExprKind::Lit(lit @ (TLiteral::Integer(_) | TLiteral::Number(_) | TLiteral::BigInteger(_))) => {
+                match self.literal_use(lit, &ty, &DictEnv::default()) {
+                    Ok(e) => return e,
+                    Err(lit) => TExprKind::Lit(lit),
                 }
             }
             // Everything else — If, Paren, Tuple, RecordUpdate, SpecCall and
@@ -2101,27 +2199,126 @@ impl Monomorphizer {
         TExpr { kind, ty }
     }
 
-    /// If `ty` is a concrete numeric type whose `class` instance's `method`
-    /// (`fromInteger`/`fromRational`) is a real conversion function — i.e. NOT
-    /// the built-in Int/Number identity — return that function's name so a
-    /// literal at `ty` can be wrapped in it. Int/Number (and anything not a
-    /// concrete instance) return `None`: the raw literal is emitted as-is.
-    fn numeric_literal_conversion(&self, method: &str, ty: &Ty) -> Option<String> {
-        // Only concrete, fully-resolved types dispatch; a still-free variable is
-        // left to defaulting (it should already be Int/Number by now).
-        if !ty.free_vars().is_empty() || Self::contains_skolem(ty) {
-            return None;
+    /// A method applied infix: `method lhs rhs` as two Apps (the shape
+    /// codegen's N-ary call protocol flattens), the one builder both passes
+    /// use for an operator that dispatched to a function or a dictionary
+    /// read.
+    fn method_operator_app(method_expr: TExpr, lhs: TExpr, rhs: TExpr, ty: Ty) -> TExpr {
+        TExpr {
+            kind: TExprKind::App(
+                Box::new(TExpr::new(
+                    TExprKind::App(Box::new(method_expr), Box::new(lhs)),
+                    Ty::Unit,
+                )),
+                Box::new(rhs),
+            ),
+            ty,
         }
-        let head = InstHead::of(ty)?;
-        let mangled = self.instance_methods.get(&(method.to_string(), head))?;
-        // The built-in Int/Number instances name their fromInteger/
-        // fromRational the identity passthroughs; those are erasable, so a
-        // literal at Int/Number is emitted bare. A user instance names its
-        // own conversion — materialise it.
-        match mangled.as_str() {
-            "fromInteger_Int" | "fromInteger_Number" | "fromRational_Number" => None,
-            other => Some(other.to_string()),
+    }
+
+    /// Prefix negation at type `ty` with the already-processed operand:
+    /// the `negate` method dispatched at `ty -> ty` (see `dispatch_method`)
+    /// applied to the operand, or the operand handed back (`Err`) when the
+    /// node stays Lua's unary minus — the native Int/Number negate, or a
+    /// deferred decision. The builtin Int/Number instances name their
+    /// `negate` the runtime helpers `negate_Int`/`negate_Number`, which a
+    /// first-class `negate` calls; the PREFIX form at those types is the
+    /// operator itself.
+    fn negate_use(&mut self, ty: &Ty, inner: TExpr, ev: &DictEnv) -> Result<TExpr, TExpr> {
+        let use_ty = Ty::arrow(ty.clone(), ty.clone());
+        let neg = match self.dispatch_method("negate", &use_ty, ev) {
+            MethodUse::Impl(name) if name != "negate_Int" && name != "negate_Number" =>
+                TExpr::new(TExprKind::Var(name), Ty::Unit),
+            MethodUse::Evidence(kind) => TExpr::new(kind, use_ty),
+            MethodUse::Missing(binding) => {
+                self.push_no_instance("negate", &binding);
+                return Err(inner);
+            }
+            MethodUse::Impl(_) | MethodUse::Native | MethodUse::Deferred => return Err(inner),
+        };
+        Ok(TExpr {
+            kind: TExprKind::App(Box::new(neg), Box::new(inner)),
+            ty: ty.clone(),
+        })
+    }
+
+    /// The overloaded lowering of a numeric literal at type `ty` — GHC's
+    /// `fromInteger (n :: Integer)` for an integer literal, `fromRational
+    /// (r :: Number)` for a fractional one — through `dispatch_method` at
+    /// `Integer -> ty` / `Number -> ty`:
+    ///   * Int/Number: the builtin conversions are the identity
+    ///     passthroughs (`fromInteger_Int`, `fromInteger_Number`,
+    ///     `fromRational_Number`), so the literal stays raw (`Err`) — the
+    ///     documented host representation;
+    ///   * Integer: `fromInteger_Integer n` (machine -> bignum);
+    ///   * a user Num type: `fromInteger_T (fromInteger_Integer n)` — the
+    ///     user's `fromInteger` receives an actual Integer, as in GHC;
+    ///   * a dictionary-bound or existential type: `<dict>.fromInteger`
+    ///     over the same Integer argument;
+    ///   * a deferred decision: raw (`Err`), the dictionary rewrite of
+    ///     the body comes back to it.
+    /// An integer literal bound for a real fromInteger must arrive EXACT:
+    /// emitted as a bare Lua numeral it is read back by the host, and a
+    /// doubles-only host (LuaJIT) rounds anything past 2^53 —
+    /// `9223372036854775807 :: Integer` became 2^63 before the bignum ever
+    /// saw it. Past 2^53 the Integer argument is the decimal-string
+    /// BigInteger literal, which codegen emits through the exact
+    /// `__mll_biglit` pool on every host; a BigInteger literal (> i64) is
+    /// already that.
+    fn literal_use(&mut self, lit: TLiteral, ty: &Ty, ev: &DictEnv) -> Result<TExpr, TLiteral> {
+        let integer = Ty::Con("Integer".into());
+        let number = Ty::Con("Number".into());
+        let (method, src_ty) = match &lit {
+            TLiteral::Integer(_) | TLiteral::BigInteger(_) => ("fromInteger", integer.clone()),
+            TLiteral::Number(_) => ("fromRational", number.clone()),
+            _ => return Err(lit),
+        };
+        let use_ty = Ty::arrow(src_ty, ty.clone());
+        let conv = match self.dispatch_method(method, &use_ty, ev) {
+            MethodUse::Impl(name) => match name.as_str() {
+                "fromInteger_Int" | "fromInteger_Number" | "fromRational_Number" => return Err(lit),
+                _ => TExpr::new(TExprKind::Var(name), Ty::Unit),
+            },
+            MethodUse::Evidence(kind) => TExpr::new(kind, use_ty),
+            MethodUse::Missing(binding) => {
+                self.push_no_instance(method, &binding);
+                return Err(lit);
+            }
+            MethodUse::Native | MethodUse::Deferred => return Err(lit),
+        };
+        let to_integer = |raw: TExpr| TExpr::new(
+            TExprKind::App(
+                Box::new(TExpr::new(TExprKind::Var("fromInteger_Integer".into()), Ty::Unit)),
+                Box::new(raw),
+            ),
+            integer.clone(),
+        );
+        let lifts = matches!(&conv.kind, TExprKind::Var(n) if n == "fromInteger_Integer");
+        let arg = match lit {
+            TLiteral::Integer(n) if n.unsigned_abs() > (1u64 << 53) =>
+                TExpr::new(TExprKind::Lit(TLiteral::BigInteger(n.to_string())), integer.clone()),
+            TLiteral::Integer(n) => {
+                let raw = TExpr::new(TExprKind::Lit(TLiteral::Integer(n)), Ty::Con("Int".into()));
+                // At Integer the conversion IS the lift: one call, not two.
+                if lifts {
+                    return Ok(TExpr { kind: to_integer(raw).kind, ty: ty.clone() });
+                }
+                to_integer(raw)
+            }
+            TLiteral::BigInteger(s) =>
+                TExpr::new(TExprKind::Lit(TLiteral::BigInteger(s)), integer.clone()),
+            TLiteral::Number(x) => TExpr::new(TExprKind::Lit(TLiteral::Number(x)), number.clone()),
+            _ => unreachable!(),
+        };
+        if lifts {
+            // A big literal at Integer is already an Integer value (codegen
+            // emits `__int_from_decimal`).
+            return Ok(TExpr { kind: arg.kind, ty: ty.clone() });
         }
+        Ok(TExpr {
+            kind: TExprKind::App(Box::new(conv), Box::new(arg)),
+            ty: ty.clone(),
+        })
     }
 
     /// Resolve the eq function for an element type, generating specialized eq
@@ -2622,10 +2819,7 @@ impl Monomorphizer {
     /// body no longer matches), and the precise `(class, variable) ->
     /// parameter` map a method use at exactly that variable resolves
     /// through.
-    #[allow(clippy::type_complexity)]
-    fn dict_param_tables(
-        constraints: &[TyConstraint],
-    ) -> (Vec<(String, String)>, HashMap<String, String>, HashMap<(String, String), String>) {
+    fn dict_param_tables(constraints: &[TyConstraint]) -> (Vec<(String, String)>, DictEnv) {
         let dict_params: Vec<(String, String)> = constraints.iter().enumerate()
             .map(|(i, c)| (c.class_name.clone(), Self::dict_param_name(i + 1, c)))
             .collect();
@@ -2637,7 +2831,7 @@ impl Monomorphizer {
             .zip(dict_params.iter())
             .map(|(c, (_, p))| ((c.class_name.clone(), c.type_var.clone()), p.clone()))
             .collect();
-        (dict_params, class_to_dict, env)
+        (dict_params, DictEnv { class_to_dict, env })
     }
 
     /// Rewrite a function to use dictionary-passing.
@@ -2658,7 +2852,7 @@ impl Monomorphizer {
             self.in_dictform = saved_in_dictform;
             func.clauses = fresh.clauses;
         }
-        let (dict_params, class_to_dict, env) = Self::dict_param_tables(&constraints);
+        let (dict_params, ev) = Self::dict_param_tables(&constraints);
         func.dict_params = dict_params.clone();
 
         // The (class, argument type, parameter) triples for COMPOUND-constraint
@@ -2680,15 +2874,19 @@ impl Monomorphizer {
         let saved_dict_params = std::mem::replace(&mut self.cur_dict_params, dict_params);
         for clause in &mut func.clauses {
             self.map_clause_exprs_scoped(clause, &mut |m, e| {
-                m.rewrite_dict_expr(e, &func_name, &class_to_dict, &env)
+                m.rewrite_dict_expr(e, &func_name, &ev)
             });
         }
         self.cur_dict_params = saved_dict_params;
         self.cur_dict_by_arg = saved_dict_by_arg;
     }
 
-    /// Rewrite an expression for dictionary-passing.
-    fn rewrite_dict_expr(&mut self, expr: TExpr, func_name: &str, class_to_dict: &HashMap<String, String>, env: &HashMap<(String, String), String>) -> TExpr {
+    /// Rewrite an expression for dictionary-passing: every method use the
+    /// main walk deferred takes its evidence from `ev` through the same
+    /// `dispatch_method` decision (named, infix, first-class, prefix
+    /// negation, literal), and every call to a constrained function gets
+    /// its dictionaries built here.
+    fn rewrite_dict_expr(&mut self, expr: TExpr, func_name: &str, ev: &DictEnv) -> TExpr {
         let ty = expr.ty.clone();
         let kind = match expr.kind {
             TExprKind::Var(ref name) => {
@@ -2698,13 +2896,14 @@ impl Monomorphizer {
                     // node (same discipline as mono_expr_node's Var arm).
                     return expr;
                 }
-                if let Some(class_name) = self.method_to_class.get(name).cloned()
-                    && class_to_dict.contains_key(&class_name)
-                        && self.is_polymorphic(&ty) {
-                            let kind = self.dict_method_use(
-                                &class_name, name, &ty, class_to_dict, env);
-                            return TExpr { kind, ty };
-                        }
+                if self.method_to_class.contains_key(name) {
+                    match self.dispatch_method(name, &ty, ev) {
+                        MethodUse::Impl(mangled) => return TExpr { kind: TExprKind::Var(mangled), ty },
+                        MethodUse::Evidence(kind) => return TExpr { kind, ty },
+                        // A missing instance was reported by the main walk.
+                        MethodUse::Native | MethodUse::Deferred | MethodUse::Missing(_) => {}
+                    }
+                }
                 // A FIRST-CLASS reference to a dict-passing function (the
                 // function itself, or a constrained sibling) inside this
                 // dictionary-form body: the bare name compiles to the
@@ -2735,8 +2934,7 @@ impl Monomorphizer {
                         let blanked = self.blank_family_apps(dt);
                         Self::collect_subst_by_name(&blanked, &ty, &mut bind);
                     }
-                    let dict_args = self.build_body_dict_args(
-                        &constraints, &bind, class_to_dict, env);
+                    let dict_args = self.build_body_dict_args(&constraints, &bind, ev);
                     let n_params = self.dict_fn_arity(&name).unwrap_or(0);
                     let inst_fn_ty = decl_ty.map(|mut t| {
                         for (v, s) in &bind {
@@ -2755,10 +2953,10 @@ impl Monomorphizer {
                 // build the dictionary (no concrete type); here it is the
                 // body's own dictionary parameter.
                 if let Some(ex_name) = self.ex_saturated_ctor(&expr)
-                    && let Some(packed) = self.ex_pack_saturated(ex_name, expr.clone(), false, class_to_dict, env)
+                    && let Some(packed) = self.ex_pack_saturated(ex_name, expr.clone(), false, ev)
                 {
                     return self.map_children_scoped(packed, &mut |m, c| {
-                        m.rewrite_dict_expr(c, func_name, class_to_dict, env)
+                        m.rewrite_dict_expr(c, func_name, ev)
                     });
                 }
                 let head_name = Self::app_head_name(&expr);
@@ -2832,8 +3030,7 @@ impl Monomorphizer {
                                 Self::collect_subst_by_name(&remaining, &ty, &mut bind);
                             }
                         }
-                        let mut dict_args = self.build_body_dict_args(
-                            &constraints, &bind, class_to_dict, env);
+                        let mut dict_args = self.build_body_dict_args(&constraints, &bind, ev);
                         if dict_args.is_empty() {
                             // No recorded constraints (defensive): pass the
                             // enclosing function's dictionary parameters
@@ -2846,7 +3043,7 @@ impl Monomorphizer {
                             }).collect();
                         }
                         let value_args: Vec<TExpr> = args.into_iter()
-                            .map(|a| self.rewrite_dict_expr(a, func_name, class_to_dict, env))
+                            .map(|a| self.rewrite_dict_expr(a, func_name, ev))
                             .collect();
                         let n_params = self.dict_fn_arity(&call_name)
                             .unwrap_or(value_args.len());
@@ -2863,113 +3060,84 @@ impl Monomorphizer {
                 expr.kind
             }
             TExprKind::InfixApp { op, lhs, rhs } => {
-                // An operator that is a class method of a dictionary this
-                // body carries (`==`, `/=`, `<>`, a user class's operator):
-                // read it from the dictionary. Left unrewritten, a dict-form
-                // `x /= y` reached codegen as a raw InfixApp and compiled to
-                // Lua's `~=` — table identity, ignoring the instance's
-                // method entirely (F6d).
-                if !self.locals.contains(&op)
-                    && let Some(class_name) = self.method_to_class.get(op.as_str()).cloned()
-                    && class_to_dict.contains_key(&class_name)
-                        && self.is_polymorphic(&lhs.ty) {
-                            let op_ty = Ty::arrow(
-                                lhs.ty.clone(),
-                                Ty::arrow(rhs.ty.clone(), ty.clone()),
-                            );
-                            let access_kind = self.dict_method_use(
-                                &class_name, &op, &op_ty, class_to_dict, env);
-                            let dict_access = TExpr::new(access_kind, Ty::Unit);
-                            let lhs = self.rewrite_dict_expr(*lhs, func_name, class_to_dict, env);
-                            let rhs = self.rewrite_dict_expr(*rhs, func_name, class_to_dict, env);
-                            let app1 = TExpr::new(TExprKind::App(Box::new(dict_access), Box::new(lhs)), Ty::Unit);
-                            return TExpr::new(TExprKind::App(Box::new(app1), Box::new(rhs)), ty);
-                        }
+                // An operator that is a class method (`==`, `/=`, `<>`, a
+                // user class's operator) at a binding this body has
+                // evidence for: read it from the dictionary. The decision
+                // is made on the operator's own instantiated type, so an
+                // operator whose class variable sits in the RIGHT operand
+                // (`2 *. x` for `(*.) :: Int -> a -> a`) is rewritten too.
+                // Left unrewritten, a dict-form `x /= y` reached codegen as
+                // a raw InfixApp and compiled to Lua's `~=` — table
+                // identity, ignoring the instance's method entirely (F6d).
+                if !self.locals.contains(&op) && self.method_to_class.contains_key(&op) {
+                    let op_ty = Ty::fun(&[lhs.ty.clone(), rhs.ty.clone()], ty.clone());
+                    let method_expr: Option<TExpr> = match self.dispatch_method(&op, &op_ty, ev) {
+                        MethodUse::Impl(mangled) => Some(TExpr::new(TExprKind::Var(mangled), Ty::Unit)),
+                        MethodUse::Evidence(kind) => Some(TExpr::new(kind, Ty::Unit)),
+                        MethodUse::Native | MethodUse::Deferred | MethodUse::Missing(_) => None,
+                    };
+                    if let Some(method_expr) = method_expr {
+                        let lhs = self.rewrite_dict_expr(*lhs, func_name, ev);
+                        let rhs = self.rewrite_dict_expr(*rhs, func_name, ev);
+                        return Self::method_operator_app(method_expr, lhs, rhs, ty);
+                    }
+                }
                 // An InfixApp whose operator is not a dict method: generic
                 // descent below, like every other structural node.
                 TExprKind::InfixApp { op, lhs, rhs }
+            }
+            // A FIRST-CLASS operator or section of a class method (`zipWith
+            // (==) xs ys`, `foldr (+) 0 xs`) at a binding this body has
+            // evidence for: the dictionary's method as a value.
+            TExprKind::OpFunc(ref op) => {
+                let op = op.clone();
+                if !self.locals.contains(&op) && self.method_to_class.contains_key(&op) {
+                    match self.dispatch_method(&op, &ty, ev) {
+                        MethodUse::Impl(mangled) => return TExpr { kind: TExprKind::Var(mangled), ty },
+                        MethodUse::Evidence(kind) => return TExpr { kind, ty },
+                        MethodUse::Native | MethodUse::Deferred | MethodUse::Missing(_) => {}
+                    }
+                }
+                TExprKind::OpFunc(op)
+            }
+            // Prefix negation at a binding this body has evidence for: the
+            // dictionary's `negate`. Left as a Negate node it reached
+            // codegen as Lua's unary minus on a table (L14).
+            TExprKind::Negate(inner) => {
+                let inner = self.rewrite_dict_expr(*inner, func_name, ev);
+                match self.negate_use(&ty, inner, ev) {
+                    Ok(e) => return e,
+                    Err(inner) => return TExpr { kind: TExprKind::Negate(Box::new(inner)), ty },
+                }
             }
             // An unsaturated constrained-existential constructor at this
             // body's class variable (see the Con arm of mono_expr_node).
             TExprKind::Con(ref name) if self.ex_ctors.contains_key(name) => {
                 let name = name.clone();
-                match self.ex_eta_expand(&name, ty.clone(), class_to_dict, env) {
+                match self.ex_eta_expand(&name, ty.clone(), ev) {
                     Some(kind) => kind,
                     None => TExprKind::Con(name),
                 }
             }
-            // A numeric literal at this body's class type variable is
+            // A numeric literal at a binding this body has evidence for
+            // (the class type variable, or a type over it) is
             // `fromInteger n` / `fromRational r` through the DICTIONARY —
-            // GHC's overloaded-literal semantics. mono_expr left it raw
-            // (its conversion is keyed on a concrete type, and here the
-            // type is the variable), and a raw machine literal reaching an
-            // Integer instance's `*` ("attempt to index a number") or a
-            // user data instance's pattern match was a crash / wrong
-            // answer past the specialization limit.
-            TExprKind::Lit(lit @ (TLiteral::Integer(_) | TLiteral::Number(_)))
-                if matches!(ty, Ty::Var(_)) =>
-            {
-                match self.dict_literal(&lit, &ty, class_to_dict, env) {
-                    Some(e) => return e,
-                    None => TExprKind::Lit(lit),
+            // GHC's overloaded-literal semantics. The main walk left it raw
+            // (deferred), and a raw machine literal reaching an Integer
+            // instance's `*` ("attempt to index a number") or a user data
+            // instance's pattern match was a crash / wrong answer past the
+            // specialization limit.
+            TExprKind::Lit(lit @ (TLiteral::Integer(_) | TLiteral::Number(_) | TLiteral::BigInteger(_))) => {
+                match self.literal_use(lit, &ty, ev) {
+                    Ok(e) => return e,
+                    Err(lit) => TExprKind::Lit(lit),
                 }
             }
             other => other,
         };
         self.map_children_scoped(TExpr { kind, ty }, &mut |m, c| {
-            m.rewrite_dict_expr(c, func_name, class_to_dict, env)
+            m.rewrite_dict_expr(c, func_name, ev)
         })
-    }
-
-    /// The dictionary-form of a numeric literal at class type variable `ty`:
-    /// `<dict>.fromInteger (n :: Integer)` for an integer literal (the
-    /// Integer built exactly — the interned bignum for a machine-range
-    /// value, the decimal-string form past 2^53, the same split as
-    /// mono_expr's concrete-type conversion), `<dict>.fromRational (r ::
-    /// Number)` for a fractional one. `None` when no dictionary in scope
-    /// provides the class (the literal then stays raw, as it always did).
-    fn dict_literal(
-        &mut self,
-        lit: &TLiteral,
-        ty: &Ty,
-        class_to_dict: &HashMap<String, String>,
-        env: &HashMap<(String, String), String>,
-    ) -> Option<TExpr> {
-        let (class_name, method, src_ty, arg) = match lit {
-            TLiteral::Integer(n) => {
-                let integer = Ty::Con("Integer".into());
-                let arg = if n.unsigned_abs() > (1u64 << 53) {
-                    TExpr::new(TExprKind::Lit(TLiteral::BigInteger(n.to_string())), integer.clone())
-                } else {
-                    TExpr::new(
-                        TExprKind::App(
-                            Box::new(TExpr::new(TExprKind::Var("fromInteger_Integer".into()), Ty::Unit)),
-                            Box::new(TExpr::new(TExprKind::Lit(TLiteral::Integer(*n)), Ty::Con("Int".into()))),
-                        ),
-                        integer.clone(),
-                    )
-                };
-                ("Num", "fromInteger", integer, arg)
-            }
-            TLiteral::Number(x) => {
-                let number = Ty::Con("Number".into());
-                let arg = TExpr::new(TExprKind::Lit(TLiteral::Number(*x)), number.clone());
-                ("Fractional", "fromRational", number, arg)
-            }
-            _ => return None,
-        };
-        let use_ty = Ty::arrow(src_ty, ty.clone());
-        let conv = self.dict_method_use(class_name, method, &use_ty, class_to_dict, env);
-        // No dictionary in scope for the class: dict_method_use falls back
-        // to the bare method name, which has nothing to call — keep the raw
-        // literal instead of emitting a nil call.
-        if matches!(conv, TExprKind::Var(_)) {
-            return None;
-        }
-        Some(TExpr::new(
-            TExprKind::App(Box::new(TExpr::new(conv, use_ty)), Box::new(arg)),
-            ty.clone(),
-        ))
     }
 
     /// Dictionary arguments for a use of a dict-passing function INSIDE a
@@ -2983,13 +3151,12 @@ impl Monomorphizer {
         &mut self,
         constraints: &[TyConstraint],
         bind: &HashMap<String, Ty>,
-        class_to_dict: &HashMap<String, String>,
-        env: &HashMap<(String, String), String>,
+        ev: &DictEnv,
     ) -> Vec<TExpr> {
         constraints.iter().map(|c| {
             let bound = bind.get(&c.type_var).cloned()
                 .unwrap_or_else(|| Ty::Var(TyVar { name: c.type_var.clone(), id: 0 }));
-            self.build_dict_expr(&c.class_name, &bound, class_to_dict, env)
+            self.build_dict_expr(&c.class_name, &bound, ev)
         }).collect()
     }
 
@@ -3310,8 +3477,7 @@ impl Monomorphizer {
         let constraints = self.fn_constraints.get(call_name).cloned().unwrap_or_default();
         let poly_fn_ty = self.poly_fns.get(call_name).map(|f| f.ty.clone());
         let n_params = self.dict_fn_arity(call_name).unwrap_or(args.len());
-        let empty_c2d: HashMap<String, String> = HashMap::new();
-        let empty_env: HashMap<(String, String), String> = HashMap::new();
+        let no_ev = DictEnv::default();
         // Signature variables := this use's types. Supplied argument types
         // bind variables in applied positions; matching the REMAINING
         // declared type against the node type binds variables that sit in
@@ -3357,13 +3523,11 @@ impl Monomorphizer {
                 }
                 let concrete = self.reduce_families(&concrete)
                     .unwrap_or(concrete);
-                dict_args.push(self.build_dict_expr(
-                    cls, &concrete, &empty_c2d, &empty_env));
+                dict_args.push(self.build_dict_expr(cls, &concrete, &no_ev));
             } else {
                 let concrete = subst.get(&c.type_var).cloned().unwrap_or_else(||
                     self.resolve_constraint_type(&c.type_var, poly_fn_ty.as_ref(), &args));
-                dict_args.push(self.build_dict_expr(
-                    &c.class_name, &concrete, &empty_c2d, &empty_env));
+                dict_args.push(self.build_dict_expr(&c.class_name, &concrete, &no_ev));
             }
         }
         let args: Vec<TExpr> = args.drain(..)
@@ -3512,6 +3676,22 @@ impl Monomorphizer {
         };
         let mut method_impls = Vec::new();
         for (method_name, method_sig) in &class_info.methods {
+            // A method with constraints of its own (`traverse`'s
+            // `Applicative f`) is polymorphic in a variable the class
+            // variable does not fix, so no one specialization can be its
+            // entry: the entry is the instance's dictionary form of the
+            // method, which takes the method-level dictionaries first (see
+            // `method_dict_constraints`). Before this, the entry was the
+            // generic `traverse·[]`, whose `list_traverse` at the
+            // applicative variable was a bare name — nil at runtime.
+            if self.method_dict_constraints.contains_key(method_name)
+                && let Some(head) = InstHead::of(concrete_ty)
+                && let Some(methods) = self.ensure_dictform(class_name, &head)
+                && let Some((_, dictform, _)) = methods.iter().find(|(m, _, _)| m == method_name)
+            {
+                method_impls.push((method_name.clone(), dictform.clone()));
+                continue;
+            }
             // Implementations already generated for this exact type (tuple/
             // list/Maybe show and eq) win; then full instance resolution —
             // the same specializing resolver ordinary method dispatch uses,
@@ -3613,24 +3793,28 @@ impl Monomorphizer {
     }
 
     /// The dictionary-routed form of a class-method use whose instantiated
-    /// method type is `use_ty`: a plain access on the enclosing dictionary
-    /// parameter when the class variable is bound to a bare type variable,
-    /// or an access on a dictionary EXPRESSION built for the bound type
-    /// (`[a]`, `Maybe a`, a ground type) otherwise.
+    /// method type is `use_ty`, given that `dict_evidence_for` holds for its
+    /// binding: a plain access on the enclosing dictionary parameter when
+    /// the class variable is bound to a bare type variable, the captured
+    /// binder's method at an existential skolem, or an access on a
+    /// dictionary EXPRESSION built for the bound type (`[a]`, `Maybe a`, a
+    /// ground type) otherwise. A method with constraints of its own
+    /// (`traverse`'s `Applicative f`) is applied to the dictionaries for
+    /// those, built for the variables' bindings at this use — GHC's
+    /// dictionary layout, where such an entry is a function of them.
     fn dict_method_use(
         &mut self,
         class_name: &str,
         method: &str,
         use_ty: &Ty,
-        class_to_dict: &HashMap<String, String>,
-        env: &HashMap<(String, String), String>,
+        ev: &DictEnv,
     ) -> TExprKind {
         let binding = self.class_var_binding(method, use_ty);
-        match binding {
+        let access = match binding {
             Some(Ty::Var(v)) => {
-                let param = env
+                let param = ev.env
                     .get(&(class_name.to_string(), v.name.clone()))
-                    .or_else(|| class_to_dict.get(class_name))
+                    .or_else(|| ev.class_to_dict.get(class_name))
                     .cloned();
                 match param {
                     Some(p) => TExprKind::DictAccess {
@@ -3661,21 +3845,22 @@ impl Monomorphizer {
                 if let Some((_, _, param)) = self.cur_dict_by_arg.iter()
                     .find(|(cls, arg, _)| cls == class_name && Self::arg_matches(arg, &bound))
                 {
-                    return TExprKind::DictAccess {
+                    TExprKind::DictAccess {
                         dict_param: param.clone(),
                         method_name: method.to_string(),
-                    };
-                }
-                let dict = self.build_dict_expr(class_name, &bound, class_to_dict, env);
-                TExprKind::DictMethod {
-                    dict: Box::new(dict),
-                    method_name: method.to_string(),
+                    }
+                } else {
+                    let dict = self.build_dict_expr(class_name, &bound, ev);
+                    TExprKind::DictMethod {
+                        dict: Box::new(dict),
+                        method_name: method.to_string(),
+                    }
                 }
             }
             None => {
                 // The binding could not be recovered (an unusual method
-                // shape): the old behavior — the enclosing parameter.
-                match class_to_dict.get(class_name) {
+                // shape): the enclosing parameter.
+                match ev.class_to_dict.get(class_name) {
                     Some(p) => TExprKind::DictAccess {
                         dict_param: p.clone(),
                         method_name: method.to_string(),
@@ -3683,7 +3868,30 @@ impl Monomorphizer {
                     None => TExprKind::Var(method.to_string()),
                 }
             }
+        };
+        if matches!(access, TExprKind::Var(_)) {
+            return access;
         }
+        let Some(extra) = self.method_dict_constraints.get(method).cloned() else {
+            return access;
+        };
+        // The method's own variables, bound by matching its declared type
+        // (families blanked — see `class_var_binding`) against the use.
+        let mut bind: HashMap<String, Ty> = HashMap::new();
+        if let Some(info) = self.classes.get(class_name)
+            && let Some((_, decl_ty)) = info.methods.iter().find(|(n, _)| n == method)
+        {
+            let decl_ty = self.blank_family_apps(decl_ty);
+            Self::collect_subst_by_name(&decl_ty, use_ty, &mut bind);
+        }
+        let mut applied = TExpr::new(access, Ty::Unit);
+        for c in &extra {
+            let bound = bind.get(&c.type_var).cloned()
+                .unwrap_or_else(|| Ty::Var(TyVar { name: c.type_var.clone(), id: 0 }));
+            let dict = self.build_dict_expr(&c.class_name, &bound, ev);
+            applied = TExpr::new(TExprKind::App(Box::new(applied), Box::new(dict)), Ty::Unit);
+        }
+        applied.kind
     }
 
     /// Is the instance method for `class_name` at `ty`'s head constructor
@@ -3699,27 +3907,25 @@ impl Monomorphizer {
     }
 
     /// Build a runtime dictionary EXPRESSION for `class_name` at type `ty`,
-    /// inside a dictionary-passing body whose own dictionaries are the
-    /// parameters recorded in `env` ((class, variable) -> parameter) /
-    /// `class_to_dict` (class -> parameter, the fallback when variable names
-    /// were freshened between signature and body).
+    /// inside a dictionary-passing body whose own dictionaries are `ev`'s
+    /// parameters (empty in the main walk, where the only evidence is the
+    /// captured dictionary of an enclosing existential match). The
+    /// decision tree `dict_evidence_for` mirrors:
     ///
     ///   - the constrained variable itself -> the parameter;
+    ///   - an existential skolem -> the captured binder;
     ///   - a still-polymorphic structured type with a context instance
     ///     (`[a]`, `T a`) -> the instance's dictionary-form methods closed
     ///     over the dictionaries the context demands (built recursively);
+    ///   - a structural shape of Eq/Ord/Show over such elements -> the
+    ///     shape's synthesized dictionary form over the element
+    ///     dictionaries (`structural_dict`);
     ///   - a ground type -> a static dictionary of fully-resolved methods.
-    fn build_dict_expr(
-        &mut self,
-        class_name: &str,
-        ty: &Ty,
-        class_to_dict: &HashMap<String, String>,
-        env: &HashMap<(String, String), String>,
-    ) -> TExpr {
+    fn build_dict_expr(&mut self, class_name: &str, ty: &Ty, ev: &DictEnv) -> TExpr {
         if let Ty::Var(v) = ty {
-            if let Some(p) = env
+            if let Some(p) = ev.env
                 .get(&(class_name.to_string(), v.name.clone()))
-                .or_else(|| class_to_dict.get(class_name))
+                .or_else(|| ev.class_to_dict.get(class_name))
             {
                 return TExpr::new(TExprKind::Var(p.clone()), Ty::Unit);
             }
@@ -3757,8 +3963,7 @@ impl Monomorphizer {
                 for c in &ctx {
                     let sub_ty = bind.get(&c.type_var).cloned()
                         .unwrap_or_else(|| Ty::Var(TyVar { name: c.type_var.clone(), id: 0 }));
-                    sub_dicts.push(self.build_dict_expr(
-                        &c.class_name, &sub_ty, class_to_dict, env));
+                    sub_dicts.push(self.build_dict_expr(&c.class_name, &sub_ty, ev));
                 }
                 let spec = SpecKind::DictCtor {
                     class: class_name.to_string(),
@@ -3777,83 +3982,261 @@ impl Monomorphizer {
             // head-keyed static dictionary (builtin classes whose runtime
             // methods are shape-generic, e.g. show).
         }
-        if class_name == "Eq" && (!ty.free_vars().is_empty() || over_hidden)
-            && let Some(dict) = self.structural_eq_dict(ty, class_to_dict, env)
-        {
-            return dict;
-        }
-        if class_name == "Show" && (!ty.free_vars().is_empty() || over_hidden)
-            && let Some(dict) = self.structural_show_dict(ty, class_to_dict, env)
+        if (!ty.free_vars().is_empty() || over_hidden)
+            && let Some(dict) = self.structural_dict(class_name, ty, ev)
         {
             return dict;
         }
         self.build_concrete_dict(class_name, ty)
     }
 
-    /// A composed Eq dictionary for a structural type over still-polymorphic
-    /// elements — `[a]`, `Maybe a`, tuples — inside a dictionary-passing
-    /// body. The builtin container instances have no `instances` entry for
-    /// the branch above to compose from (the specialized path generates
-    /// their eq on demand — generate_list_eq & co.), so the fallback chain
+    /// The classes whose builtin container instances (list, Maybe, tuple)
+    /// are compiler-owned STRUCTURAL implementations rather than registered
+    /// context instances: the specialized path generates their methods per
+    /// element type (`generate_list_eq` & co.), and the dictionary path
+    /// composes them from element dictionaries (`structural_dict`).
+    fn is_structural_class(class: &str) -> bool {
+        matches!(class, "Eq" | "Ord" | "Show")
+    }
+
+    /// The canonical memo shape of a structural type (element types erased
+    /// — a shape's dictionary form is generic over them) and the element
+    /// types a use needs dictionaries for: `[a]` -> (`[()]`, [a]), `Maybe
+    /// a` -> (`Maybe ()`, [a]), `(a, b)` -> (`((), ())`, [a, b]). `None`
+    /// for every other type.
+    fn structural_shape(ty: &Ty) -> Option<(Ty, Vec<Ty>)> {
+        match ty {
+            Ty::List(e) => Some((Ty::List(Box::new(Ty::Unit)), vec![(**e).clone()])),
+            Ty::App(f, e) if matches!(f.as_ref(), Ty::Con(n) if n == "Maybe") =>
+                Some((Ty::app(Ty::Con("Maybe".into()), Ty::Unit), vec![(**e).clone()])),
+            Ty::Tuple(es) if !es.is_empty() =>
+                Some((Ty::Tuple(vec![Ty::Unit; es.len()]), es.clone())),
+            _ => None,
+        }
+    }
+
+    /// A composed dictionary for a structural type over still-polymorphic
+    /// or existential elements — `[a]`, `Maybe a`, tuples — for Eq, Ord or
+    /// Show. The builtin container instances have no `instances` entry
+    /// for `build_dict_expr` to compose from (the specialized path
+    /// generates their methods on demand), so the fallback chain once
     /// bottomed out at build_concrete_dict's raw method name: an
     /// `_usr_eq__eq_` reference that exists nowhere — a nil-call crash at
-    /// the first recursive use (F6a). Builds a DictCtor over a synthesized
-    /// dictform function (one per container shape, memoized) that threads
-    /// the element dictionaries' `==` through the same runtime helpers the
-    /// specialized path uses (`__mll_list_eq`/`__mll_maybe_eq`, inline
-    /// tuple projection).
-    fn structural_eq_dict(
-        &mut self,
-        ty: &Ty,
-        class_to_dict: &HashMap<String, String>,
-        env: &HashMap<(String, String), String>,
-    ) -> Option<TExpr> {
-        let bool_ty = Ty::Con("Bool".into());
-        // Canonical memo shape (element types erased — the dictform is
-        // generic over them) plus the element types this use needs dicts for.
-        let (shape, elems): (Ty, Vec<Ty>) = match ty {
-            Ty::List(e) => (Ty::List(Box::new(Ty::Unit)), vec![(**e).clone()]),
-            Ty::App(f, e) if matches!(f.as_ref(), Ty::Con(n) if n == "Maybe") =>
-                (Ty::app(Ty::Con("Maybe".into()), Ty::Unit), vec![(**e).clone()]),
-            Ty::Tuple(es) if !es.is_empty() =>
-                (Ty::Tuple(vec![Ty::Unit; es.len()]), es.clone()),
-            _ => return None,
+    /// the first recursive use (F6a) — and `compare [x] [y]` under `Ord a`
+    /// was rejected outright ("cannot build the 'Ord' dictionary", X2).
+    /// Builds a DictCtor over synthesized dictionary-form functions (one
+    /// per class, shape and method, memoized) that thread the element
+    /// dictionaries' method through the same runtime helpers the
+    /// specialized path uses (`__mll_list_eq`/`__mll_list_cmp`/
+    /// `__mll_show_list`, their Maybe twins, inline tuple projection); the
+    /// class's remaining methods are GHC's defaults over the base one.
+    fn structural_dict(&mut self, class: &str, ty: &Ty, ev: &DictEnv) -> Option<TExpr> {
+        if !Self::is_structural_class(class) {
+            return None;
+        }
+        let (shape, elems) = Self::structural_shape(ty)?;
+        let n_dicts = elems.len();
+        let methods: Vec<(String, String, usize)> = match class {
+            "Eq" => {
+                let eq = self.structural_eq_dictform(&shape, n_dicts);
+                let bool_ty = Ty::Con("Bool".into());
+                // `/=`: GHC's class default `not (a == b)` over the dictform `==`.
+                let ne = self.derived_default_dictform(
+                    ("/=__dictform", shape.clone()), "ne_dictform", n_dicts,
+                    &["_a", "_b"], &["_a", "_b"], bool_ty.clone(),
+                    |base_call| TExpr::new(
+                        TExprKind::App(
+                            Box::new(TExpr::new(TExprKind::Var("not".to_string()), Ty::Unit)),
+                            Box::new(base_call),
+                        ),
+                        bool_ty.clone(),
+                    ),
+                    &eq,
+                );
+                vec![("==".to_string(), eq, 2), ("/=".to_string(), ne, 2)]
+            }
+            "Ord" => {
+                let cmp = self.structural_ord_dictform(&shape, n_dicts);
+                let bool_ty = Ty::Con("Bool".into());
+                let mut methods = vec![("compare".to_string(), cmp.clone(), 2)];
+                // The operators and selectors: GHC's class defaults over
+                // `compare` — `x < y = case compare x y of LT -> True; _ ->
+                // False`, …, `max x y = if x <= y then y else x` (`y` on EQ),
+                // `min x y = if x <= y then x else y` (`x` on EQ) — as a
+                // case on the Ordering constructor.
+                let bool_lit = |b: bool| TExpr::new(TExprKind::Lit(TLiteral::Bool(b)), Ty::Con("Bool".into()));
+                let var = |n: &str| TExpr::new(TExprKind::Var(n.to_string()), Ty::Unit);
+                let on_ordering = |call: TExpr, con: &str, then: TExpr, otherwise: TExpr, result_ty: Ty| TExpr::new(
+                    TExprKind::Case {
+                        scrutinee: Box::new(call),
+                        branches: vec![
+                            TCaseBranch {
+                                pattern: TPattern::Constructor { name: con.to_string(), args: vec![] },
+                                guards: vec![],
+                                body: Some(then),
+                            },
+                            TCaseBranch {
+                                pattern: TPattern::Wildcard,
+                                guards: vec![],
+                                body: Some(otherwise),
+                            },
+                        ],
+                    },
+                    result_ty,
+                );
+                for (method, base, con, hit, miss) in [
+                    ("<", "ord_lt_dictform", "LT", true, false),
+                    ("<=", "ord_le_dictform", "GT", false, true),
+                    (">", "ord_gt_dictform", "GT", true, false),
+                    (">=", "ord_ge_dictform", "LT", false, true),
+                ] {
+                    let name = self.derived_default_dictform(
+                        (&format!("{method}__dictform"), shape.clone()), base, n_dicts,
+                        &["_a", "_b"], &["_a", "_b"], bool_ty.clone(),
+                        |call| on_ordering(call, con, bool_lit(hit), bool_lit(miss), bool_ty.clone()),
+                        &cmp,
+                    );
+                    methods.push((method.to_string(), name, 2));
+                }
+                for (method, base, on_gt, otherwise) in [
+                    ("max", "ord_max_dictform", "_a", "_b"),
+                    ("min", "ord_min_dictform", "_b", "_a"),
+                ] {
+                    let name = self.derived_default_dictform(
+                        (&format!("{method}__dictform"), shape.clone()), base, n_dicts,
+                        &["_a", "_b"], &["_a", "_b"], shape.clone(),
+                        |call| on_ordering(call, "GT", var(on_gt), var(otherwise), shape.clone()),
+                        &cmp,
+                    );
+                    methods.push((method.to_string(), name, 2));
+                }
+                methods
+            }
+            _ => {
+                let show = self.structural_show_dictform(&shape, n_dicts);
+                let str_ty = Ty::Con("String".into());
+                // `showsPrec`: the runtime precedence rule over the dictform
+                // `show` (what every builtin/derived showsPrec is).
+                let sp_str_ty = str_ty.clone();
+                let sp = self.derived_default_dictform(
+                    ("showsPrec__dictform", shape.clone()), "showsPrec_dictform", n_dicts,
+                    &["_d", "_x", "_s"], &["_x"], str_ty,
+                    |shown| {
+                        let var = |n: &str| TExpr::new(TExprKind::Var(n.to_string()), Ty::Unit);
+                        let app = |f: TExpr, a: TExpr| TExpr::new(
+                            TExprKind::App(Box::new(f), Box::new(a)), Ty::Unit);
+                        let call = app(app(app(var("__mll_shows_prec"), var("_d")), shown), var("_s"));
+                        TExpr { kind: call.kind, ty: sp_str_ty }
+                    },
+                    &show,
+                );
+                vec![("show".to_string(), show, 1), ("showsPrec".to_string(), sp, 3)]
+            }
         };
-        let key = ("==__dictform".to_string(), shape.clone());
-        let fname = if let Some(n) = self.generated_impls.get(&key) {
-            n.clone()
-        } else {
-            let fname = self.mangle_name("eq_dictform", &shape);
-            self.generated_impls.insert(key, fname.clone());
-            let n_dicts = elems.len();
-            let dict_params: Vec<String> =
-                (0..n_dicts).map(|i| format!("__d{i}")).collect();
+        let sub_dicts: Vec<TExpr> = elems.iter()
+            .map(|e| self.build_dict_expr(class, e, ev))
+            .collect();
+        Some(TExpr::new(
+            TExprKind::SpecCall {
+                original: format!("__dict_{}", class),
+                specialized: SpecKind::DictCtor { class: class.to_string(), methods },
+                args: sub_dicts,
+            },
+            Ty::Unit,
+        ))
+    }
+
+    /// Register a synthesized dictionary-form function for a structural
+    /// shape: `name(__d0, …, params…) = body`, where the `n_dicts` leading
+    /// parameters are the element dictionaries (read inside the body as
+    /// `DictAccess`) and `params` the value parameters. Memoized per
+    /// (key, shape) in `generated_impls` — the memo is checked first, so
+    /// `body` is built once per shape.
+    fn structural_dictform(
+        &mut self,
+        key: (&str, &Ty),
+        base_name: &str,
+        n_dicts: usize,
+        params: &[&str],
+        result_ty: Ty,
+        body: impl FnOnce(&[String]) -> TExpr,
+    ) -> String {
+        let (key_method, shape) = key;
+        let memo_key = (key_method.to_string(), shape.clone());
+        if let Some(existing) = self.generated_impls.get(&memo_key) {
+            return existing.clone();
+        }
+        let fname = self.mangle_name(base_name, shape);
+        self.generated_impls.insert(memo_key, fname.clone());
+        let dict_params: Vec<String> = (0..n_dicts).map(|i| format!("__d{i}")).collect();
+        let body = body(&dict_params);
+        let mut patterns: Vec<TPattern> = dict_params.iter()
+            .map(|d| TPattern::Var(d.clone(), Ty::Unit)).collect();
+        patterns.extend(params.iter().map(|p| TPattern::Var((*p).to_string(), Ty::Unit)));
+        let param_tys: Vec<Ty> = vec![Ty::Unit; n_dicts + params.len()];
+        self.generated.push(TFunction {
+            name: fname.clone(),
+            ty: Ty::fun(&param_tys, result_ty),
+            clauses: vec![TClause {
+                span: None,
+                patterns,
+                guards: vec![],
+                body: Some(body),
+                where_binds: vec![],
+            }],
+            specialized: true,
+            spec_origin: None,
+            dict_params: vec![],
+            derived_strict: false,
+        });
+        fname
+    }
+
+    /// The element method `method` of the `i`th element dictionary
+    /// parameter of a structural dictform, as an expression.
+    fn dictform_elem_method(dict_param: &str, method: &str) -> TExpr {
+        TExpr::new(
+            TExprKind::DictAccess {
+                dict_param: dict_param.to_string(),
+                method_name: method.to_string(),
+            },
+            Ty::Unit,
+        )
+    }
+
+    /// Field `i` (1-based) of the tuple bound to `var`, for a structural
+    /// dictform body.
+    fn dictform_tuple_field(var: &str, i: usize) -> TExpr {
+        TExpr::new(
+            TExprKind::SpecCall {
+                original: "__mll_tup_get".to_string(),
+                specialized: SpecKind::TupGet(i),
+                args: vec![TExpr::new(TExprKind::Var(var.to_string()), Ty::Unit)],
+            },
+            Ty::Unit,
+        )
+    }
+
+    /// The dictionary-form `==` of a structural shape: `__mll_list_eq`/
+    /// `__mll_maybe_eq` threading the element dictionary's `==`, or the
+    /// conjunction of the element dictionaries' `==` over the tuple's
+    /// fields.
+    fn structural_eq_dictform(&mut self, shape: &Ty, n_dicts: usize) -> String {
+        let bool_ty = Ty::Con("Bool".into());
+        let shape_owned = shape.clone();
+        self.structural_dictform(("==__dictform", shape), "eq_dictform", n_dicts, &["_a", "_b"], bool_ty.clone(), move |dicts| {
             let var = |n: &str| TExpr::new(TExprKind::Var(n.to_string()), Ty::Unit);
-            let eq_of = |d: &str| TExpr::new(
-                TExprKind::DictAccess {
-                    dict_param: d.to_string(),
-                    method_name: "==".to_string(),
-                },
-                Ty::Unit,
-            );
             let app = |f: TExpr, a: TExpr, t: Ty| TExpr::new(
                 TExprKind::App(Box::new(f), Box::new(a)), t);
-            let body = match &shape {
+            match &shape_owned {
                 Ty::Tuple(es) => {
                     // (d0.== (tup_get 1 a) (tup_get 1 b)) && … per field.
                     let mut acc: Option<TExpr> = None;
                     for i in 0..es.len() {
-                        let proj = |v: &str| TExpr::new(
-                            TExprKind::SpecCall {
-                                original: "__mll_tup_get".to_string(),
-                                specialized: SpecKind::TupGet(i + 1),
-                                args: vec![var(v)],
-                            },
-                            Ty::Unit,
-                        );
                         let cmp = app(
-                            app(eq_of(&dict_params[i]), proj("_a"), Ty::Unit),
-                            proj("_b"),
+                            app(Self::dictform_elem_method(&dicts[i], "=="),
+                                Self::dictform_tuple_field("_a", i + 1), Ty::Unit),
+                            Self::dictform_tuple_field("_b", i + 1),
                             bool_ty.clone(),
                         );
                         acc = Some(match acc {
@@ -3871,75 +4254,128 @@ impl Monomorphizer {
                     acc.expect("tuple shapes are non-empty")
                 }
                 Ty::List(_) => app(
-                    app(app(var("__mll_list_eq"), eq_of("__d0"), Ty::Unit),
+                    app(app(var("__mll_list_eq"), Self::dictform_elem_method(&dicts[0], "=="), Ty::Unit),
                         var("_a"), Ty::Unit),
                     var("_b"), bool_ty.clone(),
                 ),
                 _ => app(
-                    app(app(var("__mll_maybe_eq"), eq_of("__d0"), Ty::Unit),
+                    app(app(var("__mll_maybe_eq"), Self::dictform_elem_method(&dicts[0], "=="), Ty::Unit),
                         var("_a"), Ty::Unit),
                     var("_b"), bool_ty.clone(),
                 ),
-            };
-            let param_tys: Vec<Ty> = vec![Ty::Unit; n_dicts + 2];
-            let mut patterns: Vec<TPattern> = dict_params.iter()
-                .map(|d| TPattern::Var(d.clone(), Ty::Unit)).collect();
-            patterns.push(TPattern::Var("_a".to_string(), Ty::Unit));
-            patterns.push(TPattern::Var("_b".to_string(), Ty::Unit));
-            self.generated.push(TFunction {
-                name: fname.clone(),
-                ty: Ty::fun(&param_tys, bool_ty.clone()),
-                clauses: vec![TClause {
-                    span: None,
-                    patterns,
-                    guards: vec![],
-                    body: Some(body),
-                    where_binds: vec![],
-                }],
-                specialized: true,
-                spec_origin: None,
-                dict_params: vec![],
-                derived_strict: false,
-            });
-            fname
-        };
-        // `/=` for the same shape: GHC's class default over the dictform
-        // `==` — the element dictionaries are forwarded unchanged.
-        let ne_fname = self.derived_default_dictform(
-            ("/=__dictform", shape.clone()),
-            "ne_dictform",
-            elems.len(),
-            &["_a", "_b"],
-            &["_a", "_b"],
-            bool_ty.clone(),
-            |base_call| TExpr::new(
-                TExprKind::App(
-                    Box::new(TExpr::new(TExprKind::Var("not".to_string()), Ty::Unit)),
-                    Box::new(base_call),
+            }
+        })
+    }
+
+    /// The dictionary-form `compare` of a structural shape, the Ord twin
+    /// of `structural_eq_dictform`: `__mll_list_cmp`/`__mll_maybe_cmp`
+    /// threading the element dictionary's `compare` (lexicographic lists,
+    /// Nothing < Just), or the fields' compares chained on EQ for a tuple
+    /// — exactly the specialized path's `ListCmp`/`MaybeCmp`/`TupleCmp`
+    /// with the element comparator read from a dictionary.
+    fn structural_ord_dictform(&mut self, shape: &Ty, n_dicts: usize) -> String {
+        let ordering = Ty::Con("Ordering".into());
+        let shape_owned = shape.clone();
+        self.structural_dictform(("compare__dictform", shape), "ord_compare_dictform", n_dicts, &["_a", "_b"], ordering.clone(), move |dicts| {
+            let var = |n: &str| TExpr::new(TExprKind::Var(n.to_string()), Ty::Unit);
+            let app = |f: TExpr, a: TExpr, t: Ty| TExpr::new(
+                TExprKind::App(Box::new(f), Box::new(a)), t);
+            match &shape_owned {
+                Ty::Tuple(es) => {
+                    // case d0.compare (tup_get 1 a) (tup_get 1 b) of
+                    //   EQ -> <the rest>; r -> r
+                    // with the last field's compare as the innermost result.
+                    let field_cmp = |i: usize| app(
+                        app(Self::dictform_elem_method(&dicts[i], "compare"),
+                            Self::dictform_tuple_field("_a", i + 1), Ty::Unit),
+                        Self::dictform_tuple_field("_b", i + 1),
+                        ordering.clone(),
+                    );
+                    let mut acc = field_cmp(es.len() - 1);
+                    for i in (0..es.len() - 1).rev() {
+                        acc = TExpr::new(
+                            TExprKind::Case {
+                                scrutinee: Box::new(field_cmp(i)),
+                                branches: vec![
+                                    TCaseBranch {
+                                        pattern: TPattern::Constructor { name: "EQ".to_string(), args: vec![] },
+                                        guards: vec![],
+                                        body: Some(acc),
+                                    },
+                                    TCaseBranch {
+                                        pattern: TPattern::Var("_r".to_string(), ordering.clone()),
+                                        guards: vec![],
+                                        body: Some(TExpr::new(TExprKind::Var("_r".to_string()), ordering.clone())),
+                                    },
+                                ],
+                            },
+                            ordering.clone(),
+                        );
+                    }
+                    acc
+                }
+                Ty::List(_) => app(
+                    app(app(var("__mll_list_cmp"), Self::dictform_elem_method(&dicts[0], "compare"), Ty::Unit),
+                        var("_a"), Ty::Unit),
+                    var("_b"), ordering.clone(),
                 ),
-                bool_ty.clone(),
-            ),
-            &fname,
-        );
-        let sub_dicts: Vec<TExpr> = elems.iter()
-            .map(|e| self.build_dict_expr("Eq", e, class_to_dict, env))
-            .collect();
-        Some(TExpr::new(
-            TExprKind::SpecCall {
-                original: "__dict_Eq".to_string(),
-                specialized: SpecKind::DictCtor {
-                    class: "Eq".to_string(),
-                    methods: vec![("==".to_string(), fname, 2), ("/=".to_string(), ne_fname, 2)],
-                },
-                args: sub_dicts,
-            },
-            Ty::Unit,
-        ))
+                _ => app(
+                    app(app(var("__mll_maybe_cmp"), Self::dictform_elem_method(&dicts[0], "compare"), Ty::Unit),
+                        var("_a"), Ty::Unit),
+                    var("_b"), ordering.clone(),
+                ),
+            }
+        })
+    }
+
+    /// The dictionary-form `show` of a structural shape: `__mll_show_list`
+    /// threading the element dictionary's `show`, `__mll_show_maybe`
+    /// threading its `showsPrec` (`Just x` shows its payload at
+    /// precedence 11, see generate_container_show), or the tuple's
+    /// concatenation over the element dictionaries' `show`. Without it a
+    /// `show [x]` at a hidden type bottomed out at the type-erased `show`
+    /// (a user ADT element printed as a tuple).
+    fn structural_show_dictform(&mut self, shape: &Ty, n_dicts: usize) -> String {
+        let str_ty = Ty::Con("String".into());
+        let shape_owned = shape.clone();
+        self.structural_dictform(("show_structural", shape), "show_dictform", n_dicts, &["_x"], str_ty.clone(), move |dicts| {
+            let var = |n: &str| TExpr::new(TExprKind::Var(n.to_string()), Ty::Unit);
+            let app = |f: TExpr, a: TExpr, t: Ty| TExpr::new(
+                TExprKind::App(Box::new(f), Box::new(a)), t);
+            match &shape_owned {
+                Ty::Tuple(es) => {
+                    // "(" <> d0.show (tup_get 1 x) <> "," <> … <> ")"
+                    let lit = |s: &str| TExpr::new(TExprKind::Lit(TLiteral::Str(s.as_bytes().to_vec())), str_ty.clone());
+                    let cat = |l: TExpr, r: TExpr| TExpr::new(TExprKind::InfixApp {
+                        op: "<>".to_string(), lhs: Box::new(l), rhs: Box::new(r),
+                    }, str_ty.clone());
+                    let mut acc = lit("(");
+                    for i in 0..es.len() {
+                        if i > 0 {
+                            acc = cat(acc, lit(","));
+                        }
+                        let shown = app(Self::dictform_elem_method(&dicts[i], "show"),
+                            Self::dictform_tuple_field("_x", i + 1), str_ty.clone());
+                        acc = cat(acc, shown);
+                    }
+                    cat(acc, lit(")"))
+                }
+                Ty::List(_) => app(
+                    app(var("__mll_show_list"), Self::dictform_elem_method(&dicts[0], "show"), Ty::Unit),
+                    var("_x"), str_ty.clone(),
+                ),
+                _ => app(
+                    app(var("__mll_show_maybe"), Self::dictform_elem_method(&dicts[0], "showsPrec"), Ty::Unit),
+                    var("_x"), str_ty.clone(),
+                ),
+            }
+        })
     }
 
     /// A dictionary-form method that is a class DEFAULT over another
-    /// dictform method of the same shape (`/=` over `==`, `showsPrec` over
-    /// `show`): `name(dicts…, params…) = wrap(base(dicts…, base_args…))`,
+    /// dictform method of the same shape (`/=` over `==`, the Ord operators
+    /// and `max`/`min` over `compare`, `showsPrec` over `show`):
+    /// `name(dicts…, params…) = wrap(base(dicts…, base_args…))`,
     /// where the base call forwards the same context dictionaries and the
     /// value parameters named in `base_args`. Memoized per (key, shape)
     /// like the base dictforms.
@@ -3999,10 +4435,13 @@ impl Monomorphizer {
     /// Make sure dictionary-form methods exist for the parameterized
     /// instance (class, head): each instance method rewritten to take its
     /// context's dictionaries (the superclass closure of the declared
-    /// context — `instances` holds it closed) as leading parameters, with every
-    /// still-polymorphic method use inside routed through them. Returns the
-    /// per-method function names in class-declaration order, or None when
-    /// the instance (or a polymorphic original) cannot be found.
+    /// context — `instances` holds it closed) as leading parameters,
+    /// followed by the dictionaries of the method's OWN constraints
+    /// (`method_dict_constraints`: `traverse`'s Applicative and Functor),
+    /// with every still-polymorphic method use inside routed through them.
+    /// Returns the per-method function names in class-declaration order
+    /// with each method's VALUE arity, or None when the instance (or a
+    /// polymorphic original) cannot be found.
     fn ensure_dictform(
         &mut self,
         class_name: &str,
@@ -4018,7 +4457,7 @@ impl Monomorphizer {
         // Methods in class-declaration order (method_fns is a HashMap and
         // must not drive emission order).
         let mut names: Vec<(String, String, usize)> = Vec::new();
-        let mut work: Vec<(String, String)> = Vec::new();
+        let mut work: Vec<(String, String, String)> = Vec::new();
         for (method, method_sig) in &class_info.methods {
             let base = inst.method_fns.get(method)?.clone();
             if !self.poly_fns.contains_key(&base) {
@@ -4029,14 +4468,12 @@ impl Monomorphizer {
             // a closure over the context dictionaries for arity > 0, the
             // constructed VALUE for a nullary method (see SpecKind::DictCtor).
             names.push((method.clone(), dictform.clone(), Self::spine_arrow_count(method_sig)));
-            work.push((base, dictform));
+            work.push((method.clone(), base, dictform));
         }
         // Seed the cache BEFORE rewriting bodies: a method whose body uses
         // the class at the instance's own type (`csize xs` inside the `[a]`
         // instance) builds this same dictionary recursively.
         self.dictform_impls.insert(key.clone(), names.clone());
-
-        let (dict_params, class_to_dict, env) = Self::dict_param_tables(&ctx);
 
         // The dictform's own dictionary parameters are current while its
         // bodies are rewritten — BOTH routing tables: the plain per-class
@@ -4045,9 +4482,9 @@ impl Monomorphizer {
         // triples; leaving the ENCLOSING dict-passing function's triples in
         // place (as this once did) would route a compound method use inside
         // the instance body to a parameter that does not exist here.
-        let saved_dict_params = std::mem::replace(&mut self.cur_dict_params, dict_params.clone());
+        let saved_dict_params = std::mem::take(&mut self.cur_dict_params);
         let saved_dict_by_arg = std::mem::take(&mut self.cur_dict_by_arg);
-        for (base, dictform) in work {
+        for (method, base, dictform) in work {
             let Some(mut f) = self.poly_fns.get(&base).cloned() else {
                 // Near-dead (the pre-scan above verified every base), but
                 // a bail here must UNSEED the cache: leaving the seed would
@@ -4058,6 +4495,13 @@ impl Monomorphizer {
                 self.cur_dict_by_arg = saved_dict_by_arg;
                 return None;
             };
+            // The instance context's dictionaries, then the method's own.
+            let mut constraints = ctx.clone();
+            if let Some(extra) = self.method_dict_constraints.get(&method) {
+                constraints.extend(extra.iter().cloned());
+            }
+            let (dict_params, ev) = Self::dict_param_tables(&constraints);
+            self.cur_dict_params = dict_params.clone();
             f.name = dictform.clone();
             // Ordinary monomorphization first: ground method uses and helper
             // calls resolve as usual; still-polymorphic method uses stay
@@ -4067,7 +4511,7 @@ impl Monomorphizer {
             let saved_in_dictform = std::mem::replace(&mut self.in_dictform, true);
             f = self.mono_function(f);
             self.in_dictform = saved_in_dictform;
-            f.dict_params = dict_params.clone();
+            f.dict_params = dict_params;
             f.specialized = true;
             // The SCOPED walk: a clause binder named like a method of the
             // class (`describe (Box label other) = …` under a class with a
@@ -4075,7 +4519,7 @@ impl Monomorphizer {
             // the same discipline as `rewrite_dict_passing_fn` (T12).
             for clause in f.clauses.iter_mut() {
                 self.map_clause_exprs_scoped(clause, &mut |m, e| {
-                    m.rewrite_dict_expr(e, "", &class_to_dict, &env)
+                    m.rewrite_dict_expr(e, "", &ev)
                 });
             }
             self.generated.push(f);
@@ -4184,14 +4628,29 @@ impl Monomorphizer {
                 let Some(ex) = self.ex_ctors.get(&name).cloned() else {
                     return TPattern::Constructor { name, args };
                 };
-                // Only a pattern at the DECLARED arity is rewritten (a
-                // pattern this pass already extended is left alone).
-                if args.len() != ex.field_types.len() {
+                let n = ex.field_types.len();
+                let mut skolems: HashMap<String, u32> = HashMap::new();
+                for a in args.iter().take(n) {
+                    Self::pattern_skolems(a, &mut skolems);
+                }
+                // A pattern the main walk already extended (the dictionary
+                // rewrite passes revisit finished TIR) keeps its binders
+                // and hands back the same (class, skolem) -> binder
+                // mapping, so the captured dictionaries are in scope for
+                // the rewrite exactly as they were for the main walk.
+                if args.len() == n + ex.captures.len() {
+                    for (i, (cls, var)) in ex.captures.iter().enumerate() {
+                        if let TPattern::Var(binder, _) = &args[n + i]
+                            && let Some(id) = skolems.get(var)
+                        {
+                            caps.push(((cls.clone(), *id), binder.clone()));
+                        }
+                    }
                     return TPattern::Constructor { name, args };
                 }
-                let mut skolems: HashMap<String, u32> = HashMap::new();
-                for a in &args {
-                    Self::pattern_skolems(a, &mut skolems);
+                // Only a pattern at the DECLARED arity is rewritten.
+                if args.len() != n {
+                    return TPattern::Constructor { name, args };
                 }
                 let mut args = args;
                 for (i, (cls, var)) in ex.captures.iter().enumerate() {
@@ -4237,8 +4696,7 @@ impl Monomorphizer {
         &mut self,
         ex_name: &str,
         arg_tys: &[Ty],
-        class_to_dict: &HashMap<String, String>,
-        env: &HashMap<(String, String), String>,
+        ev: &DictEnv,
     ) -> Option<Vec<TExpr>> {
         let ex = self.ex_ctors.get(ex_name)?.clone();
         let mut bind: HashMap<String, Ty> = HashMap::new();
@@ -4248,20 +4706,10 @@ impl Monomorphizer {
         let mut dicts = Vec::with_capacity(ex.captures.len());
         for (cls, var) in &ex.captures {
             let bound = bind.get(var).cloned()?;
-            let feasible = match &bound {
-                Ty::Var(v) => env.contains_key(&(cls.clone(), v.name.clone()))
-                    || class_to_dict.contains_key(cls),
-                Ty::Skolem(_, id) => self.skolem_dict_for(cls, *id).is_some(),
-                t if !t.free_vars().is_empty() =>
-                    t.free_vars().iter().all(|v| env.contains_key(&(cls.clone(), v.name.clone())))
-                        || class_to_dict.contains_key(cls),
-                t if Self::contains_skolem(t) => self.has_skolem_dicts(t),
-                _ => true,
-            };
-            if !feasible {
+            if !self.dict_evidence_for(cls, &bound, ev) {
                 return None;
             }
-            dicts.push(self.build_dict_expr(cls, &bound, class_to_dict, env));
+            dicts.push(self.build_dict_expr(cls, &bound, ev));
         }
         Some(dicts)
     }
@@ -4290,8 +4738,7 @@ impl Monomorphizer {
         ex_name: String,
         whole: TExpr,
         mono_args: bool,
-        class_to_dict: &HashMap<String, String>,
-        env: &HashMap<(String, String), String>,
+        ev: &DictEnv,
     ) -> Option<TExpr> {
         let ty = whole.ty.clone();
         let arg_tys: Vec<Ty> = {
@@ -4304,7 +4751,7 @@ impl Monomorphizer {
             tys.reverse();
             tys
         };
-        let dicts = self.ex_pack_dicts(&ex_name, &arg_tys, class_to_dict, env)?;
+        let dicts = self.ex_pack_dicts(&ex_name, &arg_tys, ev)?;
         let (head, args) = Self::split_app_chain(whole);
         let args: Vec<TExpr> = if mono_args {
             args.into_iter().map(|a| self.mono_expr(a)).collect()
@@ -4329,8 +4776,7 @@ impl Monomorphizer {
         &mut self,
         name: &str,
         ty: Ty,
-        class_to_dict: &HashMap<String, String>,
-        env: &HashMap<(String, String), String>,
+        ev: &DictEnv,
     ) -> Option<TExprKind> {
         let ex = self.ex_ctors.get(name)?.clone();
         let n = ex.field_types.len();
@@ -4358,26 +4804,8 @@ impl Monomorphizer {
                 node_ty,
             );
         }
-        let packed = self.ex_pack_saturated(name.to_string(), app, false, class_to_dict, env)?;
+        let packed = self.ex_pack_saturated(name.to_string(), app, false, ev)?;
         Some(TExprKind::Lambda { params, body: Box::new(packed) })
-    }
-
-    /// A class-method use whose class-variable binding is (or contains) an
-    /// existential skolem with captured dictionaries: the dictionary-form
-    /// method use over those dictionaries. `None` when no captured
-    /// dictionary applies (the erased fallback stands, as before).
-    fn ex_method_use(&mut self, method: &str, use_ty: &Ty) -> Option<TExprKind> {
-        if self.skolem_dicts.is_empty() {
-            return None;
-        }
-        let class = self.method_to_class.get(method)?.clone();
-        let binding = self.class_var_binding(method, use_ty)?;
-        let binding = self.reduce_families(&binding).unwrap_or(binding);
-        if !Self::contains_skolem(&binding) || !self.has_skolem_dicts(&binding) {
-            return None;
-        }
-        let kind = self.dict_method_use(&class, method, use_ty, &HashMap::new(), &HashMap::new());
-        (!matches!(kind, TExprKind::Var(_))).then_some(kind)
     }
 
     /// Is this a use of a constrained polymorphic function at a type that
@@ -4393,151 +4821,6 @@ impl Monomorphizer {
             && self.has_skolem_dicts(use_ty)
     }
 
-    /// A composed Show dictionary for a container over still-polymorphic or
-    /// existential elements — `[a]`, `Maybe a`, tuples — the Show twin of
-    /// `structural_eq_dict`: a synthesized dictionary-form function per
-    /// shape that threads the element dictionaries' `show` through the same
-    /// runtime helpers the specialized path uses (`__mll_show_list`,
-    /// `__mll_show_maybe`, the tuple's concatenation). Without it a
-    /// `show [x]` at a hidden type bottomed out at the type-erased `show`
-    /// (a user ADT element printed as a tuple).
-    fn structural_show_dict(
-        &mut self,
-        ty: &Ty,
-        class_to_dict: &HashMap<String, String>,
-        env: &HashMap<(String, String), String>,
-    ) -> Option<TExpr> {
-        let str_ty = Ty::Con("String".into());
-        let (shape, elems): (Ty, Vec<Ty>) = match ty {
-            Ty::List(e) => (Ty::List(Box::new(Ty::Unit)), vec![(**e).clone()]),
-            Ty::App(f, e) if matches!(f.as_ref(), Ty::Con(n) if n == "Maybe") => (
-                Ty::App(Box::new(Ty::Con("Maybe".into())), Box::new(Ty::Unit)),
-                vec![(**e).clone()],
-            ),
-            Ty::Tuple(es) if !es.is_empty() => (Ty::Tuple(vec![Ty::Unit; es.len()]), es.clone()),
-            _ => return None,
-        };
-        let n_dicts = elems.len();
-        let key = ("show_structural".to_string(), shape.clone());
-        let fname = if let Some(existing) = self.generated_impls.get(&key) {
-            existing.clone()
-        } else {
-            let fname = self.mangle_name("show_dictform", &shape);
-            self.generated_impls.insert(key, fname.clone());
-            let dict_params: Vec<String> = (0..n_dicts).map(|i| format!("__d{}", i)).collect();
-            let var = |n: &str| TExpr::new(TExprKind::Var(n.to_string()), Ty::Unit);
-            // The dictionaries are this function's own PARAMETERS: read
-            // them as DictAccess, exactly as structural_eq_dict does.
-            let show_of = |d: &str| TExpr::new(
-                TExprKind::DictAccess {
-                    dict_param: d.to_string(),
-                    method_name: "show".to_string(),
-                },
-                Ty::Unit,
-            );
-            let app = |f: TExpr, a: TExpr, t: Ty| TExpr::new(
-                TExprKind::App(Box::new(f), Box::new(a)), t);
-            let body = match &shape {
-                Ty::Tuple(es) => {
-                    // "(" <> d0.show (tup_get 1 x) <> "," <> … <> ")"
-                    let lit = |s: &str| TExpr::new(TExprKind::Lit(TLiteral::Str(s.as_bytes().to_vec())), str_ty.clone());
-                    let cat = |l: TExpr, r: TExpr| TExpr::new(TExprKind::InfixApp {
-                        op: "<>".to_string(), lhs: Box::new(l), rhs: Box::new(r),
-                    }, str_ty.clone());
-                    let mut acc = lit("(");
-                    for i in 0..es.len() {
-                        if i > 0 {
-                            acc = cat(acc, lit(","));
-                        }
-                        let proj = TExpr::new(
-                            TExprKind::SpecCall {
-                                original: "__mll_tup_get".to_string(),
-                                specialized: SpecKind::TupGet(i + 1),
-                                args: vec![var("_x")],
-                            },
-                            Ty::Unit,
-                        );
-                        let shown = app(show_of(&dict_params[i]), proj, str_ty.clone());
-                        acc = cat(acc, shown);
-                    }
-                    cat(acc, lit(")"))
-                }
-                Ty::List(_) => app(
-                    app(var("__mll_show_list"), show_of("__d0"), Ty::Unit),
-                    var("_x"), str_ty.clone(),
-                ),
-                // `Just x` shows its payload at precedence 11: the element
-                // dictionary's showsPrec (see generate_container_show).
-                _ => app(
-                    app(
-                        var("__mll_show_maybe"),
-                        TExpr::new(
-                            TExprKind::DictAccess {
-                                dict_param: "__d0".to_string(),
-                                method_name: "showsPrec".to_string(),
-                            },
-                            Ty::Unit,
-                        ),
-                        Ty::Unit,
-                    ),
-                    var("_x"), str_ty.clone(),
-                ),
-            };
-            let param_tys: Vec<Ty> = vec![Ty::Unit; n_dicts + 1];
-            let mut patterns: Vec<TPattern> = dict_params.iter()
-                .map(|d| TPattern::Var(d.clone(), Ty::Unit)).collect();
-            patterns.push(TPattern::Var("_x".to_string(), Ty::Unit));
-            self.generated.push(TFunction {
-                name: fname.clone(),
-                ty: Ty::fun(&param_tys, str_ty.clone()),
-                clauses: vec![TClause {
-                    span: None,
-                    patterns,
-                    guards: vec![],
-                    body: Some(body),
-                    where_binds: vec![],
-                }],
-                specialized: true,
-                spec_origin: None,
-                dict_params: vec![],
-                derived_strict: false,
-            });
-            fname
-        };
-        // `showsPrec` for the same shape: the runtime precedence rule over
-        // the dictform `show` (what every builtin/derived showsPrec is).
-        let sp_str_ty = str_ty.clone();
-        let sp_fname = self.derived_default_dictform(
-            ("showsPrec__dictform", shape.clone()),
-            "showsPrec_dictform",
-            elems.len(),
-            &["_d", "_x", "_s"],
-            &["_x"],
-            str_ty.clone(),
-            |shown| {
-                let var = |n: &str| TExpr::new(TExprKind::Var(n.to_string()), Ty::Unit);
-                let app = |f: TExpr, a: TExpr| TExpr::new(
-                    TExprKind::App(Box::new(f), Box::new(a)), Ty::Unit);
-                let call = app(app(app(var("__mll_shows_prec"), var("_d")), shown), var("_s"));
-                TExpr { kind: call.kind, ty: sp_str_ty }
-            },
-            &fname,
-        );
-        let sub_dicts: Vec<TExpr> = elems.iter()
-            .map(|e| self.build_dict_expr("Show", e, class_to_dict, env))
-            .collect();
-        Some(TExpr::new(
-            TExprKind::SpecCall {
-                original: "__dict_Show".to_string(),
-                specialized: SpecKind::DictCtor {
-                    class: "Show".to_string(),
-                    methods: vec![("show".to_string(), fname, 1), ("showsPrec".to_string(), sp_fname, 3)],
-                },
-                args: sub_dicts,
-            },
-            Ty::Unit,
-        ))
-    }
 }
 
 #[cfg(test)]

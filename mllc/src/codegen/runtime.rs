@@ -139,7 +139,7 @@ pub(super) fn binds_name(lua_name: &str) -> bool {
 }
 
 /// Every name the prelude chunk binds at its top level.
-pub(super) fn bound_names() -> impl Iterator<Item = &'static str> {
+pub(crate) fn bound_names() -> impl Iterator<Item = &'static str> {
     CHUNK_INDEX.all_names.iter().copied()
 }
 

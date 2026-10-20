@@ -928,6 +928,15 @@ impl Checker {
         &self.instances
     }
 
+    /// The class constraints each class method carries, by method name —
+    /// the class's own `C classvar` and, for a method such as `traverse`,
+    /// its additional ones (`Applicative f`). The monomorphizer's
+    /// dictionary convention gives the additional ones their own
+    /// dictionaries (see mono's `method_dict_constraints`).
+    pub fn get_method_constraints(&self) -> &HashMap<String, Vec<TyConstraint>> {
+        &self.method_constraints
+    }
+
     /// Expose the constructor table for the monomorphizer (the existential
     /// constructors' declared field types and contexts drive dictionary
     /// capture — see mono's `ex_ctors`).

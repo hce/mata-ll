@@ -44,6 +44,63 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **Every form of a class-method use dispatches through evidence in the
+  dictionary-passing fallback** (silent wrong output / crash / rejection).
+  A function the monomorphizer compiles with dictionary passing (past the
+  specialization limit, polymorphically recursive, or called at an
+  existential type) had a second implementation of method dispatch, and
+  each syntactic form of a method use had its own copy of the decision;
+  each copy missed cases, so a use whose class-variable binding still
+  contained a type variable or an existential skolem fell to a
+  type-erased or native lowering. Structural operators over a polymorphic
+  element — `[x] == [y]`, `(x, 1) == (y, 1)`, `Just x == Just y`, `[x] <
+  [y]` — resolved to the shape's implementation with Lua's `==` for the
+  element (`eqL 20 () (W 2) (W 4)` printed `False` for GHC's `True`; `[x]
+  < [y]` printed `True` for `False`), inside such a body and at an
+  existential type alike, while the named forms `compare [x] [y]`,
+  `compare (Just x) (Just y)` and `max`/`min` were rejected ("cannot build
+  the 'Ord' dictionary for type '[a]'") because only Eq and Show had
+  composed dictionaries for the container shapes; a first-class operator
+  (`zipWith (==) xs ys`, `foldr (+) 0 xs`, `map (+ 1)`) kept the native
+  Lua operator (`[False,False]` for `[True,False]`; "attempt to perform
+  arithmetic on a table value" at a user Num type); prefix negation `-x`
+  was emitted as Lua's unary minus (the same crash; `W (W (-5))` through
+  `instance Num a => Num (W a)`); a numeric literal at an existential type
+  stayed a machine number (`show (x + 1)` on a packed Integer: "attempt
+  to get length of a number value"); and an operator whose class variable
+  sits in the right operand (`2 *. x` for `(*.) :: Int -> a -> a`) was
+  never rewritten (nil call), because the rewrite tested the left
+  operand's type. One decision, `dispatch_method`, now serves every form
+  in both passes — a named use, an infix operator on either operand, a
+  first-class operator or section, prefix negation, an overloaded
+  literal: a fully concrete binding (or one whose instance demands
+  nothing of its variable parts, `ST s`, `Either e`) lowers natively or
+  to its specialization exactly as before; any other binding goes through
+  evidence — the dictionary parameter, the captured existential
+  dictionary, or a dictionary composed from them — wherever evidence is
+  in scope, and the Ord container shapes (list, Maybe, tuple) now have
+  the same composed dictionary Eq and Show had (`compare` threaded
+  through the runtime helpers, the operators and `max`/`min` as GHC's
+  defaults over it). Two dictionary gaps found by the earlier items in
+  this round are closed with it: the builtin IO/LuaIO/ST Monad
+  dictionary had no `>>=`/`>>` (their bind is codegen's inline chain;
+  `twice :: Monad m => …` at IO past the limit died with "attempt to call
+  a nil value (field '_usr_gt__gt__eq_')"), so a dictionary entry for them
+  is now the first-class operator's value; and a `Traversable t =>` body
+  at list or Maybe called the undefined name `list_traverse`, because
+  `traverse` carries a constraint of its own (`Applicative f`) whose
+  dictionary nobody passed — a method's own constraints now give its
+  dictionary entry leading dictionary parameters (the instance's
+  dictionary form takes them after the context's), and every
+  dictionary-routed use applies the entry to the dictionaries for the
+  method's own variables at that use. A unit test checks that every
+  method implementation a builtin instance registers is a definition.
+  GHC-goldened case `dict_dispatch_forms` (each form on the specialized
+  path, under polymorphic recursion and at an existential type; nested
+  shapes; Monad at IO, ST, Maybe and list; Traversable and Foldable at
+  list and Maybe; `mapM` under both). SPEC.md and COMPILER.md describe
+  the decision; HASKDIFF.md's fallback gaps drop the forms. Found by the
+  2026-10 fresh-eyes review (T5, X1, X2, L14).
 - **A derived instance of a parameterized type has a dictionary form, and
   a phantom parameter demands no instance** (silent wrong output / crash
   / rejection). `deriving` registered its instance without a context,

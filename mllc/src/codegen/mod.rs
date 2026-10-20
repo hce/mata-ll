@@ -86,6 +86,13 @@ mod util;
 
 pub(crate) use names::is_lua_keyword;
 pub(crate) use names::runtime_spellings;
+// For the builtin-instance definition test in lib.rs: the names the
+// runtime prelude binds and the operators a dictionary entry gets a value
+// for (`SpecKind::Dict`).
+#[cfg(test)]
+pub(crate) use runtime::bound_names as runtime_bound_names;
+#[cfg(test)]
+pub(crate) use names::is_builtin_op;
 pub(crate) use names::infix_operand_strictness;
 
 /// Public for the strictness-contract check in mll-tests (G5): the harness

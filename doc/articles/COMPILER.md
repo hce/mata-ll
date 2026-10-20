@@ -195,7 +195,28 @@ constant folding (§7) can then recognize them.
   `Ord a` read a dictionary. The same closure gives a context instance's
   dictionary form its parameters and an existential constructor its
   hidden dictionary fields; `TFunction::dict_params` is the call
-  convention every DictCall site agrees with.
+  convention every DictCall site agrees with. Method dispatch is ONE
+  decision for both passes, `dispatch_method` (see `MethodUse`): the
+  main walk and the dictionary rewrite call it from every arm where a
+  method can appear — a named use, an infix operator (the operator's own
+  instantiated type, so either operand may carry the class variable), a
+  first-class operator or section (`OpFunc`), prefix negation
+  (`Negate`, the `negate` method at `t -> t`) and an overloaded literal
+  (`fromInteger`/`fromRational` at `Integer -> t` / `Number -> t`). A
+  binding that needs no evidence (`needs_evidence`: concrete, or a head
+  whose instance demands nothing of the variable parts) resolves through
+  `resolve_at_type`; a binding over type variables or existential
+  skolems is routed through evidence when `dict_evidence_for` — the
+  side-effect-free twin of `build_dict_expr`'s decision tree — finds
+  every dictionary it needs in the body's `DictEnv` or the captured
+  existential binders; otherwise it is deferred to the rewrite (inside
+  the main walk of a dictionary-form body) or takes the type-erased best
+  effort (the retained generic copy). The container shapes' Eq, Ord and
+  Show dictionaries are synthesized per shape (`structural_dict`), and a
+  method with constraints of its own (`method_dict_constraints`:
+  `traverse`'s `Applicative f`) has dictionary parameters for them in
+  its dictionary form, applied at every dictionary-routed use
+  (`dict_method_use`).
 - Type substitution into specialized bodies is what makes the copies concrete.
 
 If you ever see runtime `nil` where a method should be, suspect a missing

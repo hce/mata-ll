@@ -1381,6 +1381,30 @@ usable at `Tagged Meters` without `Show Meters`), and that context is
 what its dictionary form closes over — the same convention a written
 `instance Show a => Show (Box a)` gets.
 
+Every form of a method use is dispatched the same way, by one decision
+of the monomorphizer: a named use (`compare x y`), an infix operator
+whichever operand carries the class variable (`x == y`, `2 *. x` for
+`(*.) :: Int -> a -> a`), a first-class operator or section (`zipWith
+(==) xs ys`, `foldr (+) 0 xs`, `map (+ 1)`), prefix negation (`-x`, the
+`negate` method) and an overloaded literal (`x + 1`, `fromInteger`).
+When the class variable is bound to a concrete type — or to a type
+whose instance demands nothing of its variable parts, `ST s` and
+`Either e` under `Monad` — the use lowers natively or to its
+specialization; when the binding still contains a type variable of a
+dictionary-passing body or an existential type, it reads the method
+from the dictionary in scope, or from a dictionary composed from the
+ones in scope. The builtin container shapes compose that way too:
+`[x] == [y]`, `compare (Just x) (Just y)` and `max (x, 0) (y, 0)` in a
+`Ord a =>` body build the list, Maybe or tuple dictionary from the
+element's, exactly as `show [x]` does. A method that carries a
+constraint of its own — `traverse :: (Traversable t, Applicative f) =>
+…` — takes the dictionaries for it first: its entry in the Traversable
+dictionary is a function of the Applicative (and Functor) dictionary,
+built at the use from whatever `f` is there, as in GHC. The builtin
+IO/LuaIO/ST monads' `>>=` and `>>` are codegen's inline bind chain
+wherever the monad is known; as dictionary entries (`Monad m =>` past
+the limit, applied at IO) they are the first-class operator's value.
+
 # Module and import syntax
 
 The README says each file is a module. But how do you import one?

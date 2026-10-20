@@ -223,6 +223,13 @@ mll_test!(dict_superclass_closure, "dict_superclass_closure.mll");
 // specialization limit and inside dictionary-passing bodies; a phantom
 // parameter demands no instance.
 mll_test!(derived_dictform, "derived_dictform.mll");
+// T5/X1/X2/L14: one dispatch decision for every method form in the
+// dictionary-passing fallback — structural operators and named methods
+// over a polymorphic element, first-class operators, prefix negation,
+// literals at an existential type, an operator whose class variable sits
+// in the right operand, the builtin monads' bind as a dictionary value,
+// and `traverse`'s own Applicative dictionary.
+mll_test!(dict_dispatch_forms, "dict_dispatch_forms.mll");
 // First-class ($)/(.) sections emit real function values (the OpFunc
 // fallback wrote the operator verbatim into Lua — a syntax error); the
 // iife flattener declines vararg lambdas.

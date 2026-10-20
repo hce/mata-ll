@@ -141,7 +141,7 @@ const PROBES: &[Probe] = &[
     probe("show_Bool", &["true"], &[Strict]),
     // `show_List_`/`show_Maybe` — the type-erased container-show shims — are
     // not probed: a dictionary-passing `show [x]` / `show (Just x)` now
-    // composes a real dictionary (mono's structural_show_dict), so no
+    // composes a real dictionary (mono's structural_dict), so no
     // well-typed program reaches them any more (only a container whose
     // element type never resolved would, and that is an ambiguity the
     // checker reports). They stay in the runtime as last-resort fallbacks.

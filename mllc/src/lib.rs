@@ -1044,6 +1044,57 @@ mod section_offset_tests {
 }
 
 #[cfg(test)]
+mod builtin_instance_tests {
+    use super::*;
+
+    /// Every method implementation a BUILTIN instance registers (the
+    /// Rust-side registrations in typechecker/prelude.rs) is a definition
+    /// the emitted program can reference: a function or FFI import of
+    /// Prelude.mll, a name the runtime prelude binds, an operator codegen
+    /// gives a value of its own (the native Lua operators, the action
+    /// monads' `>>=`/`>>`) — or one of the type-erased sentinel names
+    /// verify.rs rejects at compile time (`show_[]`: the typed path builds
+    /// the instance per element type and a resolution falling back to the
+    /// sentinel is reported as a compiler bug, never emitted). A
+    /// dictionary built for a builtin instance stores the implementation
+    /// by name (`SpecKind::Dict`), so a name defined nowhere is a nil
+    /// field — the IO Monad dictionary's `>>=` was one, and `twice ::
+    /// Monad m => …` past the specialization limit died with "attempt to
+    /// call a nil value (field '_usr_gt__gt__eq_')" (found while
+    /// goldening T1).
+    #[test]
+    fn every_builtin_instance_method_resolves_to_a_definition() {
+        let checker = typechecker::Checker::new();
+        let prelude_decls = parse_prelude(checker.claimed_names()).expect("the Prelude parses");
+        let prelude_fns: std::collections::HashSet<&str> = prelude_decls.iter()
+            .filter_map(|d| match d {
+                ast::Decl::FunDef { name, .. } | ast::Decl::TypeSig { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        let runtime: std::collections::HashSet<&str> = codegen::runtime_bound_names().collect();
+        let dictionary_value = |name: &str| codegen::is_builtin_op(name) || name == ">>=" || name == ">>";
+        let mut missing = Vec::new();
+        for ((class, head), inst) in checker.get_instances() {
+            for (method, implementation) in &inst.method_fns {
+                if prelude_fns.contains(implementation.as_str())
+                    || runtime.contains(implementation.as_str())
+                    || dictionary_value(implementation)
+                    || verify::TYPE_ERASED_METHODS.contains(&implementation.as_str())
+                {
+                    continue;
+                }
+                missing.push(format!("{class} {head}: {method} -> {implementation}"));
+            }
+        }
+        missing.sort();
+        assert!(missing.is_empty(),
+            "builtin instance methods whose implementation is defined nowhere:\n{}",
+            missing.join("\n"));
+    }
+}
+
+#[cfg(test)]
 mod wired_in_tests {
     use super::*;
 

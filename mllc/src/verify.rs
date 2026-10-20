@@ -48,7 +48,7 @@ use crate::types::Ty;
 /// while a bare `eq` Var is an ordinary binder (`nubBy eq xs` in the
 /// Prelude), which is exactly the false positive that fired the first time
 /// `"eq"` was added to this list.
-const TYPE_ERASED_METHODS: &[&str] = &[
+pub(crate) const TYPE_ERASED_METHODS: &[&str] = &[
     "show", "show_Maybe", "show_[]",
     "showsPrec", "showsPrec_Maybe", "showsPrec_[]",
 ];

@@ -591,7 +591,7 @@ pub(crate) fn infix_operand_strictness(op: &str, lhs_ty: &crate::types::Ty, rhs_
     }
 }
 
-pub(super) fn is_builtin_op(op: &str) -> bool {
+pub(crate) fn is_builtin_op(op: &str) -> bool {
     // NOTE: `^` is deliberately NOT here — Lua's `^` is float power. It is a
     // Prelude function ((^), exponentiation by squaring over `*`), emitted as a
     // call like any user operator.

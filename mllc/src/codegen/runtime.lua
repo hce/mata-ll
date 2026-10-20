@@ -1420,7 +1420,7 @@ local function show_String(x) return __mll_show_string(__force(x)) end
 local function show_Bool(x) return show(x) end
 -- (The type-erased container-show shims show_List_/show_Maybe and their
 -- showsPrec twins are GONE: dictionary-form container show composes a
--- real dictionary — mono's structural_show_dict — so no well-typed
+-- real dictionary — mono's structural_dict — so no well-typed
 -- program reached them, and verify.rs still rejects any call that would.)
 -- Unit's runtime rep is nil (same as Nothing/[]), so the type-erased generic
 -- `show` cannot render it; the Show () instance dispatches here type-directedly.

@@ -159,7 +159,7 @@ pub const RUNTIME_PRELUDE_STRICTNESS: &[(&str, &[bool])] = &[
     // (`show_List_`/`show_Maybe`, the type-erased container-show shims,
     // are DELETED from the runtime: no well-typed program reached them
     // since the dictionary-form container show composes a real dictionary
-    // — see mono's structural_show_dict — and verify.rs rejects any call
+    // — see mono's structural_dict — and verify.rs rejects any call
     // that would resurrect them.)
     ("show_ByteString", &[true]),
     ("show_HashMap", &[true]),
@@ -282,7 +282,7 @@ pub const ENTRY_FORCED: &[(&str, &[bool])] = &[
     // (`show_List_`/`show_Maybe`, the type-erased container-show shims,
     // are DELETED from the runtime: no well-typed program reached them
     // since the dictionary-form container show composes a real dictionary
-    // — see mono's structural_show_dict — and verify.rs rejects any call
+    // — see mono's structural_dict — and verify.rs rejects any call
     // that would resurrect them.)
     ("show_ByteString", &[true]),
     ("show_HashMap", &[true]),

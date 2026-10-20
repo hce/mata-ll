@@ -563,157 +563,7 @@ impl CodeGen {
                 out
             }
             TExprKind::Paren(inner) => Expr::paren(self.expr_ast(inner)),
-            TExprKind::OpFunc(op) => {
-                if op == "++" {
-                    return Expr::Func(
-                        vec!["_a".into(), "_b".into()],
-                        FuncBody::Inline(vec![Stmt::Return(Expr::call_named(
-                            "__mll_list_append",
-                            vec![Expr::name("_a"), Expr::inline_fn0(Expr::name("_b"))],
-                        ))]),
-                    );
-                }
-                if op == "!!" {
-                    return Expr::Func(
-                        vec!["_a".into(), "_b".into()],
-                        FuncBody::Inline(vec![Stmt::Return(Expr::call_named(
-                            "__mll_list_index",
-                            vec![Expr::name("_a"), Expr::force(Expr::name("_b"))],
-                        ))]),
-                    );
-                }
-                if op == ":" {
-                    return Expr::Func(
-                        vec!["_a".into(), "_b".into()],
-                        FuncBody::Inline(vec![Stmt::Return(Expr::call_named(
-                            "__mll_cons",
-                            vec![Expr::name("_a"), Expr::name("_b")],
-                        ))]),
-                    );
-                }
-                if op == ">>=" {
-                    // First-class (>>=) at an action monad (IO/LuaIO/ST —
-                    // Maybe/[] resolve to bind_Maybe/bind_List in mono).
-                    // Applying it must BUILD an action value, not perform
-                    // it: return a deferred closure that, when run, runs
-                    // the LHS action and forwards the continuation's
-                    // application through the tail runner — the same shape
-                    // the inline `m >>= f` non-lambda arm emits. The old
-                    // fallback emitted `_a >>= _b` verbatim: a Lua syntax
-                    // error.
-                    return Expr::Func(
-                        vec!["_a".into(), "_b".into()],
-                        FuncBody::Inline(vec![Stmt::Return(Expr::inline_fn0(
-                            Expr::call_named(
-                                "__mll_run_tail",
-                                vec![Expr::call(
-                                    Expr::force(Expr::name("_b")),
-                                    vec![Expr::call_named(
-                                        "__mll_run",
-                                        vec![Expr::name("_a")],
-                                    )],
-                                )],
-                            ),
-                        ))]),
-                    );
-                }
-                if op == ">>" {
-                    // First-class (>>) at an action monad: build a deferred
-                    // closure that performs the LHS for its effects (result
-                    // discarded, so the forwarding runner suffices) and
-                    // tail-runs the RHS. See the (>>=) arm above.
-                    return Expr::Func(
-                        vec!["_a".into(), "_b".into()],
-                        FuncBody::Inline(vec![Stmt::Return(Expr::Func(
-                            vec![],
-                            FuncBody::Inline(vec![
-                                Stmt::Expr(Expr::call_named(
-                                    "__mll_run_tail",
-                                    vec![Expr::name("_a")],
-                                )),
-                                Stmt::Return(Expr::call_named(
-                                    "__mll_run_tail",
-                                    vec![Expr::name("_b")],
-                                )),
-                            ]),
-                        ))]),
-                    );
-                }
-                if op == "$" {
-                    // First-class ($) IS application: force the function
-                    // (the callee position needs a function value, not a
-                    // thunk), pass the argument RAW — `($) f ⊥` must stay
-                    // exactly as lazy as `f ⊥`, the callee decides. The
-                    // varargs forward the flat N-ary protocol: at a use
-                    // like `($) (+) 1 2` the result type still has arrows,
-                    // so the call site passes every outstanding argument in
-                    // the same call (count_arrows convention) and the
-                    // callee's own padding consumes them. The fallback
-                    // below emitted a literal `$` binop: a Lua syntax
-                    // error (the REPL's `($) (+) 1 2`).
-                    return Expr::Func(
-                        vec!["_a".into(), "_b".into(), "...".into()],
-                        FuncBody::Inline(vec![Stmt::Return(Expr::call(
-                            Expr::force(Expr::name("_a")),
-                            vec![Expr::name("_b"), Expr::name("...")],
-                        ))]),
-                    );
-                }
-                if op == "." {
-                    // First-class (.) builds the composed closure. Same
-                    // laziness as the inline composition (composition_ast):
-                    // the inner `g x` is SUSPENDED when handed to f — f may
-                    // never force its argument (`const 9 . error`), so
-                    // running g eagerly would raise where GHC does not.
-                    // Both flat-protocol shapes occur at call sites: a
-                    // direct/partial application passes (f, g, x, extras…)
-                    // in ONE call (count_arrows convention — the result
-                    // type still has arrows), while a higher-order consumer
-                    // (`zipWith (.) fs gs`) calls with exactly (f, g) and
-                    // applies the returned closure later — so the value
-                    // dispatches on whether the composition's argument
-                    // arrived. The fallback below emitted a literal `.`
-                    // binop: Lua index syntax, a syntax error against a
-                    // call expression.
-                    let go_body = Expr::Func(
-                        vec!["_x".into(), "...".into()],
-                        FuncBody::Inline(vec![Stmt::Return(Expr::call(
-                            Expr::force(Expr::name("_a")),
-                            vec![
-                                Expr::thunk(Expr::call(
-                                    Expr::force(Expr::name("_b")),
-                                    vec![Expr::name("_x")],
-                                )),
-                                Expr::name("..."),
-                            ],
-                        ))]),
-                    );
-                    return Expr::Func(
-                        vec!["_a".into(), "_b".into(), "...".into()],
-                        FuncBody::Block(Block(vec![
-                            Stmt::Local(vec!["_go".into()], Some(go_body)),
-                            Stmt::If {
-                                cond: Expr::binop(
-                                    "==",
-                                    Expr::call_named("select", vec![
-                                        Expr::lit("\"#\""),
-                                        Expr::name("..."),
-                                    ]),
-                                    Expr::lit("0"),
-                                ),
-                                then_b: Block(vec![Stmt::Return(Expr::name("_go"))]),
-                                elseifs: vec![],
-                                else_b: None,
-                            },
-                            Stmt::Return(Expr::call(
-                                Expr::name("_go"),
-                                vec![Expr::name("...")],
-                            )),
-                        ])),
-                    );
-                }
-                Self::builtin_op_lambda(op)
-            }
+            TExprKind::OpFunc(op) => Self::op_func_ast(op),
             TExprKind::SpecCall { specialized, args, .. } => self.spec_call_ast(specialized, args, expr),
             TExprKind::Tuple(elems) => {
                 let mut items = Vec::new();
@@ -1949,6 +1799,166 @@ impl CodeGen {
         self.expr_ast(&call)
     }
 
+    /// A first-class operator as a Lua function value: the ONE emission of
+    /// the operators that have no runtime function of their own — the
+    /// list and action structure operators (`++`, `!!`, `:`, `>>=`, `>>`,
+    /// `$`, `.`) and the native Lua operators (`builtin_op_lambda`). Used
+    /// for an `OpFunc` node and for the same operator stored as a method
+    /// entry of a static dictionary (`SpecKind::Dict`): the builtin IO
+    /// Monad instance maps `>>=` to itself, and a `Monad m =>` body past
+    /// the specialization limit reads it from the dictionary.
+    fn op_func_ast(op: &str) -> Expr {
+        if op == "++" {
+            return Expr::Func(
+                vec!["_a".into(), "_b".into()],
+                FuncBody::Inline(vec![Stmt::Return(Expr::call_named(
+                    "__mll_list_append",
+                    vec![Expr::name("_a"), Expr::inline_fn0(Expr::name("_b"))],
+                ))]),
+            );
+        }
+        if op == "!!" {
+            return Expr::Func(
+                vec!["_a".into(), "_b".into()],
+                FuncBody::Inline(vec![Stmt::Return(Expr::call_named(
+                    "__mll_list_index",
+                    vec![Expr::name("_a"), Expr::force(Expr::name("_b"))],
+                ))]),
+            );
+        }
+        if op == ":" {
+            return Expr::Func(
+                vec!["_a".into(), "_b".into()],
+                FuncBody::Inline(vec![Stmt::Return(Expr::call_named(
+                    "__mll_cons",
+                    vec![Expr::name("_a"), Expr::name("_b")],
+                ))]),
+            );
+        }
+        if op == ">>=" {
+            // First-class (>>=) at an action monad (IO/LuaIO/ST —
+            // Maybe/[] resolve to bind_Maybe/bind_List in mono).
+            // Applying it must BUILD an action value, not perform
+            // it: return a deferred closure that, when run, runs
+            // the LHS action and forwards the continuation's
+            // application through the tail runner — the same shape
+            // the inline `m >>= f` non-lambda arm emits. The old
+            // fallback emitted `_a >>= _b` verbatim: a Lua syntax
+            // error.
+            return Expr::Func(
+                vec!["_a".into(), "_b".into()],
+                FuncBody::Inline(vec![Stmt::Return(Expr::inline_fn0(
+                    Expr::call_named(
+                        "__mll_run_tail",
+                        vec![Expr::call(
+                            Expr::force(Expr::name("_b")),
+                            vec![Expr::call_named(
+                                "__mll_run",
+                                vec![Expr::name("_a")],
+                            )],
+                        )],
+                    ),
+                ))]),
+            );
+        }
+        if op == ">>" {
+            // First-class (>>) at an action monad: build a deferred
+            // closure that performs the LHS for its effects (result
+            // discarded, so the forwarding runner suffices) and
+            // tail-runs the RHS. See the (>>=) arm above.
+            return Expr::Func(
+                vec!["_a".into(), "_b".into()],
+                FuncBody::Inline(vec![Stmt::Return(Expr::Func(
+                    vec![],
+                    FuncBody::Inline(vec![
+                        Stmt::Expr(Expr::call_named(
+                            "__mll_run_tail",
+                            vec![Expr::name("_a")],
+                        )),
+                        Stmt::Return(Expr::call_named(
+                            "__mll_run_tail",
+                            vec![Expr::name("_b")],
+                        )),
+                    ]),
+                ))]),
+            );
+        }
+        if op == "$" {
+            // First-class ($) IS application: force the function
+            // (the callee position needs a function value, not a
+            // thunk), pass the argument RAW — `($) f ⊥` must stay
+            // exactly as lazy as `f ⊥`, the callee decides. The
+            // varargs forward the flat N-ary protocol: at a use
+            // like `($) (+) 1 2` the result type still has arrows,
+            // so the call site passes every outstanding argument in
+            // the same call (count_arrows convention) and the
+            // callee's own padding consumes them. The fallback
+            // below emitted a literal `$` binop: a Lua syntax
+            // error (the REPL's `($) (+) 1 2`).
+            return Expr::Func(
+                vec!["_a".into(), "_b".into(), "...".into()],
+                FuncBody::Inline(vec![Stmt::Return(Expr::call(
+                    Expr::force(Expr::name("_a")),
+                    vec![Expr::name("_b"), Expr::name("...")],
+                ))]),
+            );
+        }
+        if op == "." {
+            // First-class (.) builds the composed closure. Same
+            // laziness as the inline composition (composition_ast):
+            // the inner `g x` is SUSPENDED when handed to f — f may
+            // never force its argument (`const 9 . error`), so
+            // running g eagerly would raise where GHC does not.
+            // Both flat-protocol shapes occur at call sites: a
+            // direct/partial application passes (f, g, x, extras…)
+            // in ONE call (count_arrows convention — the result
+            // type still has arrows), while a higher-order consumer
+            // (`zipWith (.) fs gs`) calls with exactly (f, g) and
+            // applies the returned closure later — so the value
+            // dispatches on whether the composition's argument
+            // arrived. The fallback below emitted a literal `.`
+            // binop: Lua index syntax, a syntax error against a
+            // call expression.
+            let go_body = Expr::Func(
+                vec!["_x".into(), "...".into()],
+                FuncBody::Inline(vec![Stmt::Return(Expr::call(
+                    Expr::force(Expr::name("_a")),
+                    vec![
+                        Expr::thunk(Expr::call(
+                            Expr::force(Expr::name("_b")),
+                            vec![Expr::name("_x")],
+                        )),
+                        Expr::name("..."),
+                    ],
+                ))]),
+            );
+            return Expr::Func(
+                vec!["_a".into(), "_b".into(), "...".into()],
+                FuncBody::Block(Block(vec![
+                    Stmt::Local(vec!["_go".into()], Some(go_body)),
+                    Stmt::If {
+                        cond: Expr::binop(
+                            "==",
+                            Expr::call_named("select", vec![
+                                Expr::lit("\"#\""),
+                                Expr::name("..."),
+                            ]),
+                            Expr::lit("0"),
+                        ),
+                        then_b: Block(vec![Stmt::Return(Expr::name("_go"))]),
+                        elseifs: vec![],
+                        else_b: None,
+                    },
+                    Stmt::Return(Expr::call(
+                        Expr::name("_go"),
+                        vec![Expr::name("...")],
+                    )),
+                ])),
+            );
+        }
+        Self::builtin_op_lambda(op)
+    }
+
     /// The first-class VALUE of a Lua-native binary operator (`(+)`, `(<)`,
     /// `(&&)`, …): a two-argument closure forcing both operands, the exact
     /// forcing the inline infix emission does. Shared by the `OpFunc` arm
@@ -2022,12 +2032,16 @@ impl CodeGen {
                     // the old `lua_ref("+")` named a global that does not
                     // exist and crashed with a nil call at the first use
                     // past the specialization limit.
+                    // Likewise the action monads' `>>=`/`>>`, which the
+                    // builtin IO/LuaIO/ST instances map to themselves
+                    // (the inline bind chain is codegen's): the entry is
+                    // the first-class operator's value.
                     let value = match f.as_str() {
                         "div" => Expr::name("__mll_div_fn"),
                         "mod" => Expr::name("__mll_mod_fn"),
                         "quot" => Expr::name("__mll_quot_fn"),
                         "rem" => Expr::name("__mll_rem_fn"),
-                        op if is_builtin_op(op) => Self::builtin_op_lambda(op),
+                        op if is_builtin_op(op) || op == ">>=" || op == ">>" => Self::op_func_ast(op),
                         _ => {
                             let sv = sanitize_name(f);
                             Expr::name(self.lua_ref(&sv))
