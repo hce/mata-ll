@@ -105,15 +105,24 @@ pub(super) fn lua_field_assign(name: &str) -> String {
 
 /// Source names of runtime-library entities whose Lua name is spelled
 /// differently: the ByteString primitives (entries of the `__mll_bs`
-/// table), `runST`, the HashMap family, and the builtins whose bare
-/// spelling is a Lua keyword or a Lua global (`return`, `not`, `error`,
-/// `exit`, `try`, `catch`) or needs a prime (`foldl'`). One table:
-/// `runtime_entity` reads it, module.rs seeds the known top-level names
-/// from its keys, and the prelude-name check pins every target to a
-/// binding in the runtime text. (The ST array / IORef intrinsics rename
+/// table), `runST`, `seq`, the HashMap family, and the builtins whose
+/// bare spelling is a Lua keyword or a Lua global (`return`, `not`,
+/// `error`, `exit`, `try`, `catch`) or needs a prime (`foldl'`). One
+/// table: `runtime_entity` reads it, module.rs seeds the known top-level
+/// names from its keys, and the prelude-name check pins every target to
+/// a binding in the runtime text. (The ST array / IORef intrinsics rename
 /// through their own family table, crate::intrinsics.)
 pub(super) const RUNTIME_RENAMES: &[(&str, &str)] = &[
     ("return", "return_"),
+    // The first-class `seq` is the variadic runtime primitive; the
+    // saturated prefix and backtick forms are lowered inline by name
+    // (expr.rs), as are demand.rs's `seq` rules. Listing it here claims
+    // the spelling (`runtime_spellings`), so a local binder the program
+    // calls `seq` is respelled by import resolution and the name means
+    // the primitive in every scope — the same guarantee `div`, `mod`,
+    // `quot` and `rem` have as method implementations of the builtin
+    // `Integral Int` instance (`Checker::claimed_names`).
+    ("seq", "__mll_seq"),
     ("not", "not_"),
     // error_ forces its message before raising; Lua's bare `error` would
     // hand a thunk to error() and print "table: 0x...".

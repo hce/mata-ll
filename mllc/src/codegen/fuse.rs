@@ -380,7 +380,10 @@ impl CodeGen {
     /// desugar to lambdas, so `(* 3)` qualifies). Cheap bodies contain
     /// no binders, so the substitution cannot capture; two relocation
     /// gates remain: a parameter used as a backtick OPERATOR is not
-    /// substitutable (an InfixApp op is a string, not a Var node), and
+    /// substitutable (an InfixApp op is a string, not a Var node; a cheap
+    /// body's identifier-shaped ops are the claimed `div`/`mod`/`quot`/
+    /// `rem`, which no parameter spells, so this gate cannot fire today
+    /// — see `subst_would_capture`), and
     /// every OTHER name the body references must not be locally shadowed
     /// at this site — the body must resolve its module-level names here
     /// exactly as at its definition (the where-local registration

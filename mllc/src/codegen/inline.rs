@@ -36,10 +36,16 @@ impl CodeGen {
         body: &TExpr,
         subst: &std::collections::HashMap<String, &TExpr>,
     ) -> bool {
-        // A parameter used as a backtick OPERATOR (`10 \`div\` x` under a
-        // parameter named div) is not substitutable at all: an InfixApp op
+        // A parameter used as a backtick OPERATOR (`10 \`f\` x` under a
+        // parameter named f) is not substitutable at all: an InfixApp op
         // is a string, not a Var node, so the substituted body would keep
-        // the operator's builtin lowering instead of calling the argument.
+        // a reference to the parameter's name instead of the argument.
+        // Today no candidate reaches this: a cheap body (`is_cheap`)
+        // carries only `is_builtin_op` operators, whose identifier-shaped
+        // members (`div`, `mod`, `quot`, `rem`) are claimed spellings no
+        // parameter can have (`modules.rs` `Rename::local`). The gate
+        // stays because it guards `subst_texpr`'s own limitation, not the
+        // resolver's guarantee.
         let mut op_uses = std::collections::HashSet::new();
         Self::collect_infix_op_uses(body, &mut op_uses);
         if subst.keys().any(|p| op_uses.contains(p)) {

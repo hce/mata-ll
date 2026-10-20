@@ -1455,9 +1455,11 @@ fn demanded_vars_in(
             // a parameter passed as `seq`'s first argument is demanded,
             // while the second stays lazy. Mirror the runtime `__mll_seq` /
             // inline lowering exactly. (The structured analysis claims the
-            // second operand too; see the shared-rules section.)
+            // second operand too; see the shared-rules section.) No shadow
+            // check: `seq` is a claimed spelling, never a local
+            // (`modules.rs` `Rename::local`).
             if let TExprKind::Var(name) = &f.kind
-                && name == "seq" && !shadowed("seq") && !args_rev.is_empty() {
+                && name == "seq" && !args_rev.is_empty() {
                     s.extend(whnf_only_demands(args_rev[0], &rec));
                 }
 
@@ -1544,10 +1546,13 @@ fn demanded_vars_in(
 
         TExprKind::InfixApp { op, lhs, rhs } => {
             // A backtick operator is an ordinary identifier; when a local
-            // binder shadows it (`` a `div` b `` under a parameter named
-            // div), the call targets an unknown local function — claim only
-            // the callee name itself, like the App arm does for unknown
-            // callees.
+            // binder shadows it (`` a `f` b `` under a parameter named f),
+            // the call targets an unknown local function — claim only the
+            // callee name itself, like the App arm does for unknown
+            // callees. The builtin spellings `div`/`mod`/`quot`/`rem`/`seq`
+            // never arrive here as locals (claimed; `modules.rs`
+            // `Rename::local` respells such a binder), so the table below
+            // reads them as the builtins.
             if op.starts_with(|c: char| c.is_alphabetic() || c == '_') && shadowed(op) {
                 let mut s = HashSet::new();
                 s.insert(op.clone());
@@ -2168,9 +2173,11 @@ fn demand_expr<'t>(cx: &RowCx<'_, 't>, expr: &'t TExpr, rd: &Demand, run_pos: bo
         TExprKind::App(_, _) => demand_app(cx, expr, rd, run_pos),
 
         TExprKind::InfixApp { op, lhs, rhs } => match op.as_str() {
-            // A backtick operator shadowed by a local binder targets an
-            // unknown local function: claim only the callee name (mirrors
-            // the boolean arm and demand_app's unknown-callee rule).
+            // A backtick operator shadowed by a local binder (a parameter
+            // `f` in `` a `f` b ``) targets an unknown local function: claim
+            // only the callee name (mirrors the boolean arm and demand_app's
+            // unknown-callee rule). The builtin spellings never arrive as
+            // locals (claimed; `modules.rs` `Rename::local`).
             op2 if op2.starts_with(|c: char| c.is_alphabetic() || c == '_')
                 && (cx.shadowed)(op2) => {
                 let mut m = DemandMap::new();
@@ -2424,9 +2431,9 @@ fn demand_app<'t>(cx: &RowCx<'_, 't>, expr: &'t TExpr, rd: &Demand, run_pos: boo
     };
 
     // `seq a b` — see `seq_demand_map`; the callee name itself is demanded.
-    // Shadowed specials are ordinary local calls (fall through to the
-    // generic path, whose row lookups are suppressed below).
-    if fname == Some("seq") && !(cx.shadowed)("seq") {
+    // `seq` is a claimed spelling, never a local (`modules.rs`
+    // `Rename::local`), so no shadow check.
+    if fname == Some("seq") {
         if let Some(a) = args.first() {
             let second = if args.len() == 2 { Some(args[1]) } else { None };
             map_join(&mut m, seq_demand_map(cx, a, second, rd, run_pos));

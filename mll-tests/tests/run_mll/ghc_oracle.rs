@@ -227,6 +227,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_dollar_stays_lazy, "cases", "dollar_stays_lazy.mll"),
         (ghc_oracle_guarded_clause_scope, "cases", "guarded_clause_scope.mll"),
         (ghc_oracle_local_shadows_specials, "cases", "local_shadows_specials.mll"),
+        (ghc_oracle_backtick_local_operators, "cases", "backtick_local_operators.mll"),
         (ghc_oracle_inline_no_capture, "cases", "inline_no_capture.mll"),
         (ghc_oracle_demand_shadowing, "cases", "demand_shadowing.mll"),
         (ghc_oracle_shadowed_demand_rows, "cases", "shadowed_demand_rows.mll"),

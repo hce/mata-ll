@@ -53,10 +53,13 @@ impl CodeGen {
     fn expr_ast_inner(&mut self, expr: &TExpr) -> Expr {
         match &expr.kind {
             TExprKind::Var(name) => {
-                // Every special name below can be SHADOWED by a local binder
-                // (a parameter or pattern variable named `seq`, `div`,
-                // `otherwise`, … is legal Haskell); the guards route a
-                // shadowed name through the ordinary variable path.
+                // A special name below can be SHADOWED by a local binder
+                // (a parameter or pattern variable named `otherwise` is
+                // legal Haskell); the guard routes a shadowed name through
+                // the ordinary variable path. `seq`, `div`, `mod`, `quot`
+                // and `rem` are claimed spellings — import resolution
+                // respells a local binder of such a name (`modules.rs`
+                // `Rename::local`), so the guard never fires for those.
                 match name.as_str() {
                     _ if self.is_local_shadowed(name) => {
                         let sname = sanitize_name(name);
@@ -165,18 +168,24 @@ impl CodeGen {
                 // A backtick operator is an ordinary identifier, and
                 // `` a `f` b `` is the application `f a b`. Only the
                 // builtins with a dedicated infix lowering below (`div`,
-                // `mod`, `quot`, `rem`, `seq`) keep it, and only while no
-                // local binder shadows them (a parameter named `div`, `seq`,
-                // … makes this a CALL to that local value). Every other
+                // `mod`, `quot`, `rem`, `seq`) keep it. Every other
                 // backtick — a module function, a Prelude or runtime
-                // function such as `catch`, a shadowed builtin — is emitted
-                // as the application (infix_application_ast).
+                // function such as `catch`, a local — is emitted as the
+                // application (infix_application_ast). The five spellings
+                // are claimed (`names::runtime_spellings`): import
+                // resolution respells a local binder of such a name
+                // (`modules.rs` `Rename::local`, `__local_div`), so at
+                // this stage an op spelled `div` is never a local and no
+                // shadow check is needed here.
                 if op.starts_with(|c: char| c.is_alphabetic() || c == '_')
-                    && (self.is_local_shadowed(op)
-                        || !matches!(op.as_str(), "div" | "mod" | "quot" | "rem" | "seq"))
+                    && !matches!(op.as_str(), "div" | "mod" | "quot" | "rem" | "seq")
                 {
                     return self.infix_application_ast(expr, op, lhs, rhs);
                 }
+                debug_assert!(
+                    !self.is_local_shadowed(op),
+                    "a local binder spelled like the builtin operator `{op}` must have been respelled by import resolution"
+                );
                 match op.as_str() {
                 "div" | "mod" | "quot" | "rem" => self.intdiv_infix_ast(op, lhs, rhs),
                 "++" => {
@@ -790,9 +799,10 @@ impl CodeGen {
     /// Fires only when the binding group is exactly the one value binding
     /// (no sibling assignment can run between the bind and the seq), the
     /// binding is neither self-referencing (strict_binding_safe) nor a
-    /// first-class action (those must stay re-performable closures), the
-    /// body's `seq` is the prelude's (not locally shadowed, not the bound
-    /// name itself), and the forced variable IS the bound name.
+    /// first-class action (those must stay re-performable closures), and
+    /// the forced variable IS the bound name. The body's `seq` is the
+    /// prelude's by construction: the spelling is claimed, so no let
+    /// binder or enclosing local carries it (`modules.rs` `Rename::local`).
     fn try_let_seq_strict_ast(
         &mut self,
         binds: &[TLocalDef],
@@ -811,8 +821,6 @@ impl CodeGen {
             || Self::is_nullary_action_type(&b.body.ty)
             || Self::is_nullary_action_type(&body.ty)
             || !strict_binding_safe(binds, 0)
-            || b.name == "seq"
-            || self.is_local_shadowed("seq")
         {
             return None;
         }
@@ -964,9 +972,11 @@ impl CodeGen {
     /// seq case) — this inline form is kept only for the common
     /// prefix shape because it preserves the proper tail call on `b`.
     fn try_seq_prefix_app(&mut self, func: &TExpr, arg: &TExpr) -> Option<Expr> {
+        // No shadow check: `seq` is a claimed spelling, so a Var spelled
+        // `seq` is the prelude's (`modules.rs` `Rename::local`).
         if let TExprKind::App(seq_f, seq_a) = &func.kind
             && let TExprKind::Var(name) = &seq_f.kind
-                && name == "seq" && !self.is_local_shadowed(name) {
+                && name == "seq" {
                     return Some(self.seq_inline_ast(seq_a, arg));
                 }
         None

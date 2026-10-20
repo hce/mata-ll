@@ -44,6 +44,23 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A `where`-bound function named `seq`, used in backtick form, keeps an
+  operand it ignores unevaluated** (silent wrong output). `x \`seq\` y
+  where seq _ b = b` applied to `error "boom"` raised where GHC returns
+  `b`: the demand analyses recognize `seq` by spelling and guarded that
+  with a shadow check that exempted a where-bound function (its own
+  strictness row is the intended lookup), so the builtin's rule — force
+  the first operand — was applied to the local. `seq` is now a claimed
+  spelling like `div`, `mod`, `quot` and `rem` (`names::RUNTIME_RENAMES`):
+  import resolution respells a local binder of that name, so after
+  resolution `seq` denotes the primitive in every scope and no per-pass
+  shadow check decides it. 2026-10 fresh-eyes review (O3, N2, N3): the
+  `div`/`mod`/`quot`/`rem` shapes — a backtick local folded as the
+  builtin, treated as strict in both operands, or an inlined body's
+  builtin rerouted to a call-site local — were closed by the module
+  resolver's respelling of claimed binders (the one-scope-per-module and
+  one-Lua-name-per-name changes) and are pinned with the `seq` shapes in
+  the GHC-goldened case `backtick_local_operators`.
 - **A dictionary for a concrete type is decided after the specialization
   fixpoint, so it never names a method that later switched to dictionary
   passing** (crash). Past the cap a call site builds a dictionary table for
@@ -903,6 +920,17 @@ API of the `mllc` library crate.)
 
 ### Changed
 
+- **The per-pass shadow checks for a local named `div`, `mod`, `quot`,
+  `rem` or `seq` are retired.** The emitter's backtick-operator arm, its
+  `let … in seq` and prefix-`seq` lowerings and the demand analyses' `seq`
+  rules each asked whether a local binder shadowed the spelling before
+  applying the builtin's rule; import resolution respells such a binder
+  (`modules.rs` `Rename::local`), so the spelling is never a local at
+  those stages. The checks that guard a program's own names against a
+  same-named local — the folder's CAF and function masking, the inliners'
+  relocation and operator gates, the demand analyses' unknown-callee rule
+  for a backtick local (`` a `f` b `` under a parameter `f`) — are
+  unchanged.
 - **Import and export lists select constructors, record fields and class
   methods as in Haskell 2010** (breaking for programs that relied on the
   old program-wide names). `module A (T)` exports the type without its

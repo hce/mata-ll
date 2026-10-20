@@ -550,7 +550,16 @@ apart is done entirely in `modules.rs`, before the merge
   entity off them the way it keeps locals off wired-in names: an
   entry-module declaration of such a name — a function, a record field, a
   class method — gets the qualified canonical name (`Main.show_Int`,
-  `canon`), a local binder the `__local_` spelling. Everything the
+  `canon`), a local binder the `__local_` spelling. A name in operator
+  position — `` a `f` b ``, `(f)` — is bound by `Rename::op_ref` through
+  the same value resolution (`v`) as a prefix reference, so a backtick
+  operator is respelled with its binder: after resolution an `InfixApp`
+  whose operator is spelled `div`, `mod`, `quot`, `rem` or `seq` is the
+  builtin, which is what lets the emitter's `InfixApp` arm, `fold.rs`
+  and `demand.rs` key their lowerings and rules on those spellings
+  without a shadow check (`seq` is claimed through
+  `names::RUNTIME_RENAMES`, the four others as the method
+  implementations of the builtin `Integral Int` instance). Everything the
   compiler generates per program — instance methods (`show·Color`),
   derived helpers, specializations and dictionary forms (`count·IntTInt`,
   `show·Color·dictform` via `Monomorphizer::mangle_name`), Generic
