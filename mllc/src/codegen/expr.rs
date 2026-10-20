@@ -1254,7 +1254,7 @@ impl CodeGen {
         let mut nothing: Option<&TExpr> = None;
         for b in branches {
             match strip_pat(&b.pattern) {
-                TPattern::Constructor { name, args } if name == "Just" && args.len() == 1 => {
+                TPattern::Constructor { name, args, .. } if name == "Just" && args.len() == 1 => {
                     match strip_pat(&args[0]) {
                         inner @ (TPattern::Var(..) | TPattern::Wildcard) => {
                             just = Some((inner, b.plain_body()));
@@ -1262,7 +1262,7 @@ impl CodeGen {
                         _ => return None,
                     }
                 }
-                TPattern::Constructor { name, args } if name == "Nothing" && args.is_empty() => {
+                TPattern::Constructor { name, args, .. } if name == "Nothing" && args.is_empty() => {
                     nothing = Some(b.plain_body());
                 }
                 _ => return None,

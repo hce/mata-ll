@@ -2116,7 +2116,7 @@ fn pattern_demand(pat: &TPattern, body: &DemandMap) -> Option<Demand> {
         TPattern::Tuple(ps) => Some(Demand::Fields(
             ps.iter().map(|p| pattern_demand(p, body)).collect(),
         )),
-        TPattern::Constructor { name, args } => {
+        TPattern::Constructor { name, args, .. } => {
             if name == "[]" && args.is_empty() {
                 return Some(Demand::Elems(Box::new(Demand::Head)));
             }
@@ -3174,13 +3174,10 @@ mod tests {
     /// can be recognized at all — see the seed rationale).
     #[test]
     fn seed_param_unwraps_as_and_paren() {
-        let cons = TPattern::Constructor {
-            name: ":".into(),
-            args: vec![
-                TPattern::Var("x".into(), int()),
-                TPattern::Var("xs".into(), Ty::List(Box::new(int()))),
-            ],
-        };
+        let cons = TPattern::ctor(":".into(), vec![
+            TPattern::Var("x".into(), int()),
+            TPattern::Var("xs".into(), Ty::List(Box::new(int()))),
+        ]);
         let plain = TLocalDefLike {
             patterns: std::slice::from_ref(&cons),
             guards: &[],

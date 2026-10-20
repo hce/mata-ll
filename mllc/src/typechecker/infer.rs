@@ -2078,6 +2078,7 @@ impl Checker {
                         tv_map.insert(tv.clone(), Ty::Var(fresh));
                     }
                 }
+                let mut skolems = Vec::with_capacity(con_info.existential_vars.len());
                 // Existential type variables become fresh RIGID skolem
                 // constants, scoped to this pattern-match branch: the
                 // concrete type was erased when the value was packed, so the
@@ -2087,13 +2088,19 @@ impl Checker {
                 // constraint on the skolem from exactly the constructor's
                 // declared context and nothing else, (b) the escape checks in
                 // `check_clause` / `Expr::Case` know which skolems this
-                // pattern introduced, and (c) diagnostics can say where the
-                // hidden type came from.
+                // pattern introduced, (c) diagnostics can say where the
+                // hidden type came from, and (d) the pattern node itself
+                // carries its (variable, id) pairs for the monomorphizer,
+                // which binds the constructor's captured dictionaries to
+                // THESE skolems — the name alone is ambiguous once another
+                // existential pattern over a same-named variable is nested
+                // inside (see `TPattern::Constructor::skolems`).
                 for tv in &con_info.existential_vars {
                     let sk_id = self.next_var;
                     self.next_var += 1;
                     tv_map.insert(tv.clone(), Ty::Skolem(tv.name.clone(), sk_id));
                     self.pattern_skolems.push((tv.name.clone(), sk_id));
+                    skolems.push((tv.name.clone(), sk_id));
                     let givens = con_info.existential_constraints.iter()
                         .filter(|c| c.type_var == tv.name)
                         .map(|c| c.class_name.clone())
@@ -2123,7 +2130,7 @@ impl Checker {
                     targs.push(tp);
                 }
 
-                Ok((TPattern::Constructor { name: con_key, args: targs }, subst, givens))
+                Ok((TPattern::Constructor { name: con_key, args: targs, skolems }, subst, givens))
             }
             Pattern::Paren(inner) => self.check_pattern(inner, expected, env),
             Pattern::Tuple(pats) => {

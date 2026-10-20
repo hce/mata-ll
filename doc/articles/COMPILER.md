@@ -195,7 +195,17 @@ constant folding (§7) can then recognize them.
   `Ord a` read a dictionary. The same closure gives a context instance's
   dictionary form its parameters and an existential constructor its
   hidden dictionary fields; `TFunction::dict_params` is the call
-  convention every DictCall site agrees with. Method dispatch is ONE
+  convention every DictCall site agrees with. A match on a constrained
+  existential constructor gets hidden trailing binders for those fields
+  (`ex_rewrite_pattern`), each recorded as the evidence for its class
+  at the pattern's OWN skolem — the one the checker minted for that
+  pattern and stored on the node (`TPattern::Constructor::skolems`).
+  The node is the only binding: every existential skolem is named after
+  its constructor's variable, so a nested existential pattern over a
+  same-named variable (`B (A y) p q`, both over `a`) is not
+  distinguishable by name. The dictionary rewrite passes revisit the
+  extended patterns and read the same node, so both passes see one
+  mapping. Method dispatch is ONE
   decision for both passes, `dispatch_method` (see `MethodUse`): the
   main walk and the dictionary rewrite call it from every arm where a
   method can appear — a named use, an infix operator (the operator's own

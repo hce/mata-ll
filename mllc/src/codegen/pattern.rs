@@ -434,7 +434,7 @@ impl CodeGen {
         let col = col.expect("at least one clause");
         let mut names: Vec<&str> = Vec::new();
         for c in clauses {
-            let TPattern::Constructor { name, args } = strip(&c.patterns[col]) else {
+            let TPattern::Constructor { name, args, .. } = strip(&c.patterns[col]) else {
                 return false;
             };
             if self.is_newtype(name) || !args.iter().all(irrefutable) {
@@ -589,7 +589,7 @@ impl CodeGen {
                     }
                 }
             }
-            TPattern::Constructor { name, args } => {
+            TPattern::Constructor { name, args, .. } => {
                 if self.is_newtype(name) {
                     // Newtype: zero-cost wrapper, value is the inner type directly
                     for arg in args {

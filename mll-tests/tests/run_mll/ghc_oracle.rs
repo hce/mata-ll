@@ -418,6 +418,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_newtype_whnf, "cases", "newtype_whnf.mll"),
         (ghc_oracle_strict_folds, "cases", "strict_folds.mll"),
         (ghc_oracle_existential_dicts, "cases", "existential_dicts.mll"),
+        (ghc_oracle_existential_nested_dicts, "cases", "existential_nested_dicts.mll"),
         (ghc_oracle_ord_minimal_instance, "cases", "ord_minimal_instance.mll"),
         (ghc_oracle_eq_minimal_instance, "cases", "eq_minimal_instance.mll"),
         (ghc_oracle_show_shows_prec_instance, "cases", "show_shows_prec_instance.mll"),

@@ -239,7 +239,12 @@ field per declared class and superclass), a match binds them back, and
 every method use at the hidden type — direct (`show x`, `a < b`),
 through a container (`show [x]`), or through a constrained helper
 (`f :: Show b => b -> String` applied to `x`) — dispatches through the
-captured dictionary. The monomorphizer performs the capture
+captured dictionary. Each dictionary a match binds back answers for
+the class at that constructor's OWN hidden type: with `data A = forall
+a. Show a => A a` and `data B = forall a. Eq a => B A a a`, the match
+`B (A y) p q` gives `p == q` B's `Eq` dictionary and `show y` A's
+`Show` dictionary, however the fields are ordered and whatever the
+hidden variables are called. The monomorphizer performs the capture
 (`mono.rs`, `ExCtor`); no other representation detail leaks.
 
 GADT syntax declares existentials implicitly: a signature variable that

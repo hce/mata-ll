@@ -4071,7 +4071,7 @@ impl Monomorphizer {
                         scrutinee: Box::new(call),
                         branches: vec![
                             TCaseBranch {
-                                pattern: TPattern::Constructor { name: con.to_string(), args: vec![] },
+                                pattern: TPattern::ctor(con.to_string(), vec![]),
                                 guards: vec![],
                                 body: Some(then),
                             },
@@ -4298,7 +4298,7 @@ impl Monomorphizer {
                                 scrutinee: Box::new(field_cmp(i)),
                                 branches: vec![
                                     TCaseBranch {
-                                        pattern: TPattern::Constructor { name: "EQ".to_string(), args: vec![] },
+                                        pattern: TPattern::ctor("EQ".to_string(), vec![]),
                                         guards: vec![],
                                         body: Some(acc),
                                     },
@@ -4577,32 +4577,6 @@ impl Monomorphizer {
         }
     }
 
-    /// Skolems by NAME in a type (the checker names an existential skolem
-    /// after the constructor's variable, `Ty::Skolem(tv.name, id)`).
-    fn collect_skolems_by_name(ty: &Ty, out: &mut HashMap<String, u32>) {
-        match ty {
-            Ty::Skolem(name, id) => { out.entry(name.clone()).or_insert(*id); }
-            Ty::Con(_) | Ty::Var(_) | Ty::Unit | Ty::Promoted(_) => {}
-            Ty::Arrow(a, b, _) | Ty::App(a, b) => {
-                Self::collect_skolems_by_name(a, out);
-                Self::collect_skolems_by_name(b, out);
-            }
-            Ty::List(a) | Ty::IO(a) | Ty::LuaIO(_, a) | Ty::Forall(_, a) => Self::collect_skolems_by_name(a, out),
-            Ty::Tuple(es) => es.iter().for_each(|e| Self::collect_skolems_by_name(e, out)),
-        }
-    }
-
-    fn pattern_skolems(pat: &TPattern, out: &mut HashMap<String, u32>) {
-        match pat {
-            TPattern::Var(_, ty) => Self::collect_skolems_by_name(ty, out),
-            TPattern::Wildcard | TPattern::LitPat(..) => {}
-            TPattern::Constructor { args, .. } | TPattern::Tuple(args) => {
-                args.iter().for_each(|a| Self::pattern_skolems(a, out))
-            }
-            TPattern::Paren(inner) | TPattern::As(_, inner) => Self::pattern_skolems(inner, out),
-        }
-    }
-
     fn ex_rewrite_patterns(
         &mut self,
         pats: Vec<TPattern>,
@@ -4613,26 +4587,26 @@ impl Monomorphizer {
 
     /// Give every constrained-existential constructor pattern its hidden
     /// dictionary binders (trailing, one per capture) and record which
-    /// (class, skolem) each binder answers for — read off the skolems the
-    /// checker put in the sub-patterns' variable types. A pattern that binds
-    /// no variable at the hidden type gets the binders (the field positions
-    /// must line up) but no mapping (nothing can use it).
+    /// (class, skolem) each binder answers for. The skolem is the one the
+    /// checker minted for THIS pattern's own existential variable, read off
+    /// the pattern node (`TPattern::Constructor::skolems`): a capture
+    /// `(Eq, a)` binds to this constructor's `a`, never to a same-named
+    /// `a` of an existential pattern nested in one of its fields. The
+    /// mapping does not depend on what the fields bind, so a field that
+    /// binds nothing at the hidden type (a wildcard) maps like any other.
     fn ex_rewrite_pattern(
         &mut self,
         pat: TPattern,
         caps: &mut Vec<((String, u32), String)>,
     ) -> TPattern {
         match pat {
-            TPattern::Constructor { name, args } => {
+            TPattern::Constructor { name, args, skolems } => {
                 let args: Vec<TPattern> = args.into_iter().map(|a| self.ex_rewrite_pattern(a, caps)).collect();
                 let Some(ex) = self.ex_ctors.get(&name).cloned() else {
-                    return TPattern::Constructor { name, args };
+                    return TPattern::Constructor { name, args, skolems };
                 };
                 let n = ex.field_types.len();
-                let mut skolems: HashMap<String, u32> = HashMap::new();
-                for a in args.iter().take(n) {
-                    Self::pattern_skolems(a, &mut skolems);
-                }
+                let own_skolem = |var: &str| skolems.iter().find(|(v, _)| v == var).map(|(_, id)| *id);
                 // A pattern the main walk already extended (the dictionary
                 // rewrite passes revisit finished TIR) keeps its binders
                 // and hands back the same (class, skolem) -> binder
@@ -4641,27 +4615,27 @@ impl Monomorphizer {
                 if args.len() == n + ex.captures.len() {
                     for (i, (cls, var)) in ex.captures.iter().enumerate() {
                         if let TPattern::Var(binder, _) = &args[n + i]
-                            && let Some(id) = skolems.get(var)
+                            && let Some(id) = own_skolem(var)
                         {
-                            caps.push(((cls.clone(), *id), binder.clone()));
+                            caps.push(((cls.clone(), id), binder.clone()));
                         }
                     }
-                    return TPattern::Constructor { name, args };
+                    return TPattern::Constructor { name, args, skolems };
                 }
                 // Only a pattern at the DECLARED arity is rewritten.
                 if args.len() != n {
-                    return TPattern::Constructor { name, args };
+                    return TPattern::Constructor { name, args, skolems };
                 }
                 let mut args = args;
                 for (i, (cls, var)) in ex.captures.iter().enumerate() {
                     let binder = format!("__exd{}_{}", self.ex_binder_counter, i);
-                    if let Some(id) = skolems.get(var) {
-                        caps.push(((cls.clone(), *id), binder.clone()));
+                    if let Some(id) = own_skolem(var) {
+                        caps.push(((cls.clone(), id), binder.clone()));
                     }
                     args.push(TPattern::Var(binder, Ty::Unit));
                 }
                 self.ex_binder_counter += 1;
-                TPattern::Constructor { name, args }
+                TPattern::Constructor { name, args, skolems }
             }
             TPattern::Paren(inner) => TPattern::Paren(Box::new(self.ex_rewrite_pattern(*inner, caps))),
             TPattern::As(n, inner) => TPattern::As(n, Box::new(self.ex_rewrite_pattern(*inner, caps))),

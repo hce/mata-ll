@@ -89,12 +89,13 @@ fn erase_local(ctors: &HashSet<String>, wb: TLocalDef) -> TLocalDef {
 /// constructors' arguments.
 fn erase_pattern(ctors: &HashSet<String>, pat: TPattern) -> TPattern {
     match pat {
-        TPattern::Constructor { name, mut args } if ctors.contains(&name) && args.len() == 1 => {
+        TPattern::Constructor { name, mut args, .. } if ctors.contains(&name) && args.len() == 1 => {
             erase_pattern(ctors, args.pop().unwrap())
         }
-        TPattern::Constructor { name, args } => TPattern::Constructor {
+        TPattern::Constructor { name, args, skolems } => TPattern::Constructor {
             name,
             args: args.into_iter().map(|a| erase_pattern(ctors, a)).collect(),
+            skolems,
         },
         TPattern::Paren(inner) => TPattern::Paren(Box::new(erase_pattern(ctors, *inner))),
         TPattern::As(n, inner) => TPattern::As(n, Box::new(erase_pattern(ctors, *inner))),

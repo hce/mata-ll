@@ -569,9 +569,10 @@ impl TPattern {
     pub fn apply_subst(self, subst: &Subst) -> Self {
         match self {
             TPattern::Var(n, ty) => TPattern::Var(n, ty.apply_subst(subst)),
-            TPattern::Constructor { name, args } => TPattern::Constructor {
+            TPattern::Constructor { name, args, skolems } => TPattern::Constructor {
                 name,
                 args: args.into_iter().map(|p| p.apply_subst(subst)).collect(),
+                skolems,
             },
             TPattern::Paren(p) => TPattern::Paren(Box::new(p.apply_subst(subst))),
             TPattern::Tuple(ps) => TPattern::Tuple(ps.into_iter().map(|p| p.apply_subst(subst)).collect()),
@@ -869,6 +870,17 @@ pub enum TPattern {
     Constructor {
         name: String,
         args: Vec<TPattern>,
+        /// The existential skolems THIS pattern minted, one per existential
+        /// variable of the constructor, as (variable name, skolem id) —
+        /// recorded by the checker when it checks the pattern, read by the
+        /// monomorphizer to bind the constructor's captured dictionaries to
+        /// its own hidden types. Every existential skolem is named after
+        /// its constructor's variable, so the name alone cannot tell a
+        /// nested existential pattern's skolem from this one's (`B (A y) p
+        /// q`, both over `a`): the ids on the node are the only binding.
+        /// Empty for a constructor without existential variables and for
+        /// every synthesized pattern (`TPattern::ctor`).
+        skolems: Vec<(String, u32)>,
     },
     /// Literal pattern with the TYPE the scrutinee was checked at. The
     /// type is what lets codegen pick the comparison: an integer literal
@@ -885,6 +897,14 @@ pub enum TPattern {
 }
 
 impl TPattern {
+    /// A constructor pattern that mints no existential skolem — every
+    /// pattern the compiler synthesizes (derived instances, the
+    /// monomorphizer's dispatch cases, newtype selectors); only the
+    /// checker's pattern walk mints skolems and builds the variant directly.
+    pub fn ctor(name: String, args: Vec<TPattern>) -> TPattern {
+        TPattern::Constructor { name, args, skolems: Vec::new() }
+    }
+
     /// Does matching this pattern force its scrutinee to WHNF? `Var` and
     /// `Wildcard` bind lazily, `Paren` is transparent, an as-pattern
     /// forces exactly when its inner pattern does, and everything else

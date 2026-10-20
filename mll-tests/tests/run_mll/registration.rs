@@ -633,6 +633,7 @@ mll_test!(strict_folds, "strict_folds.mll");
 // dispatch through them; unsaturated/re-packed constructors, case guards,
 // record syntax, payload laziness, and a pack inside a dict-passing body.
 mll_test!(existential_dicts, "existential_dicts.mll");
+mll_test!(existential_nested_dicts, "existential_nested_dicts.mll");
 // GHC's Ord defaults on the builtin class: compare-only and (<=)-only
 // instances, with the other methods (and sort/maximum) following.
 mll_test!(ord_minimal_instance, "ord_minimal_instance.mll");

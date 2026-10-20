@@ -3013,10 +3013,10 @@ impl Checker {
                         ty: sel_ty,
                         clauses: vec![TClause {
                             span: None,
-                            patterns: vec![TPattern::Constructor {
-                                name: con_key.clone(),
-                                args: vec![TPattern::Var("_nw".to_string(), inner_ty.clone())],
-                            }],
+                            patterns: vec![TPattern::ctor(
+                                con_key.clone(),
+                                vec![TPattern::Var("_nw".to_string(), inner_ty.clone())],
+                            )],
                             guards: vec![],
                             body: Some(TExpr::new(
                                 TExprKind::Var("_nw".to_string()),

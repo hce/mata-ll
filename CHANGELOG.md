@@ -44,6 +44,32 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A nested existential pattern binds each captured dictionary to its own
+  constructor's hidden type** (silent wrong output / crash). The checker
+  names every existential skolem after its constructor's type variable,
+  and the monomorphizer found the skolem a constructor pattern's hidden
+  dictionary binder answers for by scanning the sub-patterns for a skolem
+  of that NAME, first occurrence wins; an existential pattern nested in
+  one of the fields, over a same-named variable, contributed its own
+  skolem first (`data A = forall a. Show a => A a`, `data B = forall a.
+  Eq a => B A a a`, pattern `B (A y) p q`), so B's `Eq` dictionary was
+  recorded for y's type, `p == q` found no evidence and fell to the
+  type-erased comparison — `False` for two equal values (GHC: `True`),
+  and `p < q` under an `Ord` context died with "attempt to compare two
+  table values". The same pattern with the fields reordered (`C a a A`)
+  was correct, because its own skolem came first. The checker now records
+  the skolems it mints on the constructor pattern node (`TPattern::
+  Constructor::skolems`, one (variable, id) pair per existential variable)
+  and the monomorphizer binds each capture to the pattern's OWN skolem,
+  in the main walk and in the dictionary rewrite passes alike; the
+  name-based scan is gone. GHC-goldened case `existential_nested_dicts`
+  (the nested existential before, after, between and twice beside the
+  own fields; an own field under `Just`, a tuple and a nested
+  existential's ordinary field; wildcard, as-pattern and parenthesized
+  own fields; both contexts in one body; an existential inside an
+  existential's field; the Ord superclass; a case alternative, a lambda
+  and a dictionary-passing body). Found by the 2026-10 fresh-eyes review
+  (T6).
 - **Every form of a class-method use dispatches through evidence in the
   dictionary-passing fallback** (silent wrong output / crash / rejection).
   A function the monomorphizer compiles with dictionary passing (past the

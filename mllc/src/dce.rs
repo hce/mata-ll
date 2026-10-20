@@ -132,7 +132,7 @@ fn collect_clause(clause: &TClause, refs: &mut HashSet<String>) {
 /// as values elsewhere in the same program.
 fn collect_pattern(p: &TPattern, refs: &mut HashSet<String>) {
     match p {
-        TPattern::Constructor { name, args } => {
+        TPattern::Constructor { name, args, .. } => {
             refs.insert(name.clone());
             for a in args {
                 collect_pattern(a, refs);

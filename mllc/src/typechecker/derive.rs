@@ -323,13 +323,10 @@ impl Checker {
                 .collect();
 
             let patterns = vec![
-                TPattern::Constructor {
-                    name: con_key,
-                    args: param_names.iter().enumerate().map(|(i, n)| {
-                        let ty = field_tys.get(i).cloned().unwrap_or(Ty::Unit);
-                        TPattern::Var(n.clone(), ty)
-                    }).collect(),
-                }
+                TPattern::ctor(con_key, param_names.iter().enumerate().map(|(i, n)| {
+                    let ty = field_tys.get(i).cloned().unwrap_or(Ty::Unit);
+                    TPattern::Var(n.clone(), ty)
+                }).collect())
             ];
 
             let str_ty = Ty::Con("String".into());
@@ -540,20 +537,14 @@ impl Checker {
             let a_names: Vec<String> = (0..field_count).map(|i| format!("_a{}", i)).collect();
             let b_names: Vec<String> = (0..field_count).map(|i| format!("_b{}", i)).collect();
 
-            let pat_a = TPattern::Constructor {
-                name: con_key.clone(),
-                args: a_names.iter().enumerate().map(|(i, n)| {
-                    let ty = field_tys.get(i).cloned().unwrap_or(Ty::Unit);
-                    TPattern::Var(n.clone(), ty)
-                }).collect(),
-            };
-            let pat_b = TPattern::Constructor {
-                name: con_key,
-                args: b_names.iter().enumerate().map(|(i, n)| {
-                    let ty = field_tys.get(i).cloned().unwrap_or(Ty::Unit);
-                    TPattern::Var(n.clone(), ty)
-                }).collect(),
-            };
+            let pat_a = TPattern::ctor(con_key.clone(), a_names.iter().enumerate().map(|(i, n)| {
+                let ty = field_tys.get(i).cloned().unwrap_or(Ty::Unit);
+                TPattern::Var(n.clone(), ty)
+            }).collect());
+            let pat_b = TPattern::ctor(con_key, b_names.iter().enumerate().map(|(i, n)| {
+                let ty = field_tys.get(i).cloned().unwrap_or(Ty::Unit);
+                TPattern::Var(n.clone(), ty)
+            }).collect());
 
             // Build body: a0 == b0 && a1 == b1 && ...
             // The monomorphizer resolves == to the appropriate eq function
@@ -719,8 +710,8 @@ impl Checker {
                     compare_clauses.push(TClause {
                         span: None,
                         patterns: vec![
-                            TPattern::Constructor { name: con_a.name.clone(), args: a_args },
-                            TPattern::Constructor { name: con_b.name.clone(), args: b_args },
+                            TPattern::ctor(con_a.name.clone(), a_args),
+                            TPattern::ctor(con_b.name.clone(), b_args),
                         ],
                         guards: vec![],
                         body: Some(TExpr::new(TExprKind::Con(ord_con.to_string()), ordering_ty.clone())),
@@ -738,20 +729,14 @@ impl Checker {
                     .unwrap_or_default();
                 let a_names: Vec<String> = (0..fc_a).map(|k| format!("_a{}", k)).collect();
                 let b_names: Vec<String> = (0..fc_a).map(|k| format!("_b{}", k)).collect();
-                let pat_a = TPattern::Constructor {
-                    name: con_key.clone(),
-                    args: a_names.iter().enumerate().map(|(k, n)| {
-                        let ty = field_tys.get(k).cloned().unwrap_or(Ty::Unit);
-                        TPattern::Var(n.clone(), ty)
-                    }).collect(),
-                };
-                let pat_b = TPattern::Constructor {
-                    name: con_key,
-                    args: b_names.iter().enumerate().map(|(k, n)| {
-                        let ty = field_tys.get(k).cloned().unwrap_or(Ty::Unit);
-                        TPattern::Var(n.clone(), ty)
-                    }).collect(),
-                };
+                let pat_a = TPattern::ctor(con_key.clone(), a_names.iter().enumerate().map(|(k, n)| {
+                    let ty = field_tys.get(k).cloned().unwrap_or(Ty::Unit);
+                    TPattern::Var(n.clone(), ty)
+                }).collect());
+                let pat_b = TPattern::ctor(con_key, b_names.iter().enumerate().map(|(k, n)| {
+                    let ty = field_tys.get(k).cloned().unwrap_or(Ty::Unit);
+                    TPattern::Var(n.clone(), ty)
+                }).collect());
 
                 // Lexicographic chain, built inside-out:
                 //   case compare a0 b0 of { EQ -> <compare remaining>; o -> o }
@@ -787,7 +772,7 @@ impl Checker {
                             scrutinee: Box::new(mk_field_compare(k)),
                             branches: vec![
                                 TCaseBranch {
-                                    pattern: TPattern::Constructor { name: "EQ".into(), args: vec![] },
+                                    pattern: TPattern::ctor("EQ".into(), vec![]),
                                     guards: vec![],
                                     body: Some(body),
                                 },
@@ -845,8 +830,8 @@ impl Checker {
                         cls.push(TClause {
                             span: None,
                             patterns: vec![
-                                TPattern::Constructor { name: con_a.name.clone(), args: vec![] },
-                                TPattern::Constructor { name: con_b.name.clone(), args: vec![] },
+                                TPattern::ctor(con_a.name.clone(), vec![]),
+                                TPattern::ctor(con_b.name.clone(), vec![]),
                             ],
                             guards: vec![],
                             body: Some(TExpr::new(TExprKind::Lit(TLiteral::Bool(result)), bool_ty.clone())),
@@ -904,7 +889,7 @@ impl Checker {
                             scrutinee: Box::new(cmp_call),
                             branches: vec![
                                 TCaseBranch {
-                                    pattern: TPattern::Constructor { name: match_con.into(), args: vec![] },
+                                    pattern: TPattern::ctor(match_con.into(), vec![]),
                                     guards: vec![],
                                     body: Some(TExpr::new(TExprKind::Lit(TLiteral::Bool(on_match)), bool_ty.clone())),
                                 },
@@ -979,7 +964,7 @@ impl Checker {
                             scrutinee: Box::new(cmp_call),
                             branches: vec![
                                 TCaseBranch {
-                                    pattern: TPattern::Constructor { name: "GT".into(), args: vec![] },
+                                    pattern: TPattern::ctor("GT".into(), vec![]),
                                     guards: vec![],
                                     body: Some(TExpr::new(TExprKind::Var((*on_gt).into()), result_type.clone())),
                                 },
@@ -1049,7 +1034,7 @@ impl Checker {
             let clauses: Vec<TClause> = constructors.iter().enumerate().map(|(i, con)| {
                 TClause {
                     span: None,
-                    patterns: vec![TPattern::Constructor { name: con.name.clone(), args: vec![] }],
+                    patterns: vec![TPattern::ctor(con.name.clone(), vec![])],
                     guards: vec![],
                     body: Some(TExpr::new(TExprKind::Lit(TLiteral::Integer(i as i64)), int_ty.clone())),
                     where_binds: vec![],
@@ -1112,7 +1097,7 @@ impl Checker {
             for i in 0..n.saturating_sub(1) {
                 clauses.push(TClause {
                     span: None,
-                    patterns: vec![TPattern::Constructor { name: constructors[i].name.clone(), args: vec![] }],
+                    patterns: vec![TPattern::ctor(constructors[i].name.clone(), vec![])],
                     guards: vec![],
                     body: Some(TExpr::new(TExprKind::Con(constructors[i+1].name.clone()), result_type.clone())),
                     where_binds: vec![],
@@ -1152,7 +1137,7 @@ impl Checker {
             for i in 1..n {
                 clauses.push(TClause {
                     span: None,
-                    patterns: vec![TPattern::Constructor { name: constructors[i].name.clone(), args: vec![] }],
+                    patterns: vec![TPattern::ctor(constructors[i].name.clone(), vec![])],
                     guards: vec![],
                     body: Some(TExpr::new(TExprKind::Con(constructors[i-1].name.clone()), result_type.clone())),
                     where_binds: vec![],
@@ -1894,13 +1879,10 @@ impl Checker {
             // Pattern: _f (Con x0 x1 ...)
             let patterns = vec![
                 TPattern::Var("_f".to_string(), f_ty.clone()),
-                TPattern::Constructor {
-                    name: con_key.clone(),
-                    args: param_names.iter().enumerate().map(|(i, n)| {
-                        let ty = field_tys.get(i).cloned().unwrap_or(Ty::Unit);
-                        TPattern::Var(n.clone(), ty)
-                    }).collect(),
-                },
+                TPattern::ctor(con_key.clone(), param_names.iter().enumerate().map(|(i, n)| {
+                    let ty = field_tys.get(i).cloned().unwrap_or(Ty::Unit);
+                    TPattern::Var(n.clone(), ty)
+                }).collect()),
             ];
 
             // Body: Con (mapped_x0) (mapped_x1) ...
@@ -2228,12 +2210,9 @@ impl Checker {
             let params: Vec<String> = (0..fc).map(|i| format!("_g{}", i)).collect();
 
             // ---- from: pattern `Con p0 p1 …`, body the wrapped rep value ----
-            let from_pat = TPattern::Constructor {
-                name: cr.con_key.clone(),
-                args: params.iter().enumerate()
-                    .map(|(i, nm)| TPattern::Var(nm.clone(), cr.field_tys[i].clone()))
-                    .collect(),
-            };
+            let from_pat = TPattern::ctor(cr.con_key.clone(), params.iter().enumerate()
+                .map(|(i, nm)| TPattern::Var(nm.clone(), cr.field_tys[i].clone()))
+                .collect());
             // product value
             let prod_val = if fc == 0 {
                 con_e("U1", u1_t.clone())
@@ -2267,22 +2246,20 @@ impl Checker {
 
             // ---- to: pattern the wrapped rep, body `Con p0 p1 …` ----
             let prod_pat = if fc == 0 {
-                TPattern::Constructor { name: gname("U1"), args: vec![] }
+                TPattern::ctor(gname("U1"), vec![])
             } else {
                 let field_pats: Vec<TPattern> = params.iter().map(|nm| {
-                    TPattern::Constructor { name: gname("S1"), args: vec![
-                        TPattern::Constructor { name: gname("K1"), args: vec![
-                            TPattern::Var(nm.clone(), Ty::Unit),
-                        ]},
-                    ]}
+                    TPattern::ctor(gname("S1"), vec![
+                        TPattern::ctor(gname("K1"), vec![TPattern::Var(nm.clone(), Ty::Unit)]),
+                    ])
                 }).collect();
                 field_pats.into_iter().rev().reduce(|acc, p|
-                    TPattern::Constructor { name: gname("Prod"), args: vec![p, acc] }
+                    TPattern::ctor(gname("Prod"), vec![p, acc])
                 ).unwrap()
             };
-            let c1_pat = TPattern::Constructor { name: gname("C1"), args: vec![prod_pat] };
+            let c1_pat = TPattern::ctor(gname("C1"), vec![prod_pat]);
             let inj_pat = Self::inject_sum_pat(ci, n, c1_pat, &gname);
-            let to_pat = TPattern::Constructor { name: gname("D1"), args: vec![inj_pat] };
+            let to_pat = TPattern::ctor(gname("D1"), vec![inj_pat]);
             // body: Con p0 p1 …
             let mut to_body = TExpr::new(TExprKind::Con(cr.con_key.clone()),
                 Ty::fun(&cr.field_tys, result_type.clone()));
@@ -2362,13 +2339,13 @@ impl Checker {
         }
         let mut p = inner;
         if ci < n - 1 {
-            p = TPattern::Constructor { name: gname("L1"), args: vec![p] };
+            p = TPattern::ctor(gname("L1"), vec![p]);
             for _ in 0..ci {
-                p = TPattern::Constructor { name: gname("R1"), args: vec![p] };
+                p = TPattern::ctor(gname("R1"), vec![p]);
             }
         } else {
             for _ in 0..n - 1 {
-                p = TPattern::Constructor { name: gname("R1"), args: vec![p] };
+                p = TPattern::ctor(gname("R1"), vec![p]);
             }
         }
         p
@@ -2524,18 +2501,18 @@ impl Checker {
             scrutinee: Box::new(scrut),
             branches: vec![
                 TCaseBranch {
-                    pattern: TPattern::Constructor {
-                        name: "Left".into(),
-                        args: vec![TPattern::Var(err_name, str_ty)],
-                    },
+                    pattern: TPattern::ctor(
+                        "Left".into(),
+                        vec![TPattern::Var(err_name, str_ty)],
+                    ),
                     guards: vec![],
                     body: Some(rethrow),
                 },
                 TCaseBranch {
-                    pattern: TPattern::Constructor {
-                        name: "Right".into(),
-                        args: vec![TPattern::Var(ok_name.to_string(), ok_ty)],
-                    },
+                    pattern: TPattern::ctor(
+                        "Right".into(),
+                        vec![TPattern::Var(ok_name.to_string(), ok_ty)],
+                    ),
                     guards: vec![],
                     body: Some(ok_body),
                 },
@@ -3064,18 +3041,18 @@ impl Checker {
                 scrutinee: Box::new(Self::jx_var("_j", json.clone())),
                 branches: vec![
                     TCaseBranch {
-                        pattern: TPattern::Constructor {
-                            name: self.library_con("JSON", "JStr"),
-                            args: vec![TPattern::Var("_s".into(), str_ty.clone())],
-                        },
+                        pattern: TPattern::ctor(
+                            self.library_con("JSON", "JStr"),
+                            vec![TPattern::Var("_s".into(), str_ty.clone())],
+                        ),
                         guards: vec![],
                         body: Some(str_chain),
                     },
                     TCaseBranch {
-                        pattern: TPattern::Constructor {
-                            name: self.library_con("JSON", "JObj"),
-                            args: vec![TPattern::Wildcard],
-                        },
+                        pattern: TPattern::ctor(
+                            self.library_con("JSON", "JObj"),
+                            vec![TPattern::Wildcard],
+                        ),
                         guards: vec![],
                         body: Some(obj_body),
                     },
@@ -3380,7 +3357,7 @@ impl Checker {
                         .collect();
                     clauses.push(TClause {
                         span: None,
-                        patterns: vec![TPattern::Constructor { name: con.name.clone(), args }],
+                        patterns: vec![TPattern::ctor(con.name.clone(), args)],
                         guards: vec![],
                         body: Some(body),
                         where_binds: vec![],
