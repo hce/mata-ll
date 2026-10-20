@@ -548,10 +548,14 @@ in scope — the one for `k`, a captured existential's, or one composed
 for `[k]`, `(k, Maybe k)` and the like — so the maps it builds are the
 maps a specialised body reads, and the other way round (the
 `Data.Map`/`Data.Set` wrappers are exactly such bodies once a program
-uses them at more than 16 key types). The fallback's remaining known
-gap (a dictionary built before one of its methods itself switched to
-dictionary passing) is tracked as an open defect, not a documented
-deviation. One limit is a documented deviation: more than 16 distinct
+uses them at more than 16 key types). A dictionary for a concrete type
+is decided only once the set of dictionary-passing functions is final,
+so a method that switches to dictionary passing late is composed into
+every dictionary that names it, and a reference to such a method at a
+concrete type — a call, a function value, the element function of a
+list or Maybe comparison — is a function of that type that passes the
+dictionaries. The fallback has no known remaining gap. One limit is a
+documented deviation: more than 16 distinct
 widening shapes of one function — in practice only a polymorphic
 recursion whose result is a function at every level produces them
 (`f :: Int -> a -> a; f n x = f (n - 1) (\_ -> x) ()`, one arrow wider

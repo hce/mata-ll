@@ -272,12 +272,49 @@ pub struct Monomorphizer {
     dict_passing_counts: HashMap<String, usize>,
     /// Specializations deleted when their function tripped the specialization
     /// limit: purged mangled name -> the function that now serves its uses:
-    /// the original (generic or dictionary-passing) function, or, for an
+    /// a constraint-free function's generic copy, or, for an
     /// arity-widening use, the arrow-shape copy regenerated at the trip
     /// (`widening_copy`). Call sites rewritten to a purged name
     /// BEFORE the limit tripped are redirected in `run` — otherwise they
-    /// reference functions that no longer exist.
+    /// reference functions that no longer exist. A purged copy of a
+    /// CONSTRAINED function is not redirected: its name keeps a function
+    /// of its type (`ground_forms`), because the dictionary-passing
+    /// original cannot stand in for it wherever the name is not a call
+    /// the rewrite reaches. A dictionary table is never redirected
+    /// either: a ground type's dictionary is decided only after the last
+    /// trip (`dict_demands`), so no table ever names a purged copy.
     purged_specs: HashMap<String, String>,
+    /// The names under which a dictionary-passing function's VALUE at a
+    /// ground type exists as a plain function: a copy that was emitted
+    /// before its function tripped the cap (kept — it is correct code for
+    /// its type), or the stub `dict_stub` generates under the name the
+    /// copy had or would have had. A reference to such a name is right in
+    /// every position — a call, a first-class use, the element function a
+    /// structural thread carries by name (`SpecKind::ListEq` & co.) —
+    /// which a reference to the bare dictionary-passing function is not:
+    /// only a call site the rewrite reaches gets its dictionaries.
+    ground_forms: HashSet<String>,
+    /// The dictionaries of GROUND types the rewrite passes demanded
+    /// (`build_dict_expr`), in first-demand order, each with the
+    /// diagnostic context of the site that first demanded it: (class,
+    /// type, context, span). A ground type needs no evidence from the
+    /// demanding scope, so its dictionary is decided in one place, after
+    /// the fixpoint of `run` is final (`materialize_dicts`); until then
+    /// the site holds a `SpecKind::DictDemand` placeholder. Deciding it
+    /// at the site froze a specialization name that a later trip of its
+    /// instance method purged: `revert_purged` then renamed the entry to
+    /// the method's original — by then its dictionary form, taking a
+    /// context dictionary first — so every table built before the trip
+    /// called the method with its arguments shifted by one (T13: `print
+    /// (Box v)` at 21 types under `instance Show a => Show (Box a)` died
+    /// on the first line).
+    dict_demands: Vec<(String, Ty, Option<String>, Option<Span>)>,
+    /// The (class, type) pairs in `dict_demands`, for its dedup.
+    dict_demanded: HashSet<(String, Ty)>,
+    /// The decided table per demand. Rebuilt by every pass of `run`'s
+    /// fixpoint, so the decisions put in (`fill_dict_demands`) are those
+    /// of the last pass — the one that tripped nothing.
+    dict_tables: HashMap<(String, Ty), TExpr>,
     /// Typeclass constraints per function: the superclass closure of the
     /// declared context, in `superclass_closure` order — one entry per
     /// dictionary the function's dictionary-passing form takes, which is
@@ -524,6 +561,10 @@ impl Monomorphizer {
             dict_passing_fns: HashSet::new(),
             dict_passing_counts: HashMap::new(),
             purged_specs: HashMap::new(),
+            ground_forms: HashSet::new(),
+            dict_demands: Vec::new(),
+            dict_demanded: HashSet::new(),
+            dict_tables: HashMap::new(),
             gen_stack: Vec::new(),
             cur_dict_params: Vec::new(),
             fn_constraints,
@@ -649,27 +690,35 @@ impl Monomorphizer {
             }
         }
 
-        // Rewrite dict-passing functions and their call sites
-        if !self.dict_passing_fns.is_empty() {
-            // Sorted: rewriting a dict-passing function can GENERATE new
-            // functions (dictionary-form instance methods, via build_dict_expr
-            // → build_concrete_dict), which are appended to the module in the
-            // order they are first demanded. Iterating the HashSet directly
-            // would make that order — and the emitted __mll_fn slot numbering —
-            // vary from run to run.
-            // Fixpoint over the whole phase: rewriting one body can DISCOVER
-            // further dict-passing functions — a sibling constrained call
-            // (gdTag calling gdConBody) marks its callee, and building a
-            // dictionary can trip a fresh specialization cap (flagging an
-            // instance method mid-phase). Each newly flagged function needs
-            // its own body rewrite AND a fresh call-site pass over everything
-            // already processed, so iterate until no new flags appear.
+        // The dictionary phase: rewrite dict-passing functions and their
+        // call sites, and decide the dictionary of every ground type a
+        // rewrite demanded. A fixpoint over the whole phase: rewriting one
+        // body can DISCOVER further dict-passing functions — a sibling
+        // constrained call (gdTag calling gdConBody) marks its callee —
+        // and deciding a dictionary can trip a fresh specialization cap
+        // (flagging an instance method mid-phase, purging its copies).
+        // Each newly flagged function needs its own body rewrite AND a
+        // fresh call-site pass over everything already processed, and
+        // every ground dictionary is decided again: the sites hold
+        // placeholders until the phase ends, so no table can hold a name a
+        // later trip purges (T13). A pass that changes nothing — no new
+        // flag, no trip — is the last; its decisions stand. (A trip is
+        // counted in `dict_passing_counts` for constrained and
+        // constraint-free functions alike, so the state covers the purge
+        // of a shared function's copies too.)
+        if !self.dict_passing_fns.is_empty() || !self.dict_demands.is_empty() {
             let mut rewritten: HashSet<String> = HashSet::new();
             loop {
                 // (a) Rewrite the bodies of newly flagged dict-passing
                 // functions (worklist: a rewrite can flag more). An instance
                 // METHOD that tripped the cap lives in instance_fns, not
-                // result_fns — search both.
+                // result_fns — search both. Sorted: rewriting a dict-passing
+                // function can GENERATE new functions (dictionary-form
+                // instance methods, via build_dict_expr → ensure_dictform),
+                // which are appended to the module in the order they are
+                // first demanded. Iterating the HashSet directly would make
+                // that order — and the emitted __mll_fn slot numbering —
+                // vary from run to run.
                 loop {
                     let mut dict_fns: Vec<String> = self.dict_passing_fns.iter()
                         .filter(|n| !rewritten.contains(*n))
@@ -687,7 +736,9 @@ impl Monomorphizer {
                         }
                     }
                 }
-                let flagged_before = self.dict_passing_fns.len();
+                // What (b)–(d) may change; a flag (a) discovers is served by
+                // its own worklist, and (b)–(d) run after it in any case.
+                let before = self.dictionary_phase_state();
                 // (b) Revert purged references and rewrite call sites in
                 // non-dict functions. Idempotent per function: DictCall nodes
                 // pass through untouched, so re-running after a new flag only
@@ -703,21 +754,31 @@ impl Monomorphizer {
                     self.rewrite_non_dict_fn(func);
                 }
                 // (c) The rewrites may have generated new functions:
-                // dictionary-form instance methods and specializations
-                // resolved while building concrete dictionaries. Their
-                // bodies never went through the loops above, so give each
-                // batch the same treatment before emitting.
-                while !self.generated.is_empty() {
-                    let mut batch = std::mem::take(&mut self.generated);
-                    for func in &mut batch {
-                        self.rewrite_non_dict_fn(func);
-                    }
-                    result_fns.append(&mut batch);
-                }
-                if self.dict_passing_fns.len() == flagged_before {
+                // dictionary-form instance methods and arrow-shape copies.
+                // Their bodies never went through the loops above, so give
+                // each batch the same treatment before emitting.
+                self.settle_generated(&mut result_fns);
+                // (d) Decide the dictionary of every ground type demanded so
+                // far, from the current set of dictionary-passing functions.
+                // This is where the specializations a static dictionary
+                // names are generated — and where an instance method can
+                // trip its cap: then the state changed, and the next pass
+                // decides every table again. Deciding generates functions
+                // (dictionary forms, specializations) whose settling can
+                // demand further dictionaries, so decide and settle until
+                // every demand has its table.
+                self.materialize_dicts(&mut result_fns);
+                if self.dictionary_phase_state() == before {
                     break;
                 }
             }
+            // The fixpoint is final: put the decided tables in.
+            for func in result_fns.iter_mut().chain(instance_fns.iter_mut()) {
+                for clause in &mut func.clauses {
+                    clause.map_exprs(&mut |e| self.fill_dict_demands(e));
+                }
+            }
+            self.dict_tables.clear();
         }
 
         debug_assert!(
@@ -736,6 +797,97 @@ impl Monomorphizer {
             newtypes: module.newtypes,
             newtype_types: module.newtype_types,
             passes_run: vec!["mono"],
+        }
+    }
+
+    /// What a pass of the dictionary phase can change in a way that
+    /// invalidates an earlier product: the set of dictionary-passing
+    /// functions (a new flag makes a bare call of it a call without its
+    /// dictionaries) and the set of functions that tripped the cap (a trip
+    /// purges copies and redirects their uses — for constrained and
+    /// constraint-free functions alike, `dict_passing_counts` records
+    /// both). Each grows monotonically and is bounded by the module's
+    /// functions, so the phase's loop terminates.
+    fn dictionary_phase_state(&self) -> (usize, usize) {
+        (self.dict_passing_fns.len(), self.dict_passing_counts.len())
+    }
+
+    /// Move every function generated so far into `result_fns`, each given
+    /// the call-site half of the dictionary phase first (its body never
+    /// went through the rewrite loops of `run`). A rewrite can generate
+    /// more, so this drains in batches until nothing is left.
+    fn settle_generated(&mut self, result_fns: &mut Vec<TFunction>) {
+        while !self.generated.is_empty() {
+            let mut batch = std::mem::take(&mut self.generated);
+            for func in &mut batch {
+                self.rewrite_non_dict_fn(func);
+            }
+            result_fns.append(&mut batch);
+        }
+    }
+
+    /// Step (d) of `run`'s fixpoint: decide the table of every ground
+    /// dictionary demanded (`dict_demands`), in demand order, from the
+    /// CURRENT set of dictionary-passing functions — the same decision
+    /// `decide_dict` makes for a type with evidence in scope, with no
+    /// evidence (a ground type needs none), under the diagnostic context
+    /// of the site that first demanded it. Deciding one can demand more:
+    /// the context dictionaries of a composed instance dictionary, and
+    /// whatever the functions it generated demand once settled. Every
+    /// pass starts over, so a table decided before a trip — naming a
+    /// copy the trip purged — is replaced by the decision of the pass that
+    /// trips nothing, the last.
+    fn materialize_dicts(&mut self, result_fns: &mut Vec<TFunction>) {
+        self.dict_tables.clear();
+        let mut decided = 0;
+        loop {
+            while decided < self.dict_demands.len() {
+                let (class, ty, ctx, span) = self.dict_demands[decided].clone();
+                decided += 1;
+                let saved_ctx = std::mem::replace(&mut self.cur_ctx, ctx);
+                let saved_span = std::mem::replace(&mut self.cur_span, span);
+                let table = self.decide_dict(&class, &ty, &DictEnv::default());
+                self.cur_ctx = saved_ctx;
+                self.cur_span = saved_span;
+                self.dict_tables.insert((class, ty), table);
+            }
+            self.settle_generated(result_fns);
+            if decided == self.dict_demands.len() {
+                break;
+            }
+        }
+    }
+
+    /// Replace every `DictDemand` placeholder in `expr` by its decided
+    /// table — recursively, as a composed table's context dictionaries are
+    /// demands of their own (each for a proper part of the type, so the
+    /// recursion bottoms out). Runs once, after the last pass of `run`'s
+    /// fixpoint decided every demand.
+    fn fill_dict_demands(&self, expr: TExpr) -> TExpr {
+        if let TExprKind::SpecCall { specialized: SpecKind::DictDemand { class, ty }, .. } = &expr.kind {
+            let table = self.dict_tables.get(&(class.clone(), ty.clone()))
+                .unwrap_or_else(|| panic!(
+                    "internal: the '{class}' dictionary for '{ty}' was demanded but never decided"))
+                .clone();
+            debug_assert!(
+                Self::dict_table_names(&table).iter().all(|n| !self.purged_specs.contains_key(*n)),
+                "the '{class}' dictionary for '{ty}' names a purged specialization"
+            );
+            return self.fill_dict_demands(table);
+        }
+        expr.map_children(&mut |c| self.fill_dict_demands(c))
+    }
+
+    /// The implementation names a decided dictionary table holds (its own
+    /// entries only; the context dictionaries it is applied to are
+    /// demands, filled separately).
+    fn dict_table_names(table: &TExpr) -> Vec<&str> {
+        match &table.kind {
+            TExprKind::SpecCall { specialized: SpecKind::Dict { methods, .. }, .. } =>
+                methods.iter().map(|(_, n)| n.as_str()).collect(),
+            TExprKind::SpecCall { specialized: SpecKind::DictCtor { methods, .. }, .. } =>
+                methods.iter().map(|(_, n, _)| n.as_str()).collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -1593,10 +1745,80 @@ impl Monomorphizer {
         // to nothing at runtime — a generic function (gSum over the C1 of
         // each deriving constructor, gFields over each S1 field, …) died
         // with a nil call as soon as the program passed the cap.
-        if self.dict_passing_fns.contains(base) || self.arity_only_fns.contains(base) {
+        if self.arity_only_fns.contains(base) {
             return base.to_string();
         }
-        self.specialize_at(base, fn_ty).unwrap_or_else(|| base.to_string())
+        // A dictionary-passing method at a ground type is its stub: a
+        // plain function of that type, right wherever the resolved name
+        // lands — a structural thread carries it by NAME, which no
+        // call-site rewrite reaches, and the bare dictionary form there
+        // took the element as its dictionary (`[Box 1] == [Box 1]` after
+        // `==` at Box tripped: "attempt to index a nil value").
+        if self.dict_passing_fns.contains(base) {
+            return self.ground_form_or_base(base, fn_ty);
+        }
+        if let Some(spec) = self.specialize_at(base, fn_ty) {
+            return spec;
+        }
+        // The request tripped the cap — this instantiation is the one that
+        // crossed it — or found the shape copies exhausted: whatever
+        // serves the method now.
+        self.ground_form_or_base(base, fn_ty)
+    }
+
+    /// The name a dictionary-passing method resolves to at `fn_ty`: its
+    /// stub (`dict_stub`) at a ground type; the bare name at a type over
+    /// an existential's hidden type, whose dictionary is the captured
+    /// binder — in scope at the use site only, where the call-site
+    /// rewrite builds the call — and for a shared, constraint-free
+    /// function, whose generic copy is a plain function already.
+    fn ground_form_or_base(&mut self, base: &str, fn_ty: &Ty) -> String {
+        if self.dict_passing_fns.contains(base) && !Self::contains_skolem(fn_ty) {
+            return self.dict_stub(base, fn_ty);
+        }
+        base.to_string()
+    }
+
+    /// The value of dictionary-passing `base` at ground `spec_ty` as a
+    /// named function — the name its specialization at that type had or
+    /// would have had (`mangle_name` is stable per (base, type)):
+    /// `base·ty(p1, …, pn) = base(dicts…, p1, …, pn)`, the dictionaries
+    /// demanded for the type (decided after `run`'s fixpoint). Generated
+    /// once per name; a name under which the specialization itself was
+    /// emitted before the trip is that copy (`ground_forms`).
+    fn dict_stub(&mut self, base: &str, spec_ty: &Ty) -> String {
+        let mangled = self.mangle_name(base, spec_ty);
+        if !self.ground_forms.insert(mangled.clone()) {
+            return mangled;
+        }
+        let mut params: Vec<(String, Ty)> = Vec::new();
+        let mut rest = spec_ty;
+        while let Ty::Arrow(from, to, _) = rest {
+            params.push((format!("_a{}", params.len()), (**from).clone()));
+            rest = to;
+        }
+        let args: Vec<TExpr> = params.iter()
+            .map(|(p, pty)| TExpr::new(TExprKind::Var(p.clone()), pty.clone()))
+            .collect();
+        let body = self.dictify_use(base, args, rest.clone());
+        self.generated.push(TFunction {
+            name: mangled.clone(),
+            ty: spec_ty.clone(),
+            clauses: vec![TClause {
+                span: None,
+                patterns: params.iter()
+                    .map(|(p, _)| TPattern::Var(p.clone(), Ty::Unit))
+                    .collect(),
+                guards: vec![],
+                body: Some(body),
+                where_binds: vec![],
+            }],
+            specialized: true,
+            spec_origin: None,
+            dict_params: vec![],
+            derived_strict: false,
+        });
+        mangled
     }
 
     /// The specialization of `name` at `spec_ty`: the existing one, or a
@@ -1643,8 +1865,15 @@ impl Monomorphizer {
     /// specialization is replaced by a copy at its arrow shape
     /// (`widening_copy`) — one per shape, not per type — and a call site
     /// already rewritten to a purged name is pointed, in `run` via
-    /// `purged_specs`, at whatever now serves it: the original, or that
-    /// shape copy.
+    /// `purged_specs`, at whatever now serves it: the generic copy, or
+    /// that shape copy. A purged copy of a CONSTRAINED function keeps its
+    /// name instead: the copy itself where it was already emitted, the
+    /// stub of its type (`dict_stub`) where it was still pending or under
+    /// generation — a reference to a dictionary-passing function is right
+    /// only at a call site the rewrite reaches, and the references made
+    /// before the trip sit anywhere (a structural thread's element
+    /// function, a first-class use), so the name must stay a function of
+    /// the copy's type.
     ///
     /// A function that is already shared or dictionary-passing (a builtin,
     /// or past its trip) can only grow shape copies, and more than
@@ -1689,18 +1918,38 @@ impl Monomorphizer {
             .collect();
         self.specializations.retain(|k, _| k.name != name);
         let purged_names: HashSet<String> = purged.iter().map(|(_, v)| v.clone()).collect();
+        // A copy still pending (or under generation, on `gen_stack`: its
+        // generation drops it) is gone; one already emitted stays — it is
+        // correct code for its type, and `run` rewrites its call sites
+        // like any function's.
+        let mut gone: HashSet<String> = self.generated.iter()
+            .filter(|f| purged_names.contains(&f.name))
+            .map(|f| f.name.clone())
+            .collect();
+        gone.extend(self.gen_stack.iter()
+            .filter(|(_, m)| purged_names.contains(m))
+            .map(|(_, m)| m.clone()));
         self.generated.retain(|f| !purged_names.contains(&f.name));
-        // Regenerated in a fixed order: the shape copies are emitted in the
-        // order they are generated, and the HashMap's order is not stable.
+        // Regenerated in a fixed order: the shape copies and stubs are
+        // emitted in the order they are generated, and the HashMap's order
+        // is not stable.
         purged.sort_by(|a, b| a.1.cmp(&b.1));
         for (key, mangled) in purged {
-            let target = if self.arity_widening(name, &key.ty) {
-                self.widening_copy(name, &key.ty).unwrap_or_else(|| name.to_string())
+            if self.arity_widening(name, &key.ty) {
+                let target = self.widening_copy(name, &key.ty).unwrap_or_else(|| name.to_string());
+                if target != mangled {
+                    self.purged_specs.insert(mangled, target);
+                }
+            } else if shared {
+                self.purged_specs.insert(mangled, name.to_string());
+            } else if gone.contains(&mangled) {
+                // A constrained function's copy keeps its name: the stub
+                // of its type, which passes the dictionaries — every
+                // reference made before the trip stays right, in
+                // whatever position it sits (`ground_forms`).
+                self.dict_stub(name, &key.ty);
             } else {
-                name.to_string()
-            };
-            if target != mangled {
-                self.purged_specs.insert(mangled, target);
+                self.ground_forms.insert(mangled);
             }
         }
         true
@@ -2938,8 +3187,22 @@ impl Monomorphizer {
         mangled
     }
 
-    /// Rewrite every reference to a purged specialization back to the original
-    /// function name (see `purged_specs`).
+    /// Rewrite every reference to a purged specialization to what now
+    /// serves it (see `purged_specs`): a constraint-free function's
+    /// generic copy — a plain function, right in any position — or an
+    /// arrow-shape copy, which for a dictionary-passing function is
+    /// dictionary-passing itself and right only because the call-site
+    /// rewrite that follows in the same walk (`rewrite_non_dict_fn`, on
+    /// every pass) builds its dictionaries: a widening use is a call or a
+    /// first-class use, both of which that rewrite reaches. A purged copy
+    /// of a constrained function at its own arity is not in the map at
+    /// all — its name stays a function of its type (`ground_forms`). A
+    /// dictionary table (`Dict`/`DictCtor`) is NOT rewritten: a ground
+    /// type's table is decided after the last trip (`materialize_dicts`),
+    /// so it never names a purged copy — and renaming an entry to the
+    /// method's original, by then a dictionary form taking a context
+    /// dictionary first, called the method through the table with its
+    /// arguments shifted by one (T13).
     fn revert_purged(&self, expr: TExpr) -> TExpr {
         let expr = match expr.kind {
             TExprKind::Var(name) => {
@@ -2947,10 +3210,10 @@ impl Monomorphizer {
                 TExpr { kind: TExprKind::Var(name), ty: expr.ty }
             }
             // The threading SpecKind payloads carry function-name STRINGS
-            // too (a list/Maybe eq or show's element function, a dict
-            // table's method impls); a purged specialization left there
-            // named a never-emitted function — a nil lua_ref at runtime.
-            // Rewrite them through the same mapping as Var references.
+            // too (a list/Maybe eq or show's element function); a purged
+            // specialization left there named a never-emitted function — a
+            // nil lua_ref at runtime. Rewrite them through the same
+            // mapping as Var references.
             TExprKind::SpecCall { original, mut specialized, args } => {
                 let fix = |n: &mut String| {
                     if let Some(orig) = self.purged_specs.get(n) {
@@ -2965,16 +3228,6 @@ impl Monomorphizer {
                     | SpecKind::ShowMaybe(n)
                     | SpecKind::ShowsPrecOf(n) => fix(n),
                     SpecKind::TupleEq(ns) => ns.iter_mut().for_each(&mut { fix }),
-                    SpecKind::Dict { methods, .. } => {
-                        for (_, impl_name) in methods.iter_mut() {
-                            fix(impl_name);
-                        }
-                    }
-                    SpecKind::DictCtor { methods, .. } => {
-                        for (_, impl_name, _) in methods.iter_mut() {
-                            fix(impl_name);
-                        }
-                    }
                     _ => {}
                 }
                 TExpr {
@@ -4191,12 +4444,17 @@ impl Monomorphizer {
                     // `_usr_eq__eq_`, defined nowhere) and crash with a
                     // nil call at first use — report the compile error
                     // instead of emitting it (F6a).
-                    if method_name != "show" && !self.poly_fns.contains_key(method_name) {
+                    // Reported once: a ground type's dictionary is decided
+                    // again by every pass of `run`'s fixpoint.
+                    let msg = format!(
+                        "cannot build the '{}' dictionary for type '{}': \
+                         method '{}' has no implementation at this type",
+                        class_name, concrete_ty, method_name);
+                    let reported = self.errors.iter()
+                        .any(|e| matches!(&e.kind, DiagnosticKind::Other(m) if *m == msg));
+                    if method_name != "show" && !self.poly_fns.contains_key(method_name) && !reported {
                         self.errors.push(Diagnostic {
-                            kind: DiagnosticKind::Other(format!(
-                                "cannot build the '{}' dictionary for type '{}': \
-                                 method '{}' has no implementation at this type",
-                                class_name, concrete_ty, method_name)),
+                            kind: DiagnosticKind::Other(msg),
                             context: self.cur_ctx.clone(),
                             span: self.cur_span,
                             file: None,
@@ -4376,13 +4634,19 @@ impl Monomorphizer {
     ///
     ///   - the constrained variable itself -> the parameter;
     ///   - an existential skolem -> the captured binder;
+    ///   - a ground type -> a `DictDemand` placeholder, decided after the
+    ///     fixpoint of `run` (`materialize_dicts` → `decide_dict`): a
+    ///     static dictionary of fully-resolved methods, or — once one of
+    ///     its instance's methods is dictionary-passing — the composed
+    ///     instance dictionary;
     ///   - a still-polymorphic structured type with a context instance
     ///     (`[a]`, `T a`) -> the instance's dictionary-form methods closed
     ///     over the dictionaries the context demands (built recursively);
     ///   - a structural shape of Eq/Ord/Show over such elements -> the
     ///     shape's synthesized dictionary form over the element
-    ///     dictionaries (`structural_dict`);
-    ///   - a ground type -> a static dictionary of fully-resolved methods.
+    ///     dictionaries (`structural_dict`)
+    ///   (the last two decided now, by `decide_dict`, from the evidence in
+    ///   scope).
     fn build_dict_expr(&mut self, class_name: &str, ty: &Ty, ev: &DictEnv) -> TExpr {
         if let Ty::Var(v) = ty {
             if let Some(p) = ev.env
@@ -4402,47 +4666,59 @@ impl Monomorphizer {
         {
             return TExpr::new(TExprKind::Var(binder), Ty::Unit);
         }
+        // A ground type needs no evidence from this scope, so its
+        // dictionary is decided once the fixpoint is final — not here,
+        // where a later trip could still purge what it names.
+        if ty.free_vars().is_empty() && !Self::contains_skolem(ty) {
+            return self.demand_dict(class_name, ty);
+        }
+        self.decide_dict(class_name, ty, ev)
+    }
+
+    /// Leave a `DictDemand` placeholder for the `class_name` dictionary of
+    /// ground `ty`, recording the demand — once per (class, type), with
+    /// this site's diagnostic context — for `materialize_dicts`.
+    fn demand_dict(&mut self, class_name: &str, ty: &Ty) -> TExpr {
+        let key = (class_name.to_string(), ty.clone());
+        if self.dict_demanded.insert(key.clone()) {
+            self.dict_demands.push((key.0, key.1, self.cur_ctx.clone(), self.cur_span));
+        }
+        TExpr::new(
+            TExprKind::SpecCall {
+                original: format!("__dict_{}", class_name),
+                specialized: SpecKind::DictDemand { class: class_name.to_string(), ty: ty.clone() },
+                args: vec![],
+            },
+            Ty::Unit,
+        )
+    }
+
+    /// THE decision of what the `class_name` dictionary for a structured
+    /// or ground `ty` is — one place, for a type with evidence in scope
+    /// (from `build_dict_expr`, now) and for a ground type (from
+    /// `materialize_dicts`, after the fixpoint) alike:
+    ///
+    ///   - structured over the constrained variable(s) or over a hidden
+    ///     type with captured dictionaries, OR a concrete structured type
+    ///     whose instance method is itself dictionary-passing (purged for
+    ///     tripping the specialization cap, as the generic representation
+    ///     combinators do across many deriving types) -> the instance's
+    ///     dictionary-form methods closed over the dictionaries its context
+    ///     demands (`compose_instance_dict`): in both cases the method
+    ///     cannot be resolved to one specialized function;
+    ///   - a structural shape of Eq/Ord/Show/Hashable over such elements ->
+    ///     the shape's synthesized dictionary form over the element
+    ///     dictionaries (`structural_dict`);
+    ///   - otherwise a static dictionary of fully-resolved methods
+    ///     (`build_concrete_dict`; for a head with no parameterized
+    ///     instance with a context, the head-keyed builtin whose runtime
+    ///     methods are shape-generic, e.g. `show`).
+    fn decide_dict(&mut self, class_name: &str, ty: &Ty, ev: &DictEnv) -> TExpr {
         let over_hidden = Self::contains_skolem(ty) && self.has_skolem_dicts(ty);
-        if !ty.free_vars().is_empty() || over_hidden || self.head_method_is_dict_passing(class_name, ty) {
-            // Structured over the constrained variable(s) — OR a concrete
-            // structured type whose instance method is itself dictionary-passing
-            // (purged for tripping the specialization cap, as the generic
-            // representation combinators do across many deriving types). In both
-            // cases the method cannot be resolved to one specialized function;
-            // compose the dictionary from the parameterized instance and the
-            // sub-dictionaries its context demands.
-            if let Some(head) = InstHead::of(ty)
-                && let Some(inst) = self.instances
-                    .get(&(class_name.to_string(), head.clone()))
-                    .cloned()
-                && inst.context.is_some()
-                && let Some(methods) = self.ensure_dictform(class_name, &head)
-            {
-                let ctx = inst.context.clone().unwrap();
-                let mut bind: HashMap<String, Ty> = HashMap::new();
-                Self::collect_subst_by_name(&inst.target_type, ty, &mut bind);
-                let mut sub_dicts = Vec::new();
-                for c in &ctx {
-                    let sub_ty = bind.get(&c.type_var).cloned()
-                        .unwrap_or_else(|| Ty::Var(TyVar { name: c.type_var.clone(), id: 0 }));
-                    sub_dicts.push(self.build_dict_expr(&c.class_name, &sub_ty, ev));
-                }
-                let spec = SpecKind::DictCtor {
-                    class: class_name.to_string(),
-                    methods: methods.clone(),
-                };
-                return TExpr::new(
-                    TExprKind::SpecCall {
-                        original: format!("__dict_{}", class_name),
-                        specialized: spec,
-                        args: sub_dicts,
-                    },
-                    Ty::Unit,
-                );
-            }
-            // No parameterized instance with a context: fall through to the
-            // head-keyed static dictionary (builtin classes whose runtime
-            // methods are shape-generic, e.g. show).
+        if (!ty.free_vars().is_empty() || over_hidden || self.head_method_is_dict_passing(class_name, ty))
+            && let Some(dict) = self.compose_instance_dict(class_name, ty, ev)
+        {
+            return dict;
         }
         if (!ty.free_vars().is_empty() || over_hidden)
             && let Some(dict) = self.structural_dict(class_name, ty, ev)
@@ -4450,6 +4726,35 @@ impl Monomorphizer {
             return dict;
         }
         self.build_concrete_dict(class_name, ty)
+    }
+
+    /// The `class_name` dictionary for `ty` composed from the parameterized
+    /// instance of its head: the instance's dictionary-form methods
+    /// (`ensure_dictform`) closed over the dictionaries the instance
+    /// context demands of the bound arguments, each built recursively
+    /// (`build_dict_expr`: a parameter, a captured binder, or a demand).
+    /// `None` when the head has no instance with a context.
+    fn compose_instance_dict(&mut self, class_name: &str, ty: &Ty, ev: &DictEnv) -> Option<TExpr> {
+        let head = InstHead::of(ty)?;
+        let inst = self.instances.get(&(class_name.to_string(), head.clone())).cloned()?;
+        let ctx = inst.context.clone()?;
+        let methods = self.ensure_dictform(class_name, &head)?;
+        let mut bind: HashMap<String, Ty> = HashMap::new();
+        Self::collect_subst_by_name(&inst.target_type, ty, &mut bind);
+        let mut sub_dicts = Vec::new();
+        for c in &ctx {
+            let sub_ty = bind.get(&c.type_var).cloned()
+                .unwrap_or_else(|| Ty::Var(TyVar { name: c.type_var.clone(), id: 0 }));
+            sub_dicts.push(self.build_dict_expr(&c.class_name, &sub_ty, ev));
+        }
+        Some(TExpr::new(
+            TExprKind::SpecCall {
+                original: format!("__dict_{}", class_name),
+                specialized: SpecKind::DictCtor { class: class_name.to_string(), methods },
+                args: sub_dicts,
+            },
+            Ty::Unit,
+        ))
     }
 
     /// The classes whose builtin container instances (list, Maybe, tuple)
@@ -5026,6 +5331,37 @@ impl Monomorphizer {
             if let Some(extra) = self.method_dict_constraints.get(&method) {
                 constraints.extend(extra.iter().cloned());
             }
+            // Each constraint named after the variable as the BODY spells
+            // it: the context names the instance head's variables (`a`,
+            // `b`), the method's type carries the checker's own (`a2114`,
+            // or `_inst196` in a synthesized default method), and the
+            // evidence table is read by name. With the declared names a
+            // use at `b` missed the table and fell to the first dictionary
+            // of the class: `instance (Show a, Show b) => Show (Pair a b)`
+            // showed `y` with `x`'s dictionary ("attempt to mod a
+            // 'string'" on `Pair 1 "a"`). The method's variables are
+            // matched the same way, through the class's declared method
+            // type (families blanked — see `class_var_binding`).
+            let mut spelled: HashMap<String, String> = HashMap::new();
+            if let Some((_, decl_ty)) = class_info.methods.iter().find(|(n, _)| *n == method) {
+                let decl_ty = self.blank_family_apps(decl_ty);
+                let mut by_decl: HashMap<String, Ty> = HashMap::new();
+                Self::collect_subst_by_name(&decl_ty, &f.ty, &mut by_decl);
+                if let Some(inst_ty) = by_decl.get(&class_info.type_var) {
+                    let mut by_head: HashMap<String, Ty> = HashMap::new();
+                    Self::collect_subst_by_name(&inst.target_type, inst_ty, &mut by_head);
+                    spelled.extend(by_head.into_iter()
+                        .filter_map(|(v, t)| match t { Ty::Var(b) => Some((v, b.name)), _ => None }));
+                }
+                spelled.extend(by_decl.into_iter()
+                    .filter(|(v, _)| *v != class_info.type_var)
+                    .filter_map(|(v, t)| match t { Ty::Var(b) => Some((v, b.name)), _ => None }));
+            }
+            for c in constraints.iter_mut() {
+                if let Some(body_name) = spelled.get(&c.type_var) {
+                    c.type_var = body_name.clone();
+                }
+            }
             let (dict_params, ev) = Self::dict_param_tables(&constraints);
             self.cur_dict_params = dict_params.clone();
             f.name = dictform.clone();
@@ -5401,6 +5737,68 @@ mod spec_cap_tests {
         assert!(m.trip_spec_cap("shown"));
         assert!(m.dict_passing_fns.contains("shown"), "a constrained function goes dictionary-passing");
         assert!(!m.arity_only_fns.contains("shown"));
+    }
+
+    /// A constrained function's purged copies keep their names: a copy
+    /// still pending becomes the stub of its type (a dictionary-passing
+    /// call to the original), an emitted one is left as it is, and neither
+    /// is redirected — a reference to the bare dictionary-passing original
+    /// is right only at a call site the rewrite reaches (T13).
+    #[test]
+    fn purged_copies_of_a_constrained_function_keep_their_names() {
+        let checker = crate::typechecker::Checker::new();
+        let mut m = Monomorphizer::new(&checker);
+        let a = Ty::Var(TyVar { name: "a".into(), id: 0 });
+        let poly = TFunction {
+            name: "shown".into(),
+            ty: Ty::fun(&[a.clone()], Ty::Con("String".into())),
+            clauses: vec![],
+            specialized: false,
+            spec_origin: None,
+            dict_params: vec![],
+            derived_strict: false,
+        };
+        m.poly_fns.insert("shown".into(), poly.clone());
+        m.fn_constraints.insert("shown".into(), vec![TyConstraint {
+            class_name: "Show".into(), type_var: "a".into(),
+        }]);
+        for i in 0..(SPEC_LIMIT as u32 + 1) {
+            let ty = Ty::fun(&[Ty::Con(format!("T{i}"))], Ty::Con("String".into()));
+            let mangled = m.mangle_name("shown", &ty);
+            m.specializations.insert(SpecKey { name: "shown".into(), ty }, mangled.clone());
+            // The even copies are still pending, the odd ones were emitted.
+            if i % 2 == 0 {
+                m.generated.push(TFunction { name: mangled, ..poly.clone() });
+            }
+        }
+        assert!(m.trip_spec_cap("shown"));
+        assert!(m.dict_passing_fns.contains("shown"));
+        assert!(m.purged_specs.is_empty(), "no copy of a constrained function is redirected");
+        for i in 0..(SPEC_LIMIT as u32 + 1) {
+            let ty = Ty::fun(&[Ty::Con(format!("T{i}"))], Ty::Con("String".into()));
+            let name = m.mangle_name("shown", &ty);
+            assert!(m.ground_forms.contains(&name), "{name} stays a function of its type");
+            let stubbed = m.generated.iter().filter(|f| f.name == name).count();
+            assert_eq!(stubbed, usize::from(i % 2 == 0), "a pending copy is replaced by one stub, an emitted one by none");
+            if i % 2 == 0 {
+                let stub = m.generated.iter().find(|f| f.name == name).unwrap();
+                assert_eq!(stub.ty, ty);
+                assert!(matches!(
+                    stub.clauses[0].body.as_ref().map(|b| &b.kind),
+                    Some(TExprKind::DictCall { func_name, dict_args, value_args })
+                        if func_name == "shown" && dict_args.len() == 1 && value_args.len() == 1
+                ), "the stub passes the dictionary and the value");
+            }
+            // A later resolution at the same type is that same name.
+            assert_eq!(m.specialize_instance_fn("shown", &ty), name);
+            assert_eq!(m.generated.iter().filter(|f| f.name == name).count(), usize::from(i % 2 == 0));
+        }
+        // A new ground type after the trip gets a stub too, once.
+        let fresh = Ty::fun(&[Ty::Con("Fresh".into())], Ty::Con("String".into()));
+        let stub = m.specialize_instance_fn("shown", &fresh);
+        assert_eq!(stub, m.specialize_instance_fn("shown", &fresh));
+        assert_eq!(m.generated.iter().filter(|f| f.name == stub).count(), 1);
+        assert!(m.specializations.keys().all(|k| k.name != "shown"), "a stub is not a specialization");
     }
 
     /// A function that is already shared or dictionary-passing can only

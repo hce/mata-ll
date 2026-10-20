@@ -1,0 +1,55 @@
+True
+False
+True
+False
+True
+False
+True
+False
+True
+False
+True
+False
+True
+False
+True
+False
+True
+False
+True
+True
+True
+False
+True
+True
+False
+True
+False
+True
+False
+True
+False
+True
+False
+True
+False
+True
+False
+True
+False
+True
+False
+True
+True
+True
+True
+True
+True
+True
+[Box [1]] Just (Box 1)
+[Box 1,Box 2]
+Just (Box "j")
+[Just (Box (True,1))]
+(LT,GT,EQ)
+(True,[Box "b"])
+[Box [["x"]]] Just (Box 2)

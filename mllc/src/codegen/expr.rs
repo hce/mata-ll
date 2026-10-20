@@ -2051,6 +2051,8 @@ impl CodeGen {
                 }
                 Expr::TableSpaced(items)
             }
+            SpecKind::DictDemand { class, ty } => unreachable!(
+                "undecided '{class}' dictionary demand for '{ty}' reached codegen"),
             SpecKind::DictCtor { methods, .. } => {
                 // A CONSTRUCTED dictionary for a parameterized instance
                 // (`instance C a => C [a]`): each method is the instance's

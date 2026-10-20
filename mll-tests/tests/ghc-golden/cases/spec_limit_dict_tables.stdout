@@ -1,0 +1,98 @@
+[1] Box 1
+Box 1
+Box 2.5
+Box "s"
+Box True
+Box [1]
+Box (Just 1)
+Box (1,2)
+Box ["a"]
+Box (Just "b")
+Box (1,"c")
+Box [True]
+Box (Just False)
+Box (True,3)
+Box [[4]]
+Box (Just (Just 5))
+Box (6,7,8)
+Box [9.5]
+Box (Just [1])
+Box [(1,True)]
+Box (Just 2.5)
+Box ()
+Box (Box 1)
+Tri 1
+Tri 2.5
+Tri "s"
+Tri True
+Tri [1]
+Tri (Just 1)
+Tri (1,2)
+Tri ["a"]
+Tri (Just "b")
+Tri (1,"c")
+Tri [True]
+Tri (Just False)
+Tri (True,3)
+Tri [[4]]
+Tri (Just (Just 5))
+Tri (6,7,8)
+Tri [9.5]
+Tri (Just [1])
+Tri [(1,True)]
+Tri (Just 2.5)
+Tri ()
+Tri (Box (Tri 1))
+Pair 1 "a"
+Pair 2.5 True
+Pair "s" 3
+Pair True [1]
+Pair [1] (Just "b")
+Pair (Just 1) ()
+Pair (1,2) "c"
+Pair ["a"] 4
+Pair (Just "b") 5.5
+Pair (1,"c") False
+Pair [True] (Just 6)
+Pair (Just False) [7.5]
+Pair (True,3) "d"
+Pair [[4]] [[5]]
+Pair (Just (Just 5)) (Just (Just "e"))
+Pair (6,7,8) 9
+Pair [9.5] [True]
+Pair (Just [1]) (Just [2])
+Pair [(1,True)] [(2,"f")]
+Pair (Just 2.5) "g"
+Pair () ()
+Pair (Pair 1 2) (Pair "h" True)
+Just (Pair 1 (Box "i"))
+True
+False
+True
+False
+True
+False
+True
+False
+True
+False
+True
+False
+True
+False
+True
+False
+True
+False
+True
+True
+True
+False
+True
+(True,LT)
+(True,EQ)
+(True,LT)
+(False,GT)
+(True,LT)
+(True,True)
+[["x"]] Box 2

@@ -44,6 +44,44 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A dictionary for a concrete type is decided after the specialization
+  fixpoint, so it never names a method that later switched to dictionary
+  passing** (crash). Past the cap a call site builds a dictionary table for
+  each concrete type it passes (`print (Box v)` at 21 types under
+  `instance Show a => Show (Box a)`); each table was built — and its
+  method entries resolved to specializations — at the moment the call
+  site was rewritten, and the 18th such table tripped the cap of the
+  instance method itself, which purged those specializations and
+  switched the method to dictionary passing. The purge rewrite then
+  renamed the entries of the earlier tables to the method's original — by
+  then its dictionary form, taking a context dictionary first — so every
+  call through such a table had its arguments shifted by one ("attempt to
+  index a nil value (local '_arg1')" on the first line; GHC prints all 21).
+  A dictionary for a concrete type is now a placeholder until the
+  monomorphizer's fixpoint is final, and every such dictionary is decided
+  in one place from the final set of dictionary-passing functions: a
+  static table where the instance method is specialized, the instance's
+  composed dictionary form where it is dictionary-passing. The same name
+  freeze broke the structural threads (a list, Maybe or tuple equality,
+  show or compare carries its element function by name, which no call-site
+  rewrite reaches): `[Box 1] == [Box 1]` after `==` at `Box` tripped handed
+  the element where the dictionary was expected. A dictionary-passing
+  method at a concrete type now resolves to a stub of that type — the name
+  its specialization had or would have had, passing the dictionaries — and
+  a purged copy keeps its name as that stub (or as itself, where it was
+  already emitted), so a reference made before the trip stays right in
+  every position. Found by the 2026-10 fresh-eyes review (T13).
+- **A two-variable instance context reads each variable's own
+  dictionary** (crash / silent wrong output). The dictionary form of
+  `instance (Show a, Show b) => Show (Pair a b)` keyed its evidence by the
+  variables as the instance head spells them, while the method's body
+  carries the checker's own spellings (and a synthesized class-default
+  method its instantiation's), so a use at `b` missed the table and fell to
+  the first dictionary of the class: `show (Pair 1 "a")` through a
+  dictionary showed `"a"` with `Int`'s show ("attempt to mod a 'string'
+  with a 'number'"; GHC prints `Pair 1 "a"`). The dictionary form now names
+  each constraint after the variable as the body spells it. Found while
+  goldening T13.
 - **A polymorphic function past the specialization cap keeps a copy per
   arrow shape, so a use that widens its arity still has code of its
   arity** (crash / silent wrong output). Past the cap — 16 specializations;

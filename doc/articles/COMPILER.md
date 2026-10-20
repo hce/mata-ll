@@ -196,7 +196,17 @@ constant folding (§7) can then recognize them.
   worklist rewrites its body and every call site), a constraint-free one,
   which has no dictionary form, keeps its generic copy and is shared like
   a prelude builtin (`arity_only_fns`). Call sites rewritten to a purged
-  copy before the trip are redirected afterwards (`purged_specs`). The
+  copy of a constraint-free function are redirected to the generic copy
+  afterwards (`purged_specs`); a purged copy of a constrained function
+  keeps its name — the copy itself where it was already emitted, else a
+  stub of its type that calls the dictionary form with the dictionaries
+  for that type (`dict_stub`, `ground_forms`) — because a reference to
+  the bare dictionary-passing function is right only at a call site the
+  rewrite reaches, and the references made before the trip sit anywhere:
+  a first-class use, the element function a structural thread
+  (`SpecKind::ListEq` & co.) carries by name. The same stub is what a
+  dictionary-passing method resolves to at a concrete type after the
+  trip (`specialize_instance_fn`). The
   one use neither shared form can serve is an arity-widening one (a
   result type variable instantiated to a function type — the N-ary
   convention emits one parameter per arrow of the declared type, and the
@@ -258,6 +268,38 @@ constant folding (§7) can then recognize them.
   time (`__mll_hmd_*` in runtime.lua: the scalar encoder means the
   scalar store); the enumerators read the key order off the handle and
   need no evidence.
+- **Dictionary construction** (`build_dict_expr`) is one decision tree
+  per demanded (class, type): the body's parameter for a constrained
+  variable, the captured binder for an existential skolem, and
+  otherwise `decide_dict` — the instance's dictionary form closed over
+  the dictionaries its context demands (`compose_instance_dict`, a
+  `SpecKind::DictCtor`) for a type over the body's variables or hidden
+  types AND for a concrete type whose instance method is itself
+  dictionary-passing, the synthesized shape dictionary for a container
+  over such elements (`structural_dict`), and a static table of resolved
+  method implementations (`build_concrete_dict`, a `SpecKind::Dict`) for
+  everything else. A CONCRETE type's dictionary needs no evidence from
+  the demanding scope, so it is not decided at the site: the site holds a
+  `SpecKind::DictDemand` placeholder and `run`'s dictionary phase decides
+  every demand in one step (`materialize_dicts`), after the body and
+  call-site rewrites of the pass. The phase is a fixpoint: rewriting a
+  body can flag further dictionary-passing functions (a sibling
+  constrained call), and deciding a dictionary can trip an instance
+  method's cap (resolving `showsPrec` at the 18th `Box T` purges the
+  method's copies and switches it to dictionary passing); a pass that
+  flags or trips anything is followed by another, which rewrites the
+  new bodies, re-runs the call-site pass, and decides every demand
+  again, and the pass that changes nothing is the last — its decisions
+  are the ones put in (`fill_dict_demands`). Deciding a table at the site
+  froze specialization names that a later trip purged (T13: the purge
+  rewrite renamed them to the dictionary form, and every call through
+  the table was off by one argument); now no table is ever renamed.
+  A dictionary form's evidence table (`ensure_dictform`) names each
+  context constraint after the variable as the method's BODY spells it
+  (the checker's `a2114`, a default method's `_inst196`), not as the
+  instance head does — the table is read by name, and with the head's
+  names a two-variable context (`Show (Pair a b)`) read `b`'s dictionary
+  as `a`'s.
 - Type substitution into specialized bodies is what makes the copies concrete.
 
 If you ever see runtime `nil` where a method should be, suspect a missing

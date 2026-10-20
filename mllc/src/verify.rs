@@ -181,6 +181,17 @@ impl Verifier {
                 }
             }
         }
+        // A ground type's dictionary is a placeholder until mono's
+        // fixpoint decides it (`SpecKind::DictDemand`); one surviving
+        // mono would reach codegen with no table to emit.
+        if let TExprKind::SpecCall { specialized: SpecKind::DictDemand { class, ty }, .. } = &e.kind {
+            self.violations.push(format!(
+                "internal: the '{}' dictionary for '{}' in '{}' was demanded but \
+                 never decided — monomorphization must decide every ground \
+                 dictionary before it returns",
+                class, ty, ctx
+            ));
+        }
         // First-class `(==)`/`(/=)` at a structured operand type — handed to
         // a higher-order consumer (`nubBy (==) points`): mono must have
         // replaced it with the derived/synthetic equality; the runtime

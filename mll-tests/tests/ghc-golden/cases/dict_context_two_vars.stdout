@@ -1,0 +1,7 @@
+Pair 1 "a" Three "a" 1 "a"
+Pair [2] ["b"] Three ["b"] [2] ["b"]
+Pair [[3]] [["c"]] Three [["c"]] [[3]] [["c"]]
+Pair "s" 4.5 Three 4.5 "s" 4.5
+False
+False
+(Pair 1 "a",Three "x" 2 False)

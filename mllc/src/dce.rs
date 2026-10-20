@@ -228,6 +228,10 @@ fn collect_expr(e: &TExpr, refs: &mut HashSet<String>) {
                 | SpecKind::IoPcall(_)
                 | SpecKind::Const(_)
                 | SpecKind::TupGet(_) => {}
+                // Decided and replaced before mono returns (verify.rs
+                // refuses a module where one survived).
+                SpecKind::DictDemand { class, ty } => unreachable!(
+                    "undecided '{class}' dictionary demand for '{ty}' reached dce"),
             }
         }
         TExprKind::DictCall { func_name, .. } => {

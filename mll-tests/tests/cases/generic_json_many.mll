@@ -1,11 +1,15 @@
 -- genericToJSON BEYOND the specialisation cap: a generic function must keep
--- working however many types it is applied to. This zoo (17 types, 23
--- constructors, 28 fields) pushes every layer of the generic encoder past
--- the monomorphiser's 16-specialisation polymorphic-recursion guard —
--- gEnc/agrees per type, gEncode's D1 instance per type, gSum's C1 instance
--- per constructor, gFields' S1 instance per field — so all of them are
--- purged to the dictionary-passing fallback, which must resolve the
--- Generic/metadata classes correctly. Byte-exact agreement with the native
+-- working however many types it is applied to. This zoo (18 types, 24
+-- constructors, 29 fields) pushes every layer of the generic encoder past
+-- the monomorphiser's polymorphic-recursion guard — 17 specialisations are
+-- kept, the 18th distinct instantiation trips it — gEnc/agrees per type,
+-- gEncode's D1 instance per type, gSum's C1 instance per constructor,
+-- gFields' S1 instance per field — so all of them are purged to the
+-- dictionary-passing fallback, which must resolve the Generic/metadata
+-- classes correctly. The 18th type is what makes the per-type layers trip
+-- (T13: with 17 the per-type layers stayed specialised, and with 18 a
+-- `GEncode` dictionary built in `main` stored the bare dictionary form of a
+-- method that tripped later). Byte-exact agreement with the native
 -- deriving (ToJSON) output is asserted for every shape, as in generic_json.
 import JSON
 
@@ -58,6 +62,9 @@ data Ev = Tick { evAt as "at" :: Int } | Stop
     deriving (Eq, ToJSON, Generic)
 
 data Extra = Extra { ex :: Int }
+    deriving (Eq, ToJSON, Generic)
+
+data Extra2 = Extra2 { ex2 :: Int }
     deriving (Eq, ToJSON, Generic)
 
 -- A USER generic function over the same zoo: the constructor index. Its
@@ -119,6 +126,7 @@ main = do
     assert (gEnc (Acct "zoe" 9 (Just "hi")) == "{\"name\":\"zoe\",\"acctScore\":9,\"note\":\"hi\"}") "renamed field keys"
     assert (gEnc (Tick 12) == "{\"tag\":\"Tick\",\"at\":12}") "renamed field in tagged sum"
     assert (gEnc (Extra 1) == "{\"ex\":1}") "17th type record object"
+    assert (gEnc (Extra2 1) == "{\"ex2\":1}") "18th type record object"
 
     -- generic == native across the zoo
     assert (agrees (Person "Ann" 30)) "agree record"
@@ -146,6 +154,7 @@ main = do
     assert (agrees (Tick 12)) "agree renamed in sum"
     assert (agrees Stop) "agree nullary next to renamed"
     assert (agrees (Extra 1)) "agree 17th type"
+    assert (agrees (Extra2 1)) "agree 18th type"
 
     -- the user generic function across the same zoo
     assert (conIndex (Person "x" 1) == 0) "conIndex Person"
@@ -171,5 +180,6 @@ main = do
     assert (conIndex (Tick 1) == 0) "conIndex Tick"
     assert (conIndex Stop == 1) "conIndex Stop"
     assert (conIndex (Extra 1) == 0) "conIndex Extra"
+    assert (conIndex (Extra2 1) == 0) "conIndex Extra2"
 
     putStrLn "generic_json_many ok"

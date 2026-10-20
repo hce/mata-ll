@@ -743,6 +743,12 @@ pub enum SpecKind {
     /// construction time — because every dictionary consumer reads nullary
     /// fields as values (static dictionaries store the resolved CAF), F23.
     DictCtor { class: String, methods: Vec<(String, String, usize)> },
+    /// A demand for the dictionary of a GROUND type: the placeholder the
+    /// monomorphizer's rewrite passes leave at the site, replaced by the
+    /// `Dict` or `DictCtor` it decides on once its fixpoint is final —
+    /// when the set of dictionary-passing functions can no longer change
+    /// (`Monomorphizer::materialize_dicts`). Never leaves mono.
+    DictDemand { class: String, ty: Ty },
 }
 
 #[derive(Debug, Clone)]
