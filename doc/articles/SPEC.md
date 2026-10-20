@@ -41,18 +41,30 @@ user-defined ADT. The built-in operations are:
 **Key types.** A key is any `Hashable` type: the scalars (`Int`,
 `Number`, `String`, `Bool`, `ByteString`) and, structurally, tuples,
 lists, and `Maybe` of hashables — `HashMap (Int, Int) v` works. The two
-flavors have different runtime layouts, chosen per key type at compile
-time:
+flavors have different runtime layouts, chosen per key TYPE:
 
   1. A *scalar* key indexes the Lua table directly (value semantics).
   2. A *structural* key is a Lua table — identity semantics, so it
      cannot index directly (`hmLookup (1,2)` would never find the
-     structurally-equal inserted key). Instead the compiler threads a
-     type-directed injective string ENCODER: the table is keyed by the
-     encoding and stores `{key, value}` entries, and the enumerating
-     operations sort by the structural `compare`, so `hmKeys` and
-     friends come back in Ord order. A boxed type with no structural
-     ordering (e.g. `Integer`) is still not `Hashable`.
+     structurally-equal inserted key). Instead the key is stored under
+     a type-directed injective string ENCODING: the table is keyed by
+     the encoding and stores `{key, value}` entries, and the
+     enumerating operations sort by the structural `compare`, so
+     `hmKeys` and friends come back in Ord order. A boxed type with no
+     structural ordering (e.g. `Integer`) is still not `Hashable`.
+
+The encoder and the compare are the key type's `Hashable` evidence —
+the class's two (compiler-internal) methods, composed over the
+elements for a structural shape exactly as the `Eq`/`Ord`/`Show`
+dictionaries of a list, tuple or `Maybe` are composed. A specialized
+body threads the generated encoder for its concrete key type; a
+`Hashable k =>` body compiled with dictionary passing reads the
+encoder off the dictionary in scope and the flavor follows from it at
+run time (the scalar encoder means the scalar store), so both kinds of
+body read and write one map one way. Every write stamps the key
+compare on the map, so the enumerating operations need neither
+evidence nor a constraint, like `Data.Map.keys`. The class's instances
+are fixed: `instance Hashable T` in a program is rejected.
 
 A HashMap is unordered by definition, but the enumerating operations
 (`hmKeys`/`hmValues`/`hmToList`/`show`) must still be *pure functions*:
@@ -1401,7 +1413,10 @@ from the dictionary in scope, or from a dictionary composed from the
 ones in scope. The builtin container shapes compose that way too:
 `[x] == [y]`, `compare (Just x) (Just y)` and `max (x, 0) (y, 0)` in a
 `Ord a =>` body build the list, Maybe or tuple dictionary from the
-element's, exactly as `show [x]` does. A method that carries a
+element's, exactly as `show [x]` does, and a HashMap operation at a
+key type `k`, `[k]` or `(k, Maybe k)` in a `Hashable k =>` body reads
+the key's encoder and order from the `Hashable` dictionary built the
+same way (see "Key types" above). A method that carries a
 constraint of its own — `traverse :: (Traversable t, Applicative f) =>
 …` — takes the dictionaries for it first: its entry in the Traversable
 dictionary is a function of the Applicative (and Functor) dictionary,

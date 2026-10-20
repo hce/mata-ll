@@ -221,12 +221,22 @@ constant folding (§7) can then recognize them.
   every dictionary it needs in the body's `DictEnv` or the captured
   existential binders; otherwise it is deferred to the rewrite (inside
   the main walk of a dictionary-form body) or takes the type-erased best
-  effort (the retained generic copy). The container shapes' Eq, Ord and
-  Show dictionaries are synthesized per shape (`structural_dict`), and a
-  method with constraints of its own (`method_dict_constraints`:
-  `traverse`'s `Applicative f`) has dictionary parameters for them in
-  its dictionary form, applied at every dictionary-routed use
-  (`dict_method_use`).
+  effort (the retained generic copy). The container shapes' Eq, Ord,
+  Show and Hashable dictionaries are synthesized per shape
+  (`structural_dict`), and a method with constraints of its own
+  (`method_dict_constraints`: `traverse`'s `Applicative f`) has
+  dictionary parameters for them in its dictionary form, applied at
+  every dictionary-routed use (`dict_method_use`). A HashMap `hm*`
+  operation takes the same decision through `hm_op_use`: at a concrete
+  structural key type it becomes a wrapper threading the generated key
+  encoder (`structural_key_enc`, Hashable's `__hashKey` at that type)
+  and, for the writes, the structural compare the runtime stamps on the
+  map handle; at a key type that needs evidence it becomes the
+  operation's dictionary form (`hm_dictform`) applied to the key's
+  Hashable dictionary, whose encoder decides the store flavor at run
+  time (`__mll_hmd_*` in runtime.lua: the scalar encoder means the
+  scalar store); the enumerators read the key order off the handle and
+  need no evidence.
 - Type substitution into specialized bodies is what makes the copies concrete.
 
 If you ever see runtime `nil` where a method should be, suspect a missing

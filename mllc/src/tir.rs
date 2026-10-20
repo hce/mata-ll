@@ -710,12 +710,18 @@ pub enum SpecKind {
     /// injective string encoder for a structural key type, threading
     /// element encoders exactly as ListEq threads element eqs (the scalar
     /// base is the runtime `__mll_key_scalar`). `HmOp` is one hm operation
-    /// rewritten at a structural key type: `enc` for the keyed operations,
-    /// `cmp` (the A16 structural compare) for the sorted iteration ones.
+    /// rewritten at a key type the scalar path cannot serve: at a
+    /// structural shape the keyed operations thread `enc`, and the writes
+    /// (`hmInsert`, `hmFromList`) also `cmp` (the A16 structural compare,
+    /// which the runtime stamps on the map handle — a map carries its own
+    /// key order); the sorted iteration operations thread nothing and
+    /// read the handle's. `erased` marks an iteration operation at a key
+    /// type nobody knows (a type variable in a body no evidence reaches):
+    /// the runtime picks the flavor from the handle's tag.
     KeyEncList(String),
     KeyEncMaybe(String),
     KeyEncTuple(Vec<String>),
-    HmOp { op: String, enc: Option<String>, cmp: Option<String> },
+    HmOp { op: String, enc: Option<String>, cmp: Option<String>, erased: bool },
     /// An Ord operator/selector derived from a structural `compare`:
     /// `op` is the method as written ("<", "<=", ">", ">=", "max", "min"),
     /// `cmp` the generated compare's name. Ordering is its constructor

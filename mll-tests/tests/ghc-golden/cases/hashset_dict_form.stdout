@@ -1,0 +1,10 @@
+17
+(True,False,True,4,[[],[1],[1,2],[2]])
+([[1],[1,2],[2]],False)
+([Nothing,Just 1,Just 2,Just 3],True,3)
+([(0,"z"),(1,"a"),(2,"b")],3)
+([[1,2],[3,4]],True,True)
+(["a","b"],True,False)
+([False,True],[True],[False])
+([Nothing,Just Nothing,Just (Just 2)],True,False)
+([(0,Nothing),(1,Just "q")],True,False)

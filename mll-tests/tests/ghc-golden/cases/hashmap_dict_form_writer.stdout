@@ -1,0 +1,19 @@
+17
+(Just "a",True,False,3)
+[(1,"a"),(2,"b"),(3,"c")]
+(Just 1,Nothing,["a","b"])
+(Just "f",[(False,"f"),(True,"t")])
+(Just "y",Nothing,[1.5,2.5])
+(Just "onetwo",Just "nil",Nothing,True)
+[[],[1],[1,2],[2]]
+[([],"nil"),([1,2],"onetwo"),([2],"two")]
+(Just "mapped",Just "range",Just "app",3)
+Just "taken"
+(Just "nested",Just "emptyinner",Nothing,[[[]],[[1],[2,3]]])
+(Just "just",Just "nothing",Nothing,[Nothing,Just 7])
+(Just "jj",Just "jn",Just "n",[Nothing,Just Nothing,Just (Just 1)])
+(Just "a",Just "b",Nothing,[(0,Just 9),(1,Nothing),(1,Just 2)])
+(Just "123",Just "124",Nothing,[((1,2,3),"123"),((1,2,4),"124")])
+(Just 2,Just 1,2,[["a","b,c"],["a,b","c"]])
+([(Nothing,"none"),(Just 1,"one"),(Just 2,"two")],3)
+(4,3,False)

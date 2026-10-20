@@ -42,6 +42,7 @@
 --                     the stored elements like GHC's boxed STArray.
 module MllShim
   ( Number
+  , Hashable
   , assert
   , length, take, drop, replicate, (!!)
   , (==), (/=), (<), (<=), (>), (>=), elem
@@ -71,6 +72,21 @@ import Data.STRef (STRef, newSTRef, readSTRef, modifySTRef')
 import qualified Data.Map as Map
 
 type Number = Double
+
+-- mata-ll's HashMap key class (the Data.Map/Data.Set wrappers carry it):
+-- the scalar key types and tuples, lists and Maybe of them. A
+-- Hashable-constrained mata-ll function calls Data.Map's Ord-constrained
+-- operations, so the twin's class entails Ord. Its members are the
+-- compiler's own evidence; nothing for a program to define.
+class Ord a => Hashable a
+instance Hashable Int
+instance Hashable Double
+instance Hashable Bool
+instance Hashable Char
+instance Hashable a => Hashable [a]
+instance Hashable a => Hashable (Maybe a)
+instance (Hashable a, Hashable b) => Hashable (a, b)
+instance (Hashable a, Hashable b, Hashable c) => Hashable (a, b, c)
 
 -- mata-ll: assert True prints ".", assert False raises the message.
 assert :: Bool -> String -> IO ()

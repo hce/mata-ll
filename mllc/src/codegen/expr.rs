@@ -2225,17 +2225,18 @@ impl CodeGen {
                 }
                 Expr::binop("..", acc, Expr::lit("\")\""))
             }
-            SpecKind::HmOp { op, enc, cmp } => {
+            SpecKind::HmOp { op, enc, cmp, erased } => {
                 let suffix = op.strip_prefix("hm").expect("hm op name");
-                // enc and cmp both None marks the runtime-dispatching dyn
-                // family (a still-polymorphic key type); the static
-                // families thread their encoder or comparator.
-                let dyn_ = enc.is_none() && cmp.is_none();
+                // The encoded family (`__mll_hme_*`) at a structural key
+                // type, threading the encoder and (for the writes) the
+                // compare; the dictionary-routed family's keyless
+                // enumerators (`__mll_hmd_*`) at an erased key type, which
+                // read the flavor off the handle.
                 let runtime = format!("__mll_hm{}_{}{}",
-                    if dyn_ { "_dyn" } else { "e" },
+                    if *erased { "d" } else { "e" },
                     suffix[..1].to_lowercase(), &suffix[1..]);
                 let mut cargs = Vec::new();
-                if let Some(name) = enc.as_ref().or(cmp.as_ref()) {
+                for name in enc.iter().chain(cmp.iter()) {
                     cargs.push(Expr::name(self.spec_ref(name)));
                 }
                 for a in args {

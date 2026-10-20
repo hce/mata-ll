@@ -44,6 +44,59 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A HashMap key is encoded by its type's `Hashable` evidence in every
+  body, so a map written by a dictionary-passing body is read by a
+  specialized one and the other way round** (silent wrong output /
+  crash). A `Hashable`-constrained function the monomorphizer compiles
+  with dictionary passing — the `Data.Map`/`Data.Set` wrappers once a
+  program uses them at more than 16 key types, a function over an
+  existential key — sent its `hm*` operations to a runtime family that
+  guessed the key's flavor per call and encoded a table key with a
+  TYPE-ERASED walk over its raw slots. That encoding agreed with the
+  typed one (which a specialized body threads per key type) for tuples
+  of scalars only: a cons cell became `(head,(tail…))`, `Just x` became
+  `(x)`, `[]`, `Nothing` and a missing trailing slot were all nil. So
+  `M.lookup (Just 7)` on a map a dictionary-form `M.insert` had written
+  was `Nothing` (GHC: `Just "just"`), `M.member` was `False`, `M.delete`
+  deleted nothing, `[5]` and `(1, Just 2)` keys missed the same way, and
+  a list key with an unforced tail — every list literal of two or more
+  elements, every `map`/range/`++` result — crashed with "bad argument
+  #2 to 'format' (number expected, got function)", the generator slot
+  of the lazy cons cell reaching the scalar encoder (H2, H3). `Hashable`
+  now carries the key type's evidence as two compiler-internal methods
+  (`__hashKey`, the encoder, and `__hashCompare`, the key order): the
+  scalar instances map them to the runtime scalar encoder and the
+  type's `compare`, the structural shapes compose them over the
+  elements' dictionaries exactly as the `Eq`/`Ord`/`Show` dictionaries
+  of a list, tuple or `Maybe` are composed, and an `hm*` operation at a
+  key type that needs evidence takes the operation's dictionary form
+  over the dictionary in scope (the parameter, a captured existential
+  dictionary, or a composed one) — the same decision `dispatch_method`
+  makes for a class method, now made once for `hm*` by `hm_op_use` in
+  the main walk and the dictionary rewrite alike. The flavor is one rule
+  in the runtime: the scalar encoder means the scalar store, byte for
+  byte the path a specialized body takes; any other encoder means the
+  encoded store with that typed encoder. Every write also stamps the
+  key compare on the map handle, so `hmKeys`/`hmValues`/`hmToList` read
+  the order off the map and need no evidence at all — `Data.Map.keys`
+  needs none in GHC either, and an unconstrained wrapper past the
+  limit enumerates a structural-key map correctly where the erased
+  comparator could not. The type-erased encoder and the guessing runtime
+  family are gone. A program's own `instance Hashable T` — accepted
+  silently before, a method-less instance whose keys the runtime hashed
+  by table identity — is now a compile-time error that names the key
+  types and explains what the class is. GHC-goldened cases
+  `hashmap_dict_form_writer` (dictionary-form `M.insert`, specialized
+  readers, every key shape: scalars, lists literal and lazily built,
+  nested lists, `Maybe`, nested `Maybe`, tuples, tuples of `Maybe`,
+  lists of strings), `hashmap_dict_form_reader` (specialized writers,
+  dictionary-form `M.lookup`/`M.member`/`M.delete`),
+  `hashmap_dict_form_body` (a `Hashable k =>` body in dictionary form
+  with composed `(k, Maybe k)` and `[k]` dictionaries, an existential
+  key) and `hashset_dict_form` (`Data.Set` likewise), plus
+  `hashmap_dict_form_builtins` (the `hm*` builtins themselves, pinned
+  from a containers twin). Found by the 2026-10 fresh-eyes review (H2,
+  H3).
 - **A nested existential pattern binds each captured dictionary to its own
   constructor's hidden type** (silent wrong output / crash). The checker
   names every existential skolem after its constructor's type variable,

@@ -361,7 +361,16 @@ coordinate caches) works. Structural keys are stored under a
 type-directed injective encoding, and `hmKeys`/`hmValues`/`hmToList`
 enumerate them in structural Ord order (scalar-keyed maps sort keys
 natively, as before). `Integer` keys remain rejected: the boxed bignum
-has table identity and no scalar encoding.
+has table identity and no scalar encoding. `Hashable` is mata-ll's own
+class, with no GHC counterpart: its instances are fixed to those key
+types, and a program cannot declare one (`instance Hashable T` is a
+compile-time error) — to key a map by your own type, convert the key
+to a `String` or a tuple of its fields. Internally the class carries
+the key type's encoder and order as evidence, so a `Hashable k =>`
+function compiled with dictionary passing (see the performance note
+below) reads and writes a map exactly as a specialized one does; a map
+also carries its own key order, so the enumerating operations need no
+constraint, as `Data.Map.keys` needs none.
 
 A NaN `Number` key behaves as it does under `Data.Map` — `compare nan _`
 is `GT` and `nan == nan` is `False`, so an insert under a NaN key lands
@@ -511,7 +520,7 @@ specialised native codecs (direct code, no representation values at
 runtime); the generic pair is the library-programmable alternative and
 the substrate's proof of fidelity.
 
-A performance note, not a semantic one: a polymorphic function is
+A performance note, meant to be nothing more: a polymorphic function is
 specialised at up to 16 distinct types; past that the monomorphiser
 switches it (and the generic-instance methods it uses) to dictionary
 passing, which is meant to stay correct at any number of types — the
@@ -523,9 +532,15 @@ makes, for every form a method use takes (named, infix on either
 operand, first-class, prefix negation, an overloaded literal): a
 binding that still contains a type variable or an existential type
 goes through a dictionary, and the container shapes (list, Maybe,
-tuple) compose their Eq, Ord and Show dictionaries from the elements'.
-The fallback's remaining known gaps (an existential nested inside
-another, an unconstrained function past the limit used at more arrows
+tuple) compose their Eq, Ord, Show and Hashable dictionaries from the
+elements'. A HashMap key is the same case: a `Hashable k =>` body in
+the fallback encodes and orders its keys by the `Hashable` dictionary
+in scope — the one for `k`, a captured existential's, or one composed
+for `[k]`, `(k, Maybe k)` and the like — so the maps it builds are the
+maps a specialised body reads, and the other way round (the
+`Data.Map`/`Data.Set` wrappers are exactly such bodies once a program
+uses them at more than 16 key types). The fallback's remaining known
+gaps (an unconstrained function past the limit used at more arrows
 than it declares, a dictionary built before one of its methods itself
 switched to dictionary passing) are tracked as open defects, not
 documented deviations. A derived instance of a parameterized type takes

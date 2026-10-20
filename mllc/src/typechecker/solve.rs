@@ -795,6 +795,30 @@ impl Checker {
             }
         };
 
+        // Hashable's instances are fixed: the scalar key types and the
+        // structural shapes over them. Its methods are the compiler's own
+        // evidence (the key encoder and order, see prelude.rs), which no
+        // program can define, so an instance a program declares could
+        // only be method-less — a key the runtime would silently hash by
+        // table identity or reject at the first use.
+        if class_name == "Hashable" {
+            self.push_error_ctx_note(
+                DiagnosticKind::Other(format!(
+                    "cannot declare an instance of 'Hashable' for type '{}': \
+                     HashMap keys are the scalar types (Int, Number, String, \
+                     Bool, ByteString) and tuples, lists and Maybe of them",
+                    ty_str
+                )),
+                format!("instance {} {}", class_name, ty_str),
+                "Hashable has no GHC counterpart: it is mata-ll's HashMap key \
+                 class, whose evidence (the key's encoding and order in the \
+                 Lua table) the compiler supplies for the builtin key types \
+                 only; to key a map by your own type, convert the key to one \
+                 of them (a String or a tuple of its fields)",
+            );
+            return vec![];
+        }
+
         // Check superclass constraints
         for superclass in &class_info.superclasses {
             let key = (superclass.clone(), target_head.clone());

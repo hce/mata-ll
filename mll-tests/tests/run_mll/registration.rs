@@ -896,6 +896,13 @@ mll_lib_test!(ffi_constructed_values, "ffi_constructed_values.mll");
 mll_lib_test!(lib_liolinear, "lib_liolinear.mll");
 // A20: Data.Set + Data.Map ordered enumeration and additions.
 mll_lib_test!(lib_data_set, "lib_data_set.mll");
+// W24 (H2, H3): HashMap keys encoded by the key type's Hashable evidence in
+// every body, so dictionary-form and specialized bodies share one map.
+mll_lib_test!(hashmap_dict_form_writer, "hashmap_dict_form_writer.mll");
+mll_lib_test!(hashmap_dict_form_reader, "hashmap_dict_form_reader.mll");
+mll_lib_test!(hashmap_dict_form_body, "hashmap_dict_form_body.mll");
+mll_lib_test!(hashset_dict_form, "hashset_dict_form.mll");
+mll_test!(hashmap_dict_form_builtins, "hashmap_dict_form_builtins.mll");
 mll_lib_test!(nan_map_keys, "nan_map_keys.mll");
 // C6: type signatures on where/let/do-let bindings.
 mll_test!(local_signatures, "local_signatures.mll");

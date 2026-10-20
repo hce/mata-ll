@@ -674,17 +674,39 @@ impl Checker {
             ("enumFromTo", "enumFromTo_Int"), ("enumFromThenTo", "enumFromThenTo_Int"),
         ]);
 
-        // HashMap KEY constraint (round-3 Q54): the runtime map is a plain
-        // Lua table keyed by the forced key, so only types whose Lua
-        // representation has VALUE semantics can be keys. A boxed Integer
-        // key is a Lua table — identity semantics: lookups missed, size
-        // grew per insert of "the same" key, and hashmap_keys' table.sort
-        // crashed. Hashable is a method-less marker class over the scalar
-        // key types; the key-taking hm* functions carry it, so an Integer
-        // key is a compile-time "No instance for 'Hashable Integer'".
-        self.register_builtin_class("Hashable", "a", &[], vec![]);
+        // HashMap KEY constraint (round-3 Q54): the runtime map is keyed
+        // by the forced key (a scalar directly, a structural key — tuple,
+        // list, Maybe — under an injective string encoding), so only types
+        // with VALUE semantics at the key can be keys. A boxed Integer key
+        // is a Lua table — identity semantics: lookups missed, size grew
+        // per insert of "the same" key, and hashmap_keys' table.sort
+        // crashed. The key-taking hm* functions carry Hashable, so an
+        // Integer key is a compile-time "No instance for 'Hashable
+        // Integer'". Its instances are the scalar key types here and the
+        // structural shapes the solver admits (`structural_container_class`)
+        // — a user instance is rejected (`check_instance`). Its two methods
+        // are the key type's EVIDENCE and nothing a program can name (the
+        // `__` prefix is the compiler's reserved namespace; no env scheme
+        // is registered for them): `__hashKey` is the key encoder and
+        // `__hashCompare` the key order, which the monomorphizer composes
+        // over the elements for a structural shape exactly as Eq/Ord/Show
+        // dictionaries are composed, so a Hashable-constrained body
+        // compiled with dictionary passing encodes and orders a key
+        // exactly as a specialized body does (see mono's `hm_op_use`).
+        let hash_key_ty = Ty::arrow(ta.clone(), Ty::Con("String".to_string()));
+        let hash_cmp_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::Con("Ordering".to_string()));
+        self.register_builtin_class("Hashable", "a", &[], vec![
+            ("__hashKey", hash_key_ty, None, vec![]),
+            ("__hashCompare", hash_cmp_ty, None, vec![]),
+        ]);
         for t in &["Int", "Number", "String", "Bool", "ByteString"] {
-            self.register_builtin_instance::<&str, &str>("Hashable", Ty::Con(t.to_string()), &[]);
+            // The scalar encoder, and the type's own `compare` (the base
+            // Ord instances above): one key type, one encoder, one order.
+            let compare = format!("ord_compare__{}", t);
+            self.register_builtin_instance("Hashable", Ty::Con(t.to_string()), &[
+                ("__hashKey", "__mll_key_scalar"),
+                ("__hashCompare", compare.as_str()),
+            ]);
         }
         for name in &["hmInsert", "hmLookup", "hmDelete", "hmMember", "hmFromList"] {
             self.fn_contexts.insert(name.to_string(), FnContext {

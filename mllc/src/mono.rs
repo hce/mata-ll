@@ -1042,6 +1042,20 @@ impl Monomorphizer {
                     return Some(name);
                 }
             }
+            // Hashable's hidden methods at a structural key shape: the
+            // generated encoder, and the A16 compare the writes stamp on
+            // the handle (the scalar instances map them to the runtime
+            // scalar encoder and the scalar `compare` below).
+            "__hashKey" => {
+                if Self::is_structural_key(binding) {
+                    return Some(self.structural_key_enc(binding));
+                }
+            }
+            "__hashCompare" => {
+                if let Some(name) = self.structural_ord_impl("compare", binding) {
+                    return Some(name);
+                }
+            }
             _ => {}
         }
         let head = InstHead::of(binding)?;
@@ -1108,27 +1122,29 @@ impl Monomorphizer {
 
     /// The injective string encoder for structural key type `ty` (A17):
     /// composites thread element encoders exactly as ListEq threads element
-    /// eqs; scalars are the runtime `__mll_key_scalar`.
+    /// eqs; scalars are the runtime `__mll_key_scalar`. Memoized as the
+    /// implementation of Hashable's `__hashKey` at `ty`, so a static
+    /// Hashable dictionary for the type finds it.
     fn structural_key_enc(&mut self, ty: &Ty) -> String {
         match ty {
             Ty::List(elem) => {
                 let list_ty = ty.clone();
                 let elem = (**elem).clone();
-                self.synthetic_spec_fn("hashkey", "hashkey_", &list_ty, &["_k"],
+                self.synthetic_spec_fn("__hashKey", "hashkey_", &list_ty, &["_k"],
                     Ty::Con("String".into()),
                     move |slf| SpecKind::KeyEncList(slf.elem_key_enc(&elem)))
             }
             m if Self::is_maybe_type(m) => {
                 let inner = Self::maybe_inner_type(m).unwrap();
                 let maybe_ty = m.clone();
-                self.synthetic_spec_fn("hashkey", "hashkey_", &maybe_ty, &["_k"],
+                self.synthetic_spec_fn("__hashKey", "hashkey_", &maybe_ty, &["_k"],
                     Ty::Con("String".into()),
                     move |slf| SpecKind::KeyEncMaybe(slf.elem_key_enc(&inner)))
             }
             Ty::Tuple(elems) => {
                 let tuple_ty = ty.clone();
                 let elems = elems.clone();
-                self.synthetic_spec_fn("hashkey", "hashkey_", &tuple_ty, &["_k"],
+                self.synthetic_spec_fn("__hashKey", "hashkey_", &tuple_ty, &["_k"],
                     Ty::Con("String".into()),
                     move |slf| {
                         let names: Vec<String> =
@@ -1140,28 +1156,141 @@ impl Monomorphizer {
         }
     }
 
+    /// The element encoder of a composite key: the shape's own for a
+    /// nested shape, the scalar encoder otherwise — including an ERASED
+    /// element (a type variable no evidence reaches: a literal-keyed
+    /// `hmFromList [((0, 1), …)]` whose element variables the checker
+    /// never fixed), the same degradation the erased `__mll_eq`/`__mll_cmp`
+    /// fallbacks define for erased scalars. An erased element in a body
+    /// that HAS evidence never comes here: `hm_op_use` routes such a key
+    /// through its composed Hashable dictionary.
     fn elem_key_enc(&mut self, ty: &Ty) -> String {
         if Self::is_structural_key(ty) {
             self.structural_key_enc(ty)
-        } else if matches!(ty, Ty::Var(_)) {
-            // An ERASED element may be a table (a nested structural value)
-            // or nil (Nothing) at run time; the dyn encoder handles every
-            // shape, where the scalar one would format a table.
-            "__mll_key_dyn".to_string()
         } else {
             "__mll_key_scalar".to_string()
         }
     }
 
-    /// The threaded wrapper for hm operation `op` at structural key type
-    /// `key_ty`, declared at the use's full instantiated type (so the N-ary
+    /// The hm* operations with no key argument: they enumerate a map and
+    /// need no evidence — the handle carries the flavor and the key order.
+    fn hm_iteration_op(op: &str) -> bool {
+        matches!(op, "hmKeys" | "hmValues" | "hmToList")
+    }
+
+    /// The ONE decision for an hm* use at key type `key_ty` — the HashMap
+    /// analog of `dispatch_method`, made by the main walk and the
+    /// dictionary rewrite alike. `None` keeps the node as written: the
+    /// scalar runtime family (a scalar key, or an erased key type nothing
+    /// will ever give evidence for — the type-erased degradation, whose
+    /// runtime tripwire rejects a table key loudly), or, inside a body
+    /// about to be rewritten to dictionary form, a deferral to that
+    /// rewrite. Otherwise:
+    ///
+    ///   - a keyless enumerator at a structural shape or an erased key
+    ///     takes the threaded wrapper (`hm_threaded_impl`), typed for the
+    ///     shape, flavor-from-the-handle for the erased key;
+    ///   - a keyed operation whose key type needs evidence (a type
+    ///     variable or an existential skolem anywhere in it) and has it in
+    ///     scope takes the operation's dictionary form applied to the key
+    ///     type's Hashable dictionary (the parameter, a captured
+    ///     existential dictionary, or a dictionary composed over the
+    ///     elements' — `build_dict_expr`), which reads the encoder and the
+    ///     compare off it at run time;
+    ///   - a keyed operation at a structural shape that needs no evidence
+    ///     takes the threaded wrapper with the shape's generated encoder.
+    ///
+    /// Before this, a keyed operation at an erased key type went to a
+    /// runtime family that guessed the flavor per key and encoded a table
+    /// key with a TYPE-ERASED walk over its raw slots — an encoding that
+    /// agreed with the typed one for tuples of scalars only, so a map
+    /// written by a dictionary-form body (the Data.Map wrappers past the
+    /// specialization limit) could not be read by a specialized one, and
+    /// a lazy list key's generator slot reached the scalar encoder (H2,
+    /// H3).
+    fn hm_op_use(&mut self, op: &str, key_ty: &Ty, use_ty: &Ty, ev: &DictEnv) -> Option<TExpr> {
+        let wrapper = |slf: &mut Self| {
+            let mangled = slf.hm_threaded_impl(op, key_ty, use_ty);
+            Some(TExpr::new(TExprKind::Var(mangled), use_ty.clone()))
+        };
+        if Self::hm_iteration_op(op) {
+            if Self::is_structural_key(key_ty) || matches!(key_ty, Ty::Var(_) | Ty::Skolem(..)) {
+                return wrapper(self);
+            }
+            return None;
+        }
+        if self.needs_evidence("Hashable", key_ty) {
+            if self.dict_evidence_for("Hashable", key_ty, ev) {
+                let dict = self.build_dict_expr("Hashable", key_ty, ev);
+                let dictform = self.hm_dictform(op);
+                let head = TExpr::new(
+                    TExprKind::Var(dictform),
+                    Ty::fun(&[Ty::Unit], use_ty.clone()),
+                );
+                return Some(TExpr::new(
+                    TExprKind::App(Box::new(head), Box::new(dict)),
+                    use_ty.clone(),
+                ));
+            }
+            if self.in_dictform {
+                return None;
+            }
+        }
+        if Self::is_structural_key(key_ty) {
+            return wrapper(self);
+        }
+        None
+    }
+
+    /// The dictionary form of keyed hm operation `op`, generated once (it
+    /// is generic over the key type): `op·dictform(__d0, _h0, …)` calls the
+    /// runtime's dictionary-routed `__mll_hmd_<op>` with the Hashable
+    /// dictionary's encoder (and, for the writes, its compare — the
+    /// handle is stamped with it) ahead of the value parameters. A use is
+    /// this function applied to the dictionary, so a saturated call
+    /// flattens to one N-ary call and a first-class use is an ordinary
+    /// partial application.
+    fn hm_dictform(&mut self, op: &str) -> String {
+        let n_params = match op {
+            "hmInsert" => 3,
+            "hmLookup" | "hmDelete" | "hmMember" => 2,
+            "hmFromList" => 1,
+            other => unreachable!("hm_dictform: {other} is not a keyed hm operation"),
+        };
+        let params: Vec<String> = (0..n_params).map(|i| format!("_h{i}")).collect();
+        let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
+        let key = format!("{op}__dictform");
+        let base = format!("{op}_dictform");
+        let suffix = op.strip_prefix("hm").expect("hm op name");
+        let runtime = format!("__mll_hmd_{}{}", suffix[..1].to_lowercase(), &suffix[1..]);
+        let stamps = matches!(op, "hmInsert" | "hmFromList");
+        let params_owned = params.clone();
+        self.structural_dictform((&key, &Ty::Unit), &base, 1, &param_refs, Ty::Unit, move |dicts| {
+            let var = |n: &str| TExpr::new(TExprKind::Var(n.to_string()), Ty::Unit);
+            let app = |f: TExpr, a: TExpr| TExpr::new(
+                TExprKind::App(Box::new(f), Box::new(a)), Ty::Unit);
+            let mut call = app(var(&runtime), Self::dictform_elem_method(&dicts[0], "__hashKey"));
+            if stamps {
+                call = app(call, Self::dictform_elem_method(&dicts[0], "__hashCompare"));
+            }
+            for p in &params_owned {
+                call = app(call, var(p));
+            }
+            call
+        })
+    }
+
+    /// The threaded wrapper for hm operation `op` at key type `key_ty` — a
+    /// structural shape, or (for the keyless enumerators only) an erased
+    /// key — declared at the use's full instantiated type (so the N-ary
     /// convention holds at every call and partial application). The keyed
-    /// ops carry the encoder; the iteration ops carry the A16 structural
-    /// compare, so they come back in true Ord order.
+    /// ops carry the shape's encoder, the writes also its A16 structural
+    /// compare (stamped on the handle, so the enumerators come back in
+    /// true Ord order from any body); the enumerators carry nothing.
     fn hm_threaded_impl(&mut self, op: &str, key_ty: &Ty, use_ty: &Ty) -> String {
-        // Erased element variables reach this path (see the Var-arm
-        // comment); canonicalize so every use of one shape shares one
-        // wrapper, exactly as the arity-widening specializations do.
+        // Erased element variables reach this path (see `elem_key_enc`);
+        // canonicalize so every use of one shape shares one wrapper,
+        // exactly as the arity-widening specializations do.
         let use_ty = &if self.is_polymorphic(use_ty) {
             Self::canonicalize_vars(use_ty)
         } else {
@@ -1176,16 +1305,14 @@ impl Monomorphizer {
             Ok(existing) => return existing,
             Err(fresh) => fresh,
         };
-        // A still-polymorphic key (a generic Hashable-constrained body —
-        // the Data.Map/Data.Set wrappers — whose one copy serves every key
-        // type) threads NOTHING: enc and cmp both None marks the wrapper
-        // as the runtime-dispatching __mll_hm_dyn_* family, which decides
-        // the flavor per key at run time and stays layout-compatible with
-        // both static paths.
-        let (enc, cmp) = if matches!(key_ty, Ty::Var(_)) {
+        // An erased key (a type variable or skolem no evidence reaches)
+        // only ever comes here for an enumerator (see `hm_op_use`): the
+        // runtime reads the flavor off the handle.
+        let erased = matches!(key_ty, Ty::Var(_) | Ty::Skolem(..));
+        let (enc, cmp) = if erased || Self::hm_iteration_op(op) {
             (None, None)
-        } else if matches!(op, "hmKeys" | "hmValues" | "hmToList") {
-            (None, self.structural_ord_impl("compare", key_ty))
+        } else if matches!(op, "hmInsert" | "hmFromList") {
+            (Some(self.structural_key_enc(key_ty)), self.structural_ord_impl("compare", key_ty))
         } else {
             (Some(self.structural_key_enc(key_ty)), None)
         };
@@ -1207,8 +1334,7 @@ impl Monomorphizer {
         let body = TExpr::new(
             TExprKind::SpecCall {
                 original: mangled.clone(),
-                specialized: SpecKind::HmOp { op: op.to_string(),
-                enc, cmp },
+                specialized: SpecKind::HmOp { op: op.to_string(), enc, cmp, erased },
                 args,
             },
             result_ty.clone(),
@@ -1882,26 +2008,22 @@ impl Monomorphizer {
                 // still-polymorphic reference to an arbitrary one of them
                 // would hand the use a function of the WRONG arity. The
                 // shared generic copy is what such a reference wants.
-                // Structural-key HashMap ops (A17): an hm* use whose KEY
-                // type is a structural SHAPE is rewritten to the threaded
-                // wrapper — the scalar hashmap path would key the Lua table
-                // by identity (and the runtime tripwire would reject it).
-                // The shape decides, not full concreteness: Hashable is not
-                // a standard defaulting class, so a literal-keyed
-                // `hmFromList [((0, 1), …)]` reaches mono with ERASED
-                // element variables — those take the scalar encoder, the
-                // exact degradation the erased `__mll_eq`/`__mll_cmp`
-                // fallbacks already define for erased scalars. The wrapper
-                // is keyed and declared at the canonicalized type when
-                // variables remain, so one shape shares one copy.
+                // HashMap ops (A17): an hm* use whose KEY type the scalar
+                // hashmap path cannot serve — a structural shape (the Lua
+                // table would be keyed by identity, and the runtime
+                // tripwire would reject it) or a type that needs Hashable
+                // evidence — is rewritten by `hm_op_use`, the one decision
+                // the dictionary rewrite makes too. The main walk carries
+                // no dictionary environment: evidence here is a captured
+                // existential dictionary, and a body about to go
+                // dictionary-form keeps the node for the rewrite.
                 if !self.locals.contains(name)
                     && let Some(op) = Self::hm_key_op(name)
                     && let Some(key_ty) = Self::hm_key_type(op, &ty)
-                    && (Self::is_structural_key(&key_ty)
-                        || matches!(key_ty, Ty::Var(_))) {
-                        let mangled = self.hm_threaded_impl(op, &key_ty, &ty);
-                        return TExpr { kind: TExprKind::Var(mangled), ty };
-                    }
+                    && let Some(rewritten) = self.hm_op_use(op, &key_ty, &ty, &DictEnv::default())
+                {
+                    return rewritten;
+                }
                 let poly_use = self.poly_fns.contains_key(name)
                     && !self.locals.contains(name)
                     && !self.dict_passing_fns.contains(name);
@@ -2895,6 +3017,15 @@ impl Monomorphizer {
                     // global, or the function itself for the rest of this
                     // node (same discipline as mono_expr_node's Var arm).
                     return expr;
+                }
+                // An hm* use the main walk deferred (its key type needs
+                // Hashable evidence): the operation's dictionary form over
+                // this body's evidence.
+                if let Some(op) = Self::hm_key_op(name)
+                    && let Some(key_ty) = Self::hm_key_type(op, &ty)
+                    && let Some(rewritten) = self.hm_op_use(op, &key_ty, &ty, ev)
+                {
+                    return rewritten;
                 }
                 if self.method_to_class.contains_key(name) {
                     match self.dispatch_method(name, &ty, ev) {
@@ -3993,10 +4124,13 @@ impl Monomorphizer {
     /// The classes whose builtin container instances (list, Maybe, tuple)
     /// are compiler-owned STRUCTURAL implementations rather than registered
     /// context instances: the specialized path generates their methods per
-    /// element type (`generate_list_eq` & co.), and the dictionary path
-    /// composes them from element dictionaries (`structural_dict`).
+    /// element type (`generate_list_eq` & co., `structural_key_enc`), and
+    /// the dictionary path composes them from element dictionaries
+    /// (`structural_dict`). Hashable is one of them: its evidence is the
+    /// key type's encoder and compare, composed over the elements' exactly
+    /// as Eq and Ord are.
     fn is_structural_class(class: &str) -> bool {
-        matches!(class, "Eq" | "Ord" | "Show")
+        matches!(class, "Eq" | "Ord" | "Show" | "Hashable")
     }
 
     /// The canonical memo shape of a structural type (element types erased
@@ -4056,7 +4190,7 @@ impl Monomorphizer {
                 vec![("==".to_string(), eq, 2), ("/=".to_string(), ne, 2)]
             }
             "Ord" => {
-                let cmp = self.structural_ord_dictform(&shape, n_dicts);
+                let cmp = self.structural_cmp_dictform(&shape, n_dicts, "compare", "ord_compare_dictform");
                 let bool_ty = Ty::Con("Bool".into());
                 let mut methods = vec![("compare".to_string(), cmp.clone(), 2)];
                 // The operators and selectors: GHC's class defaults over
@@ -4111,6 +4245,14 @@ impl Monomorphizer {
                     methods.push((method.to_string(), name, 2));
                 }
                 methods
+            }
+            "Hashable" => {
+                // The key encoder over the element dictionaries' encoders
+                // and the key compare over their compares — the two
+                // entries every hm* dictionary form reads.
+                let enc = self.structural_hashkey_dictform(&shape, n_dicts);
+                let cmp = self.structural_cmp_dictform(&shape, n_dicts, "__hashCompare", "hashcompare_dictform");
+                vec![("__hashKey".to_string(), enc, 1), ("__hashCompare".to_string(), cmp, 2)]
             }
             _ => {
                 let show = self.structural_show_dictform(&shape, n_dicts);
@@ -4269,14 +4411,25 @@ impl Monomorphizer {
 
     /// The dictionary-form `compare` of a structural shape, the Ord twin
     /// of `structural_eq_dictform`: `__mll_list_cmp`/`__mll_maybe_cmp`
-    /// threading the element dictionary's `compare` (lexicographic lists,
-    /// Nothing < Just), or the fields' compares chained on EQ for a tuple
-    /// — exactly the specialized path's `ListCmp`/`MaybeCmp`/`TupleCmp`
-    /// with the element comparator read from a dictionary.
-    fn structural_ord_dictform(&mut self, shape: &Ty, n_dicts: usize) -> String {
+    /// threading the element dictionary's comparator (lexicographic lists,
+    /// Nothing < Just), or the fields' comparators chained on EQ for a
+    /// tuple — exactly the specialized path's `ListCmp`/`MaybeCmp`/
+    /// `TupleCmp` with the element comparator read from a dictionary.
+    /// `elem_method` names the element dictionary's entry: Ord's `compare`,
+    /// or Hashable's `__hashCompare` (the same order, read off the
+    /// Hashable dictionary a HashMap write has in hand).
+    fn structural_cmp_dictform(
+        &mut self,
+        shape: &Ty,
+        n_dicts: usize,
+        elem_method: &str,
+        base_name: &str,
+    ) -> String {
         let ordering = Ty::Con("Ordering".into());
         let shape_owned = shape.clone();
-        self.structural_dictform(("compare__dictform", shape), "ord_compare_dictform", n_dicts, &["_a", "_b"], ordering.clone(), move |dicts| {
+        let elem_method = elem_method.to_string();
+        let memo_key = format!("{elem_method}__dictform");
+        self.structural_dictform((&memo_key, shape), base_name, n_dicts, &["_a", "_b"], ordering.clone(), move |dicts| {
             let var = |n: &str| TExpr::new(TExprKind::Var(n.to_string()), Ty::Unit);
             let app = |f: TExpr, a: TExpr, t: Ty| TExpr::new(
                 TExprKind::App(Box::new(f), Box::new(a)), t);
@@ -4286,7 +4439,7 @@ impl Monomorphizer {
                     //   EQ -> <the rest>; r -> r
                     // with the last field's compare as the innermost result.
                     let field_cmp = |i: usize| app(
-                        app(Self::dictform_elem_method(&dicts[i], "compare"),
+                        app(Self::dictform_elem_method(&dicts[i], &elem_method),
                             Self::dictform_tuple_field("_a", i + 1), Ty::Unit),
                         Self::dictform_tuple_field("_b", i + 1),
                         ordering.clone(),
@@ -4315,14 +4468,56 @@ impl Monomorphizer {
                     acc
                 }
                 Ty::List(_) => app(
-                    app(app(var("__mll_list_cmp"), Self::dictform_elem_method(&dicts[0], "compare"), Ty::Unit),
+                    app(app(var("__mll_list_cmp"), Self::dictform_elem_method(&dicts[0], &elem_method), Ty::Unit),
                         var("_a"), Ty::Unit),
                     var("_b"), ordering.clone(),
                 ),
                 _ => app(
-                    app(app(var("__mll_maybe_cmp"), Self::dictform_elem_method(&dicts[0], "compare"), Ty::Unit),
+                    app(app(var("__mll_maybe_cmp"), Self::dictform_elem_method(&dicts[0], &elem_method), Ty::Unit),
                         var("_a"), Ty::Unit),
                     var("_b"), ordering.clone(),
+                ),
+            }
+        })
+    }
+
+    /// The dictionary-form key encoder of a structural shape (Hashable's
+    /// `__hashKey`): `__mll_key_list`/`__mll_key_maybe` threading the
+    /// element dictionary's encoder, or the tuple's `"(" e1 "," e2 … ")"`
+    /// over the element dictionaries' encoders — byte-for-byte the
+    /// specialized path's `KeyEncList`/`KeyEncMaybe`/`KeyEncTuple`, so a
+    /// dictionary-form body and a specialized one encode one key one way.
+    fn structural_hashkey_dictform(&mut self, shape: &Ty, n_dicts: usize) -> String {
+        let str_ty = Ty::Con("String".into());
+        let shape_owned = shape.clone();
+        self.structural_dictform(("__hashKey__dictform", shape), "hashkey_dictform", n_dicts, &["_k"], str_ty.clone(), move |dicts| {
+            let var = |n: &str| TExpr::new(TExprKind::Var(n.to_string()), Ty::Unit);
+            let app = |f: TExpr, a: TExpr, t: Ty| TExpr::new(
+                TExprKind::App(Box::new(f), Box::new(a)), t);
+            match &shape_owned {
+                Ty::Tuple(es) => {
+                    let lit = |s: &str| TExpr::new(TExprKind::Lit(TLiteral::Str(s.as_bytes().to_vec())), str_ty.clone());
+                    let cat = |l: TExpr, r: TExpr| TExpr::new(TExprKind::InfixApp {
+                        op: "<>".to_string(), lhs: Box::new(l), rhs: Box::new(r),
+                    }, str_ty.clone());
+                    let mut acc = lit("(");
+                    for i in 0..es.len() {
+                        if i > 0 {
+                            acc = cat(acc, lit(","));
+                        }
+                        let encoded = app(Self::dictform_elem_method(&dicts[i], "__hashKey"),
+                            Self::dictform_tuple_field("_k", i + 1), str_ty.clone());
+                        acc = cat(acc, encoded);
+                    }
+                    cat(acc, lit(")"))
+                }
+                Ty::List(_) => app(
+                    app(var("__mll_key_list"), Self::dictform_elem_method(&dicts[0], "__hashKey"), Ty::Unit),
+                    var("_k"), str_ty.clone(),
+                ),
+                _ => app(
+                    app(var("__mll_key_maybe"), Self::dictform_elem_method(&dicts[0], "__hashKey"), Ty::Unit),
+                    var("_k"), str_ty.clone(),
                 ),
             }
         })

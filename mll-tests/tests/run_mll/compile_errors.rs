@@ -6933,3 +6933,43 @@ main = do
 "#;
     compile(source, Path::new("."), &[]).expect("irrefutable binds compile in every monad");
 }
+
+// Hashable's instances are fixed (the scalar key types and the structural
+// shapes over them) and its methods are the compiler's own evidence — the
+// key encoder and order a HashMap write needs (W24). A program's
+// `instance Hashable T` could only be method-less: before this check it was
+// accepted silently, and a key of that type was hashed by table identity
+// or rejected at the first use. The rejection names the key types and
+// carries the note explaining what Hashable is.
+#[test]
+fn user_hashable_instance_is_rejected() {
+    let source = r#"
+data T = A | B deriving (Eq, Show)
+
+instance Hashable T where
+
+main :: IO ()
+main = print (hmLookup A (hmInsert A "a" hmEmpty))
+"#;
+    expect_compile_error(source, &[], &[
+        "cannot declare an instance of 'Hashable'",
+        "'T'",
+        "Int, Number, String, Bool, ByteString",
+        "note:",
+        "no GHC counterpart",
+    ]);
+}
+
+// The accept side: the builtin key types and the structural shapes keep
+// working without any instance declaration.
+#[test]
+fn builtin_hashable_keys_need_no_instance() {
+    let source = r#"
+main :: IO ()
+main = do
+    print (hmLookup (1 :: Int) (hmInsert 1 "a" hmEmpty))
+    print (hmLookup [Just (1 :: Int)] (hmInsert [Just 1] "b" hmEmpty))
+    print (hmLookup ("k", True) (hmInsert ("k", True) "c" hmEmpty))
+"#;
+    compile(source, Path::new("."), &[]).expect("builtin Hashable keys compile");
+}
