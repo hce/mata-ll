@@ -521,12 +521,21 @@ runtime); the generic pair is the library-programmable alternative and
 the substrate's proof of fidelity.
 
 A performance note, meant to be nothing more: a polymorphic function is
-specialised at up to 16 distinct types; past that the monomorphiser
-switches it (and the generic-instance methods it uses) to dictionary
-passing, which is meant to stay correct at any number of types — the
+specialised at up to 17 distinct types (the guard constant is 16, and
+the trip counts strictly more than it); the 18th distinct instantiation
+trips the cap, and from then on the monomorphiser switches it (and the
+generic-instance methods it uses) to dictionary passing — a function
+with no context, which has no dictionary form, to its one generic
+copy — which is meant to stay correct at any number of types: the
 dictionary-passing form carries every dictionary the declared context
-entails, superclasses included — but pays a runtime dictionary
-indirection where the first 16 got fully specialised code. Method
+entails, superclasses included, but pays a runtime dictionary
+indirection where the first 17 got fully specialised code. A use that
+widens the function's arity (a result type variable instantiated to a
+function type, `apply (\x y -> x + y) 1 2` against `apply :: (a -> b)
+-> a -> b`) is the one shape neither shared form can serve — every
+mata-ll function is one Lua function with one parameter per arrow of
+its type — so such a use keeps a copy per arrow shape, one per shape
+rather than per type. Method
 dispatch in the fallback is the same decision the specialising path
 makes, for every form a method use takes (named, infix on either
 operand, first-class, prefix negation, an overloaded literal): a
@@ -540,10 +549,16 @@ for `[k]`, `(k, Maybe k)` and the like — so the maps it builds are the
 maps a specialised body reads, and the other way round (the
 `Data.Map`/`Data.Set` wrappers are exactly such bodies once a program
 uses them at more than 16 key types). The fallback's remaining known
-gaps (an unconstrained function past the limit used at more arrows
-than it declares, a dictionary built before one of its methods itself
-switched to dictionary passing) are tracked as open defects, not
-documented deviations. A derived instance of a parameterized type takes
+gap (a dictionary built before one of its methods itself switched to
+dictionary passing) is tracked as an open defect, not a documented
+deviation. One limit is a documented deviation: more than 16 distinct
+widening shapes of one function — in practice only a polymorphic
+recursion whose result is a function at every level produces them
+(`f :: Int -> a -> a; f n x = f (n - 1) (\_ -> x) ()`, one arrow wider
+per level) — is rejected with an error naming the mechanism, because
+no finite set of copies serves it and the shared copy cannot take the
+extra arguments; GHC's curried calls need no copies there. A derived
+instance of a parameterized type takes
 part like a written one: `deriving` records GHC's derived context (the
 class at each parameter that occurs in a field, nothing for a phantom
 parameter), and the fallback composes the instance's dictionary from

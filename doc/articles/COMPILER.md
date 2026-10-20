@@ -186,7 +186,28 @@ constant folding (§7) can then recognize them.
   ad infinitum → unbounded specializations). For those cases the compiler
   falls back to passing typeclass dictionaries at runtime. So the model is
   "monomorphize by default, dictionary-pass when specialization wouldn't
-  terminate." The dictionary convention: one parameter per constraint of
+  terminate." The guard is a per-function cap (`SPEC_LIMIT`, 16): the
+  trip counts strictly more existing copies than the constant, so a
+  function keeps up to 17 specializations and the 18th distinct
+  instantiation trips it (`trip_spec_cap`). The trip purges every copy of
+  that function — by recorded name, never by prefix — and switches it to
+  the form that serves any number of instantiations: a constrained
+  function becomes dictionary-passing (`dict_passing_fns`; `run`'s
+  worklist rewrites its body and every call site), a constraint-free one,
+  which has no dictionary form, keeps its generic copy and is shared like
+  a prelude builtin (`arity_only_fns`). Call sites rewritten to a purged
+  copy before the trip are redirected afterwards (`purged_specs`). The
+  one use neither shared form can serve is an arity-widening one (a
+  result type variable instantiated to a function type — the N-ary
+  convention emits one parameter per arrow of the declared type, and the
+  body's own calls count arrows from the type they can see), so a widening
+  use keeps a copy keyed by its arrow shape (`arity_shape`,
+  `widening_copy`): an ordinary specialization of a shared function, a
+  dictionary-passing copy of a dictionary-passing one. One copy per shape
+  bounds them; more than 16 shapes of one function (a polymorphic
+  recursion returning a function at every level) is a compile error, the
+  one case with nothing to fall back to. The dictionary convention: one
+  parameter per constraint of
   the **superclass closure** of the declared context (`superclass_closure`
   in `mono.rs`; `Ord a` gives an `Ord` and an `Eq` dictionary, in that
   order), each dictionary one class's method table. The typechecker

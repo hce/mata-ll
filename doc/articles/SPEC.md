@@ -1774,9 +1774,10 @@ derives themselves keep their specialised native codecs, which encode
 and decode directly without building representation values (the generic
 pair costs measurably more at runtime, chiefly under LuaJIT). A single
 generic function is specialised once per type up to the monomorphiser's
-16-specialisation guard; past it the generic machinery switches to
-dictionary passing — still correct at any number of types, at some
-runtime indirection cost (see HASKDIFF).
+16-specialisation guard (17 copies are kept; the 18th distinct type
+trips it); past it the
+generic machinery switches to dictionary passing — still correct at any
+number of types, at some runtime indirection cost (see HASKDIFF).
 
 Differences from Haskell's `GHC.Generics`: the module is `Data.Generics`
 (not `GHC.Generics`); the metadata wrappers are the three distinct

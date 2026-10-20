@@ -6973,3 +6973,29 @@ main = do
 "#;
     compile(source, Path::new("."), &[]).expect("builtin Hashable keys compile");
 }
+
+// A polymorphic recursion whose result is a function at every level wants
+// a copy of the function at every arity: `f (n - 1) (\_ -> x) ()` uses `f`
+// at `a := () -> a`, one arrow wider each level. Past the cap a
+// constraint-free function keeps one copy per arrow shape of its widening
+// uses (spec_limit_arity_widening.mll), and this ladder exhausts those too;
+// nothing can serve it under the N-ary convention, so it is a compile error
+// naming the mechanism — not an unbounded compile, and not the generic
+// copy silently taking more arguments than it has parameters.
+#[test]
+fn arity_widening_ladder_past_the_limit_is_rejected() {
+    let source = r#"
+f :: Int -> a -> a
+f 0 x = x
+f n x = f (n - 1) (\_ -> x) ()
+
+main :: IO ()
+main = print (f 3 (7 :: Int))
+"#;
+    expect_compile_error(source, &[], &[
+        "'f' is used at more than 16 distinct function-type shapes",
+        "note:",
+        "one parameter per arrow of its type",
+        "polymorphic recursion",
+    ]);
+}

@@ -312,6 +312,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_dict_shadowed_callsites, "cases", "dict_shadowed_callsites.mll"),
         (ghc_oracle_dict_mutual_fallback, "cases", "dict_mutual_fallback.mll"),
         (ghc_oracle_spec_limit_wide, "cases", "spec_limit_wide.mll"),
+        (ghc_oracle_spec_limit_arity_widening, "cases", "spec_limit_arity_widening.mll"),
         (ghc_oracle_eta_padding_consumed, "cases", "eta_padding_consumed.mll"),
         (ghc_oracle_dict_dead_generic, "cases", "dict_dead_generic.mll"),
         (ghc_oracle_dict_two_constraints_one_class, "cases", "dict_two_constraints_one_class.mll"),

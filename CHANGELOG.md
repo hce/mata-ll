@@ -44,6 +44,44 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A polymorphic function past the specialization cap keeps a copy per
+  arrow shape, so a use that widens its arity still has code of its
+  arity** (crash / silent wrong output). Past the cap — 16 specializations;
+  the 17th distinct instantiation trips it — a constraint-free function
+  fell back to its one generic copy and a constrained one to its one
+  dictionary form, each emitted with the declared type's arrow count of
+  parameters. A use that instantiates a result type variable to a function
+  type (`apply (\x y -> x + y) 1 2` against `apply :: (a -> b) -> a -> b`)
+  passes more arguments than that, and the body applies its function-typed
+  parameter with fewer: `f x` called the two-parameter lambda with one
+  argument ("attempt to perform arithmetic on a nil value"; GHC: `3`). The
+  widening copies the shared prelude builtins always had (`const inc "x"
+  3`) were purged with everything else at the trip. Now a widening use of a
+  function past the cap gets a copy keyed by the use's arrow shape — one
+  per shape, not per type, so the copies cannot climb toward the cap again:
+  an ordinary specialization of a constraint-free function, a
+  dictionary-passing copy of a constrained one (`applyS :: Show a => (a ->
+  b) -> a -> b` at `b := Int -> Int`, used from `main` or from inside
+  another dictionary-form body) — and the uses specialized before the trip
+  are redirected to it rather than to the generic copy. A constraint-free
+  function past the cap is no longer treated as dictionary-passing at all:
+  its generic copy is an ordinary caller, so its calls into dictionary-form
+  functions get their dictionaries (`wrap _ _ = describe 1` with both past
+  the cap crashed with "attempt to index a number value (local
+  '__dict1_Show')"). A dictionary-passing call reached from a specialized
+  body matches its argument and result types with type families reduced
+  (`from x :: Rep T` bound the instance's variables to the wrong pieces,
+  and a `genericToJSON` past the cap failed to compile: "cannot build the
+  'Datatype' dictionary for type 'T'"). What has no fallback —
+  more than 16 distinct widening shapes of one function, which only a
+  polymorphic recursion returning a function at every level produces — is a
+  compile error naming the mechanism, instead of the generic copy silently
+  taking arguments it has no parameters for. The documentation now states
+  the cap as the code counts it: 17 copies are kept and the 18th distinct
+  instantiation trips (the constant is 16; the trip counts strictly more).
+  Found by the 2026-10 fresh-eyes review (T11). (GHC-goldened case
+  `spec_limit_arity_widening`.)
+
 - **A HashMap key is encoded by its type's `Hashable` evidence in every
   body, so a map written by a dictionary-passing body is read by a
   specialized one and the other way round** (silent wrong output /

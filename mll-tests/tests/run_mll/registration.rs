@@ -195,6 +195,7 @@ mll_test!(dict_shadowed_callsites, "dict_shadowed_callsites.mll");
 // instantiations than the cap, so specializations are purged and reverted
 // mid-compilation.
 mll_test!(spec_limit_wide, "spec_limit_wide.mll");
+mll_test!(spec_limit_arity_widening, "spec_limit_arity_widening.mll");
 // G4: mutual class-constrained polymorphic recursion (the discovery walk
 // drags the sibling into dictionary passing), a two-constraint fallback
 // (Show + Eq dicts in declaration order), and an outside partial

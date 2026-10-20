@@ -10,10 +10,13 @@ use crate::tir::*;
 use crate::typechecker::{Checker, ClassInfo, InstanceInfo};
 use crate::types::{Diagnostic, DiagnosticKind, InstHead, Ty, TyVar, TyConstraint, Subst, TyFamilies};
 
-/// Per-function cap on generated specializations. Trips on polymorphic
-/// recursion — each specialization demanding another at a bigger type — and
-/// switches the function to dictionary passing (see
-/// `Monomorphizer::trip_spec_cap`).
+/// Per-function cap on generated specializations: a function whose
+/// specializations already outnumber it trips the cap at its next distinct
+/// instantiation (see `Monomorphizer::trip_spec_cap`) — 17 copies are kept
+/// and the 18th instantiation trips. Guards polymorphic recursion —
+/// each specialization demanding another at a bigger type — by switching a
+/// constrained function to dictionary passing and a constraint-free one to
+/// its shared generic copy.
 const SPEC_LIMIT: usize = 16;
 
 /// The message and optional note of a "No instance" error. The note carries a
@@ -172,10 +175,16 @@ pub struct Monomorphizer {
     poly_fns: HashMap<String, TFunction>,
     /// Set of prelude/built-in names (don't try to specialize these)
     builtins: HashSet<String>,
-    /// The `builtins` that DO have a mata-ll body in this module (`id`,
-    /// `const`, `flip`, `reverse`, …). They are shared, not specialized per
-    /// instantiation — with one exception, `specialization_wanted`: a use
-    /// whose instantiation WIDENS the function's arity gets its own copy.
+    /// The functions whose ONE generic copy is shared by every use instead
+    /// of a specialization per instantiation — with one exception,
+    /// `specialization_wanted`: a use whose instantiation WIDENS the
+    /// function's arity gets its own copy, keyed by the use's arrow shape
+    /// (`arity_shape`), so there is one such copy per shape, not per type.
+    /// Members: the `builtins` that DO have a mata-ll body in this module
+    /// (`id`, `const`, `flip`, `reverse`, …), and every constraint-free
+    /// function that tripped the specialization cap (`trip_spec_cap`) — it
+    /// has no dictionary form to switch to, so its retained generic copy is
+    /// what serves its uses from then on, exactly like a builtin's.
     ///
     /// Codegen emits one Lua function per definition, with as many parameters
     /// as the DECLARED type has arrows, and every call site passes the
@@ -183,7 +192,10 @@ pub struct Monomorphizer {
     /// N-ary convention). The two agree for every other function because
     /// specialization gives each instantiation its own copy — but a shared
     /// `const :: a -> b -> a` used at `a := Int -> Int` is a two-parameter
-    /// Lua function handed three arguments, and Lua discards the third.
+    /// Lua function handed three arguments, and Lua discards the third; and
+    /// the body's own calls count arrows from the type they can see, so a
+    /// shared `apply f x = f x` at `b := Int -> Int` calls a two-parameter
+    /// `f` with one argument.
     arity_only_fns: HashSet<String>,
     /// Collected specializations: SpecKey -> mangled name
     specializations: HashMap<SpecKey, String>,
@@ -248,17 +260,23 @@ pub struct Monomorphizer {
     /// Source span of the clause currently being monomorphized. `None` inside
     /// compiler-synthesized clauses (derived instances, generated impls).
     cur_span: Option<Span>,
-    /// Functions that use dictionary-passing instead of monomorphization
+    /// Constrained functions that use dictionary-passing instead of
+    /// monomorphization. A constraint-free function that trips the
+    /// specialization cap has no dictionary form; it joins
+    /// `arity_only_fns` instead.
     dict_passing_fns: HashSet<String>,
     /// Distinct instantiation count at the moment each function tripped the
-    /// specialization cap (see `trip_spec_cap`) — reported by the
-    /// first-class-use diagnostic so the cause is legible at the use site.
+    /// specialization cap (see `trip_spec_cap`), constrained or not — the
+    /// record that a function HAS tripped — reported by the first-class-use
+    /// diagnostic so the cause is legible at the use site.
     dict_passing_counts: HashMap<String, usize>,
     /// Specializations deleted when their function tripped the specialization
-    /// limit: purged mangled name -> original function name. Call sites
-    /// rewritten to these names BEFORE the limit tripped must be reverted to
-    /// the original (generic or dictionary-passing) function in `run` —
-    /// otherwise they reference functions that no longer exist.
+    /// limit: purged mangled name -> the function that now serves its uses:
+    /// the original (generic or dictionary-passing) function, or, for an
+    /// arity-widening use, the arrow-shape copy regenerated at the trip
+    /// (`widening_copy`). Call sites rewritten to a purged name
+    /// BEFORE the limit tripped are redirected in `run` — otherwise they
+    /// reference functions that no longer exist.
     purged_specs: HashMap<String, String>,
     /// Typeclass constraints per function: the superclass closure of the
     /// declared context, in `superclass_closure` order — one entry per
@@ -616,11 +634,13 @@ impl Monomorphizer {
         let mut result_fns: Vec<TFunction> = functions;
         result_fns.append(&mut self.generated);
 
-        // Revert references to purged specializations. When a function trips
-        // the specialization limit mid-pass, call sites monomorphized EARLIER
-        // already reference its (now deleted) specializations; point them back
-        // at the original function so the dictionary-passing rewrite below —
-        // or the retained generic copy — handles them.
+        // Redirect references to purged specializations. When a function
+        // trips the specialization limit mid-pass, call sites monomorphized
+        // EARLIER already reference its (now deleted) specializations; point
+        // them at what now serves them (`purged_specs`): the original
+        // function, so the dictionary-passing rewrite below — or the
+        // retained generic copy — handles them, or the arrow-shape copy
+        // regenerated at the trip for an arity-widening use.
         if !self.purged_specs.is_empty() {
             for func in result_fns.iter_mut().chain(instance_fns.iter_mut()) {
                 for clause in &mut func.clauses {
@@ -1565,62 +1585,213 @@ impl Monomorphizer {
         if self.is_polymorphic(fn_ty) || !self.poly_fns.contains_key(base) {
             return base.to_string();
         }
-        if self.dict_passing_fns.contains(base) {
-            return base.to_string();
-        }
-        let key = SpecKey { name: base.to_string(), ty: fn_ty.clone() };
-        if let Some(existing) = self.specializations.get(&key) {
-            return existing.clone();
-        }
-        // The same polymorphic-recursion guard as the generic call path:
-        // switch this instance method to dictionary passing so EVERY caller
-        // routes through the composed dictionary form. Returning the raw
-        // original here instead (the old behavior) left the 17th-and-later
+        // Past the cap, the shared form serves every caller: the composed
+        // dictionary form of a constrained method, the generic copy of a
+        // constraint-free one. Returning the raw original once the cap
+        // tripped WITHOUT the switch (the old behavior) left the later
         // types calling a body whose still-polymorphic method uses resolve
         // to nothing at runtime — a generic function (gSum over the C1 of
         // each deriving constructor, gFields over each S1 field, …) died
-        // with a nil call as soon as the program passed 16 of them.
-        if self.trip_spec_cap(base) {
+        // with a nil call as soon as the program passed the cap.
+        if self.dict_passing_fns.contains(base) || self.arity_only_fns.contains(base) {
             return base.to_string();
         }
-        let mangled = self.mangle_name(base, fn_ty);
-        // Insert before generating the body so a recursive field of the same
-        // type resolves to this same specialization instead of looping.
-        self.specializations.insert(key, mangled.clone());
-        self.generate_specialization(base, &mangled, fn_ty);
-        mangled
+        self.specialize_at(base, fn_ty).unwrap_or_else(|| base.to_string())
     }
 
-    /// True when `name` has just tripped the per-function specialization cap
-    /// (a polymorphic-recursion symptom: each specialization demands another
-    /// at a bigger type). Flags the function as dictionary-passing and purges
-    /// exactly the specializations OF THIS function — identified by their
-    /// recorded mangled names, never by name prefix, which would also delete
-    /// specializations of a sibling `foo_bar` when `foo` trips the limit.
-    /// Call sites already rewritten to a purged name are reverted to the
-    /// original function in `run` via `purged_specs`.
+    /// The specialization of `name` at `spec_ty`: the existing one, or a
+    /// freshly generated copy — `None` when the request trips the cap
+    /// (`trip_spec_cap`), in which case the use stays by name. The one path
+    /// every specialization request takes (a use in the main walk, an
+    /// instance method, the regeneration of a widening copy at a trip), so
+    /// the insert-before-generate discipline — a recursive use inside the
+    /// body finds this same copy instead of looping — lives in one place.
+    fn specialize_at(&mut self, name: &str, spec_ty: &Ty) -> Option<String> {
+        let key = SpecKey { name: name.to_string(), ty: spec_ty.clone() };
+        if let Some(existing) = self.specializations.get(&key) {
+            return Some(existing.clone());
+        }
+        if self.trip_spec_cap(name) {
+            return None;
+        }
+        let mangled = self.mangle_name(name, spec_ty);
+        // `mangle_name` is stable per (base, type): a copy regenerated at
+        // the key of a purged one gets the purged name back, and the
+        // references made to that name before the trip are right for it
+        // (same key, same code) — they must stay, not be redirected.
+        self.purged_specs.remove(&mangled);
+        self.specializations.insert(key, mangled.clone());
+        self.generate_specialization(name, &mangled, spec_ty);
+        Some(mangled)
+    }
+
+    /// True when `name` has just tripped the per-function specialization
+    /// cap: more than `SPEC_LIMIT` specializations exist and another
+    /// distinct instantiation is wanted — a polymorphic-recursion symptom (each
+    /// specialization demands another at a bigger type) or simply one
+    /// genuine instantiation too many. Purges exactly the specializations
+    /// OF THIS function — identified by their recorded mangled names, never
+    /// by name prefix, which would also delete specializations of a sibling
+    /// `foo_bar` when `foo` trips the limit — and switches the function to
+    /// the form that serves any number of instantiations: dictionary
+    /// passing for a constrained function; for a constraint-free one, which
+    /// has no dictionary form, its retained generic copy, shared the way a
+    /// prelude builtin's is (`arity_only_fns`).
+    ///
+    /// Neither shared form can serve a use that widens the function's
+    /// arity (see `arity_only_fns`), so every purged widening
+    /// specialization is replaced by a copy at its arrow shape
+    /// (`widening_copy`) — one per shape, not per type — and a call site
+    /// already rewritten to a purged name is pointed, in `run` via
+    /// `purged_specs`, at whatever now serves it: the original, or that
+    /// shape copy.
+    ///
+    /// A function that is already shared or dictionary-passing (a builtin,
+    /// or past its trip) can only grow shape copies, and more than
+    /// `SPEC_LIMIT` distinct widening shapes means a polymorphic recursion
+    /// that widens the arity at every level: no finite set of copies serves
+    /// it and nothing is left to fall back to, so it is reported (once) and
+    /// no further copy is generated — the trip cannot loop.
     fn trip_spec_cap(&mut self, name: &str) -> bool {
+        if self.arity_only_fns.contains(name) || self.dict_passing_fns.contains(name) {
+            // Already shared: the only copies it can still want are the
+            // arrow-shape copies of its widening uses (counted apart from
+            // any specialization that predates a flag without a trip).
+            let shapes = self.specializations.keys()
+                .filter(|k| k.name == name && self.arity_widening(name, &k.ty))
+                .count();
+            if shapes <= SPEC_LIMIT {
+                return false;
+            }
+            self.push_arity_shape_limit_error(name);
+            return true;
+        }
         let count = self.specializations.keys().filter(|k| k.name == name).count();
         if count <= SPEC_LIMIT {
             return false;
         }
-        self.dict_passing_fns.insert(name.to_string());
-        // The count at trip time, for the first-class-use diagnostic: it
-        // tells the user WHICH way the cap was crossed — a runaway ladder
-        // (polymorphic recursion) or simply a 17th genuine instantiation —
-        // and that adding an instantiation elsewhere is what broke this
-        // unrelated-looking use site.
-        self.dict_passing_counts.insert(name.to_string(), count);
-        let purged: HashSet<String> = self.specializations.iter()
+        // The count at trip time — the existing copies plus the
+        // instantiation that crossed the cap — for the first-class-use
+        // diagnostic: it tells the user WHICH way the cap was crossed — a
+        // runaway ladder (polymorphic recursion) or simply an 18th genuine
+        // instantiation — and that adding an instantiation elsewhere is
+        // what broke this unrelated-looking use site.
+        self.dict_passing_counts.insert(name.to_string(), count + 1);
+        let shared = self.fn_constraints.get(name).is_none();
+        if shared {
+            self.arity_only_fns.insert(name.to_string());
+        } else {
+            self.dict_passing_fns.insert(name.to_string());
+        }
+        let mut purged: Vec<(SpecKey, String)> = self.specializations.iter()
             .filter(|(k, _)| k.name == name)
-            .map(|(_, v)| v.clone())
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         self.specializations.retain(|k, _| k.name != name);
-        self.generated.retain(|f| !purged.contains(&f.name));
-        for p in purged {
-            self.purged_specs.insert(p, name.to_string());
+        let purged_names: HashSet<String> = purged.iter().map(|(_, v)| v.clone()).collect();
+        self.generated.retain(|f| !purged_names.contains(&f.name));
+        // Regenerated in a fixed order: the shape copies are emitted in the
+        // order they are generated, and the HashMap's order is not stable.
+        purged.sort_by(|a, b| a.1.cmp(&b.1));
+        for (key, mangled) in purged {
+            let target = if self.arity_widening(name, &key.ty) {
+                self.widening_copy(name, &key.ty).unwrap_or_else(|| name.to_string())
+            } else {
+                name.to_string()
+            };
+            if target != mangled {
+                self.purged_specs.insert(mangled, target);
+            }
         }
         true
+    }
+
+    /// The copy that serves a use of shared or dictionary-passing `name` at
+    /// arity-widening `use_ty`: the copy at the use's arrow shape
+    /// (`arity_shape`), generated on first demand. For a shared function it
+    /// is an ordinary specialization at the shape. For a dictionary-passing
+    /// function it is a dictionary-passing function in its own right at the
+    /// shape — the original's constraints over the original's variables,
+    /// which the shape keeps — so `run`'s worklist rewrites its body to
+    /// dictionary form exactly as it does the original's, and a call site
+    /// builds the same dictionaries for it (`dictify_use`), saturating its
+    /// own arrow count: the one dictionary form at the declared arrow count
+    /// cannot serve a widening use any more than a generic copy can (see
+    /// `arity_only_fns`). `None` when the shape copies are exhausted
+    /// (`trip_spec_cap`).
+    fn widening_copy(&mut self, name: &str, use_ty: &Ty) -> Option<String> {
+        let shape = self.arity_shape(name, use_ty);
+        if !self.dict_passing_fns.contains(name) {
+            return self.specialize_at(name, &shape);
+        }
+        let key = SpecKey { name: name.to_string(), ty: shape.clone() };
+        if let Some(existing) = self.specializations.get(&key) {
+            return Some(existing.clone());
+        }
+        if self.trip_spec_cap(name) {
+            return None;
+        }
+        let poly_fn = self.poly_fns.get(name)?.clone();
+        let mangled = self.mangle_name(name, &shape);
+        self.purged_specs.remove(&mangled);
+        self.specializations.insert(key, mangled.clone());
+        let subst = Self::compute_body_subst(&poly_fn, &shape);
+        let mut copy = poly_fn;
+        copy.name = mangled.clone();
+        copy.ty = shape;
+        copy.clauses = copy.clauses.into_iter()
+            .map(|c| c.apply_subst(&subst))
+            .collect();
+        copy.specialized = true;
+        copy.spec_origin = Some(name.to_string());
+        if let Some(cs) = self.fn_constraints.get(name).cloned() {
+            self.fn_constraints.insert(mangled.clone(), cs);
+        }
+        if let Some(args) = self.fn_constraint_args.get(name).cloned() {
+            self.fn_constraint_args.insert(mangled.clone(), args);
+        }
+        self.dict_passing_fns.insert(mangled.clone());
+        // Its body is not monomorphized here: the dictionary rewrite starts
+        // from the pristine copy registered in `poly_fns`, as for every
+        // dictionary-passing function. The placeholder pushed to `generated`
+        // is what `run`'s worklist finds by name and rewrites in place.
+        self.poly_fns.insert(mangled.clone(), copy.clone());
+        self.generated.push(copy);
+        Some(mangled)
+    }
+
+    /// Report, once per function, that `name` wants more than `SPEC_LIMIT`
+    /// arrow-shape copies (see `trip_spec_cap`).
+    fn push_arity_shape_limit_error(&mut self, name: &str) {
+        let msg = format!(
+            "'{}' is used at more than {} distinct function-type shapes",
+            name, SPEC_LIMIT);
+        if self.errors.iter().any(|e| matches!(&e.kind, DiagnosticKind::Other(m) if *m == msg)) {
+            return;
+        }
+        self.errors.push(Diagnostic {
+            kind: DiagnosticKind::Other(msg),
+            context: self.cur_ctx.clone(),
+            span: self.cur_span,
+            file: None,
+            notes: vec![
+                format!(
+                    "a use that instantiates a result type variable of '{}' to a \
+                     function type needs a copy of it with that many parameters \
+                     (mata-ll compiles every function as one Lua function with \
+                     one parameter per arrow of its type, and GHC's curried \
+                     calls need no such copy); one copy per distinct shape is \
+                     kept, up to the specialization limit of {}. Past it there \
+                     is nothing to fall back to: the shared generic copy cannot \
+                     take the extra arguments.",
+                    name, SPEC_LIMIT),
+                "this many shapes is almost always a polymorphic recursion whose \
+                 result is a function at every level. Restructure the \
+                 recursion so its arity does not grow, or wrap the widened \
+                 uses in a function with a fixed type.".to_string(),
+            ],
+            baseline: false, excerpt: None, names: None,
+        });
     }
 
     /// Clone the polymorphic original of `name` at `fn_ty`, substitute its
@@ -1639,9 +1810,20 @@ impl Monomorphizer {
             .collect();
         spec_fn.specialized = true;
         spec_fn.spec_origin = Some(name.to_string());
+        let tripped_before = self.dict_passing_counts.contains_key(name);
         self.gen_stack.push((name.to_string(), mangled.to_string()));
         let spec_fn = self.mono_function(spec_fn);
         self.gen_stack.pop();
+        // The function tripped the cap WHILE this copy was being generated
+        // (a polymorphic-recursion ladder trips from inside its own
+        // generation): the copy was purged, every reference to it is
+        // redirected in `run`, and the shared form — or an arrow-shape copy
+        // regenerated under this same name — serves its uses. Emitting it
+        // would leave a dead function, or a second definition under the
+        // regenerated copy's name.
+        if !tripped_before && self.dict_passing_counts.contains_key(name) {
+            return;
+        }
         self.generated.push(spec_fn);
     }
 
@@ -2024,6 +2206,24 @@ impl Monomorphizer {
                 {
                     return rewritten;
                 }
+                // A use of a DICTIONARY-PASSING function that widens its
+                // arity: the one dictionary form is emitted at the declared
+                // arrow count, which cannot serve it (see `arity_only_fns`),
+                // so the use takes the dictionary-passing copy at its arrow
+                // shape, which the dictionary rewrite then calls like any
+                // other dictionary-passing function — at its own arrow
+                // count. The copy's own body re-monomorphizes here too; a
+                // recursive use at the same shape finds the same copy.
+                if self.dict_passing_fns.contains(name)
+                    && !self.locals.contains(name)
+                    && self.poly_fns.contains_key(name)
+                    && self.arity_widening(name, &ty)
+                {
+                    let name = name.clone();
+                    if let Some(copy) = self.widening_copy(&name, &ty) {
+                        return TExpr { kind: TExprKind::Var(copy), ty };
+                    }
+                }
                 let poly_use = self.poly_fns.contains_key(name)
                     && !self.locals.contains(name)
                     && !self.dict_passing_fns.contains(name);
@@ -2094,28 +2294,42 @@ impl Monomorphizer {
                 // `f :: Show a => a -> b -> String` must run `show` at `T`,
                 // which only a copy specialized at `T -> [_w0] -> String`
                 // does — the generic copy's erased `show` printed `(1)`.
+                // A shared function (`arity_only_fns`) is specialized ONLY
+                // by a widening use, and that copy is keyed by the use's
+                // arrow shape rather than its type (`arity_shape`): the
+                // shape is all the copy exists to fix, so one copy serves
+                // every use of that shape and the copies stay few — a
+                // constraint-free function past the cap would otherwise
+                // start a second climb toward it.
                 if poly_use && self.specialization_wanted(name, &ty) {
-                    let spec_ty = if residual {
+                    let spec_ty = if self.arity_only_fns.contains(name) {
+                        self.arity_shape(name, &ty)
+                    } else if residual {
                         Self::canonicalize_vars(&ty)
                     } else {
                         ty.clone()
                     };
-                    let key = SpecKey { name: name.clone(), ty: spec_ty.clone() };
-                    let mangled = if let Some(existing) = self.specializations.get(&key) {
-                        existing.clone()
-                    } else {
-                        // Polymorphic recursion trips the specialization cap;
-                        // the reference stays by name and run()'s worklist
-                        // routes it through dictionary passing.
-                        if self.trip_spec_cap(name) {
+                    match self.specialize_at(name, &spec_ty) {
+                        Some(mangled) => TExprKind::Var(mangled),
+                        // The specialization cap tripped on this very use.
+                        // The shared form the trip switched the function
+                        // to serves it — run()'s worklist routes a
+                        // constrained one through dictionary passing, a
+                        // constraint-free one is its generic copy — unless
+                        // this use widens the arity, which only an
+                        // arrow-shape copy serves; when those are
+                        // exhausted too the trip reported it and the
+                        // reference stays by name.
+                        None => {
+                            if self.arity_widening(name, &ty) {
+                                let name = name.clone();
+                                if let Some(copy) = self.widening_copy(&name, &ty) {
+                                    return TExpr { kind: TExprKind::Var(copy), ty };
+                                }
+                            }
                             return TExpr { kind: expr.kind, ty };
                         }
-                        let mangled = self.mangle_name(name, &spec_ty);
-                        self.specializations.insert(key, mangled.clone());
-                        self.generate_specialization(name, &mangled, &spec_ty);
-                        mangled
-                    };
-                    TExprKind::Var(mangled)
+                    }
                 } else {
                     expr.kind
                 }
@@ -2960,6 +3174,10 @@ impl Monomorphizer {
     fn rewrite_dict_passing_fn(&mut self, func: &mut TFunction) {
         let constraints = match self.fn_constraints.get(&func.name) {
             Some(cs) => cs.clone(),
+            // Defensive: every flag into `dict_passing_fns` is gated on a
+            // context (a constraint-free function past the cap is a shared
+            // `arity_only_fns` member instead), so there is nothing to
+            // rewrite a context-less function to.
             None => return,
         };
         // Start from the PRISTINE polymorphic body, not the main-walk mono'd
@@ -3134,7 +3352,7 @@ impl Monomorphizer {
                         let decl_ty = self.poly_fns.get(&call_name).map(|f| f.ty.clone());
                         let mut bind: HashMap<String, Ty> = HashMap::new();
                         if let Some(dt) = &decl_ty {
-                            Self::match_fn_args(dt, &args, &mut bind);
+                            self.match_fn_args(dt, &args, &mut bind);
                             // An argument cannot carry a variable that sits
                             // in an unapplied parameter or the RESULT: bind
                             // those by matching the remaining declared type
@@ -3158,7 +3376,8 @@ impl Monomorphizer {
                                     }
                                 }
                                 let remaining = self.blank_family_apps(remaining);
-                                Self::collect_subst_by_name(&remaining, &ty, &mut bind);
+                                let node_ty = self.reduce_families(&ty).unwrap_or_else(|| ty.clone());
+                                Self::collect_subst_by_name(&remaining, &node_ty, &mut bind);
                             }
                         }
                         let mut dict_args = self.build_body_dict_args(&constraints, &bind, ev);
@@ -3419,6 +3638,104 @@ impl Monomorphizer {
             Self::spine_arrow_count(use_ty) > Self::spine_arrow_count(&f.ty))
     }
 
+    /// The arrow shape of a use of shared (`arity_only_fns`) or
+    /// dictionary-passing `name` at `use_ty`: the key of the copy that
+    /// serves every use of that shape (`widening_copy`). It is the declared
+    /// type with the image of each UNCONSTRAINED variable reduced to its
+    /// arrow skeleton (`arrow_skeleton`); a constrained variable stays the
+    /// declared variable itself, so the shape of a constrained function is
+    /// a constrained polymorphic type over the original's variables, which
+    /// its dictionary form is built from. The body can observe nothing
+    /// about an unconstrained variable's image except its arrows, which the
+    /// N-ary convention turns into parameters and flat calls
+    /// (`residual_vars_dead` makes the same argument), so the copy compiled
+    /// at the shape is the right code for every type of that shape, and a
+    /// function has as many copies as it has widening shapes — a few —
+    /// rather than one per type. Deterministic: the skeleton variables are
+    /// numbered over the declared variables in name order. Falls back to
+    /// the canonicalized use type when the declared type does not match the
+    /// use (defensive: a checked use type is an instance of it).
+    fn arity_shape(&self, name: &str, use_ty: &Ty) -> Ty {
+        let fallback = Self::canonicalize_vars(use_ty);
+        let Some(poly_fn) = self.poly_fns.get(name) else { return fallback };
+        let mut live: HashSet<String> = HashSet::new();
+        if let Some(cs) = self.fn_constraints.get(name) {
+            live.extend(cs.iter().map(|c| c.type_var.clone()));
+        }
+        if let Some(args) = self.fn_constraint_args.get(name) {
+            for (_, arg) in args {
+                live.extend(arg.free_vars().into_iter().map(|v| v.name));
+            }
+        }
+        let mut images: HashMap<String, Ty> = HashMap::new();
+        Self::collect_subst_by_name(&poly_fn.ty, use_ty, &mut images);
+        let mut images: Vec<(String, Ty)> = images.into_iter().collect();
+        images.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut fresh = 0u32;
+        let mut shape = poly_fn.ty.clone();
+        for (declared, image) in &images {
+            if live.contains(declared) {
+                continue;
+            }
+            let to = Self::arrow_skeleton(image, &mut fresh);
+            shape = Self::subst_ty_by_name(&shape, declared, &to);
+        }
+        if Self::spine_arrow_count(&shape) != Self::spine_arrow_count(use_ty) {
+            return fallback;
+        }
+        shape
+    }
+
+    /// `ty` with every arrow-free subterm replaced by a fresh variable, so
+    /// only its arrows (and the constructor heads over them) survive — see
+    /// `arity_shape`. `Maybe (Int -> Int)` becomes `Maybe (_s0 -> _s1)`,
+    /// `Int` becomes `_s0`.
+    fn arrow_skeleton(ty: &Ty, fresh: &mut u32) -> Ty {
+        fn has_arrow(ty: &Ty) -> bool {
+            match ty {
+                Ty::Arrow(..) => true,
+                Ty::App(a, b) => has_arrow(a) || has_arrow(b),
+                Ty::List(t) | Ty::IO(t) | Ty::LuaIO(_, t) | Ty::Forall(_, t) => has_arrow(t),
+                Ty::Tuple(ts) => ts.iter().any(has_arrow),
+                Ty::Var(_) | Ty::Con(_) | Ty::Unit | Ty::Skolem(..) | Ty::Promoted(_) => false,
+            }
+        }
+        // The head of a type application is kept as it is: a fresh
+        // variable in constructor position would be a higher-kinded hole.
+        fn head(ty: &Ty, fresh: &mut u32) -> Ty {
+            match ty {
+                Ty::App(a, b) => Ty::App(
+                    Box::new(head(a, fresh)),
+                    Box::new(Monomorphizer::arrow_skeleton(b, fresh)),
+                ),
+                Ty::Var(_) | Ty::Con(_) | Ty::Skolem(..) | Ty::Promoted(_) => ty.clone(),
+                other => Monomorphizer::arrow_skeleton(other, fresh),
+            }
+        }
+        if !has_arrow(ty) {
+            let n = *fresh;
+            *fresh += 1;
+            return Ty::Var(TyVar { name: format!("_s{n}"), id: n });
+        }
+        match ty {
+            Ty::Arrow(a, b, m) => Ty::Arrow(
+                Box::new(Self::arrow_skeleton(a, fresh)),
+                Box::new(Self::arrow_skeleton(b, fresh)),
+                *m,
+            ),
+            Ty::App(a, b) => Ty::App(
+                Box::new(head(a, fresh)),
+                Box::new(Self::arrow_skeleton(b, fresh)),
+            ),
+            Ty::List(t) => Ty::List(Box::new(Self::arrow_skeleton(t, fresh))),
+            Ty::IO(t) => Ty::IO(Box::new(Self::arrow_skeleton(t, fresh))),
+            Ty::LuaIO(s, t) => Ty::LuaIO(s.clone(), Box::new(Self::arrow_skeleton(t, fresh))),
+            Ty::Forall(vs, t) => Ty::Forall(vs.clone(), Box::new(Self::arrow_skeleton(t, fresh))),
+            Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| Self::arrow_skeleton(t, fresh)).collect()),
+            Ty::Var(_) | Ty::Con(_) | Ty::Unit | Ty::Skolem(..) | Ty::Promoted(_) => ty.clone(),
+        }
+    }
+
     /// Are all the type variables still free in `use_ty` DEAD for a use of
     /// polymorphic `name` there? A residual variable is dead when it lies
     /// only in the image of declared type variables the function's context
@@ -3566,8 +3883,9 @@ impl Monomorphizer {
                     Some(n) => format!(
                         "'{}' is compiled with dictionary passing: it reached \
                          {} distinct type instantiations (the limit is {}, a \
-                         guard against polymorphic-recursion ladders — a 17th \
-                         genuine instantiation trips it the same way). Note \
+                         guard against polymorphic-recursion ladders — one \
+                         genuine instantiation too many trips it the same \
+                         way). Note \
                          that the instantiation that crossed the limit may be \
                          far from this use site.",
                         name, n, SPEC_LIMIT),
@@ -3619,7 +3937,7 @@ impl Monomorphizer {
         // family's reduct — see `class_var_binding`).
         let mut subst: HashMap<String, Ty> = HashMap::new();
         if let Some(ft) = &poly_fn_ty {
-            Self::match_fn_args(ft, &args, &mut subst);
+            self.match_fn_args(ft, &args, &mut subst);
             let mut remaining = ft;
             for _ in 0..args.len().min(Self::spine_arrow_count(ft)) {
                 if let Ty::Arrow(_, to, _) = remaining {
@@ -3627,7 +3945,11 @@ impl Monomorphizer {
                 }
             }
             let remaining = self.blank_family_apps(remaining);
-            Self::collect_subst_by_name(&remaining, &node_ty, &mut subst);
+            // The node type is reduced like the argument types
+            // (`match_fn_args`): a specialized body's result type can be
+            // an unreduced family application too.
+            let node_red = self.reduce_families(&node_ty).unwrap_or_else(|| node_ty.clone());
+            Self::collect_subst_by_name(&remaining, &node_red, &mut subst);
         }
         // For a COMPOUND constraint (`GEncode (Rep a)`) the recorded
         // argument type drives construction: substitute this use's types
@@ -3774,7 +4096,7 @@ impl Monomorphizer {
     fn resolve_constraint_type(&self, type_var: &str, poly_fn_ty: Option<&Ty>, args: &[TExpr]) -> Ty {
         if let Some(fn_ty) = poly_fn_ty {
             let mut subst = HashMap::new();
-            Self::match_fn_args(fn_ty, args, &mut subst);
+            self.match_fn_args(fn_ty, args, &mut subst);
             if let Some(ty) = subst.get(type_var) { return ty.clone(); }
         }
         if !args.is_empty()
@@ -3782,11 +4104,20 @@ impl Monomorphizer {
         Ty::Con("_".into())
     }
 
-    fn match_fn_args(fn_ty: &Ty, args: &[TExpr], subst: &mut HashMap<String, Ty>) {
+    /// Bind the declared parameter types of `fn_ty` against the supplied
+    /// arguments' types, by variable name. An argument's type is reduced
+    /// first: a specialized body carries the family applications its
+    /// substitution produced (`from x :: Rep Person`), and matched as they
+    /// are they bind an instance's variables to the wrong pieces — `D1 d f`
+    /// against `Rep Person` bound `f := Person` and left `d` to a fallback,
+    /// so the `Datatype`/`GSum` dictionaries for a dictionary-passing
+    /// `gEncode` were built at `Person` and resolved to nothing.
+    fn match_fn_args(&self, fn_ty: &Ty, args: &[TExpr], subst: &mut HashMap<String, Ty>) {
         let mut param_ty = fn_ty;
         for arg in args {
             if let Ty::Arrow(from, to, _) = param_ty {
-                Self::collect_subst_by_name(from, &arg.ty, subst);
+                let arg_ty = self.reduce_families(&arg.ty).unwrap_or_else(|| arg.ty.clone());
+                Self::collect_subst_by_name(from, &arg_ty, subst);
                 param_ty = to;
             }
         }
@@ -5026,5 +5357,81 @@ mod first_class_dict_error_tests {
         let uncounted = format!("{}", m.errors[1]);
         assert!(uncounted.contains(&format!("specialization limit of {}", SPEC_LIMIT)),
             "the fallback note must still name the limit, got: {uncounted}");
+    }
+}
+
+#[cfg(test)]
+mod spec_cap_tests {
+    use super::*;
+
+    fn key(name: &str, i: u32) -> SpecKey {
+        SpecKey { name: name.into(), ty: Ty::fun(&[Ty::Con(format!("T{i}"))], Ty::Unit) }
+    }
+
+    /// The trip counts strictly more than `SPEC_LIMIT` existing copies:
+    /// with 16 of them a 17th is still generated, and the 18th distinct
+    /// instantiation trips (the documented "16" is the constant, not the
+    /// copy count — pinned here so the prose and the code say the same
+    /// thing). The trip records the count including the instantiation
+    /// that crossed the cap, purges the copies, and switches a
+    /// constraint-free function to the shared generic copy
+    /// (`arity_only_fns`), a constrained one to dictionary passing.
+    #[test]
+    fn cap_trips_at_the_eighteenth_instantiation() {
+        let checker = crate::typechecker::Checker::new();
+        let mut m = Monomorphizer::new(&checker);
+        for i in 0..(SPEC_LIMIT as u32) {
+            m.specializations.insert(key("plain", i), format!("plain·{i}"));
+        }
+        assert!(!m.trip_spec_cap("plain"), "{} copies leave room for one more", SPEC_LIMIT);
+        m.specializations.insert(key("plain", 99), "plain·99".into());
+        assert!(m.trip_spec_cap("plain"), "the {}th distinct instantiation trips", SPEC_LIMIT + 2);
+        assert_eq!(m.dict_passing_counts.get("plain"), Some(&(SPEC_LIMIT + 2)));
+        assert!(m.arity_only_fns.contains("plain"), "a constraint-free function is shared");
+        assert!(!m.dict_passing_fns.contains("plain"), "it has no dictionary form");
+        assert!(m.specializations.keys().all(|k| k.name != "plain"), "its copies are purged");
+        assert_eq!(m.purged_specs.get("plain·99").map(String::as_str), Some("plain"));
+
+        m.fn_constraints.insert("shown".into(), vec![TyConstraint {
+            class_name: "Show".into(), type_var: "a".into(),
+        }]);
+        for i in 0..(SPEC_LIMIT as u32 + 1) {
+            m.specializations.insert(key("shown", i), format!("shown·{i}"));
+        }
+        assert!(m.trip_spec_cap("shown"));
+        assert!(m.dict_passing_fns.contains("shown"), "a constrained function goes dictionary-passing");
+        assert!(!m.arity_only_fns.contains("shown"));
+    }
+
+    /// A function that is already shared or dictionary-passing can only
+    /// want arrow-shape copies; past `SPEC_LIMIT` of those the trip reports
+    /// the exhaustion once and generates nothing — it never purges or
+    /// switches a second time.
+    #[test]
+    fn shared_function_shape_copies_are_capped_with_an_error() {
+        let checker = crate::typechecker::Checker::new();
+        let mut m = Monomorphizer::new(&checker);
+        m.arity_only_fns.insert("shared".into());
+        m.poly_fns.insert("shared".into(), TFunction {
+            name: "shared".into(),
+            ty: Ty::fun(&[Ty::Var(TyVar { name: "a".into(), id: 0 })], Ty::Var(TyVar { name: "b".into(), id: 1 })),
+            clauses: vec![],
+            specialized: false,
+            spec_origin: None,
+            dict_params: vec![],
+            derived_strict: false,
+        });
+        for i in 0..(SPEC_LIMIT as u32 + 1) {
+            // one more arrow than the declared type: a widening shape
+            let ty = Ty::fun(&[Ty::Con("A".into()), Ty::Con(format!("T{i}"))], Ty::Unit);
+            m.specializations.insert(SpecKey { name: "shared".into(), ty }, format!("shared·{i}"));
+        }
+        assert!(m.trip_spec_cap("shared"));
+        assert!(m.trip_spec_cap("shared"));
+        assert_eq!(m.errors.len(), 1, "reported once");
+        let text = format!("{}", m.errors[0]);
+        assert!(text.contains(&format!("more than {} distinct function-type shapes", SPEC_LIMIT)), "got: {text}");
+        assert_eq!(m.specializations.len(), SPEC_LIMIT + 1, "nothing purged");
+        assert!(m.purged_specs.is_empty());
     }
 }
