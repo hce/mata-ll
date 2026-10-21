@@ -457,6 +457,10 @@ mll_test!(first_clause_column_order, "first_clause_column_order.mll");
 // value whose RHS is a guarded case under padding emits an ordinary match
 // (found while fixing the where-group emission).
 mll_test!(eta_where_value, "eta_where_value.mll");
+// A callee's strictness row applies to a call only when the call saturates
+// the row (L8): a partial application builds a closure and forces nothing,
+// so `f x = seq (g x) 1` is lazy in x; the saturated twins keep their force.
+mll_test!(partial_application_rows, "partial_application_rows.mll");
 mll_test!(seq_action_value, "seq_action_value.mll");
 mll_test!(rank2, "rank2.mll");
 

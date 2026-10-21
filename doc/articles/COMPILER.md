@@ -345,6 +345,17 @@ body — those can be passed eagerly (no thunk) and forced at entry.
   rows are consistent (`analyze`). The greatest fixed point — rather than the
   least — is what lets self- and mutually-recursive parameters (notably tail
   accumulators) be recognized as strict.
+- **A row applies to a call only when the call saturates it.** A row says
+  what the callee forces when it *runs*; a partial application builds a
+  closure and runs nothing, so `f x = seq (g x) 1` is lazy in `x` for a
+  two-parameter `g` (GHC prints 1 for `f undefined`). One predicate
+  (`call_saturates`: supplied arguments ≥ row length) gates every row
+  consumer — the boolean rows (`demand_strict_args`), the structured rows
+  (`apply_callee_row`) and the captured-demand sets of where-local
+  functions — for prefix, specialized and dictionary-passing calls alike;
+  an over-saturated call still applies the row to its own positions. The
+  cost is precision on a partial application the body saturates later
+  (`case g x of k -> k 1`): that argument stays a thunk.
 - Runs late, inside codegen, so it sees final monomorphized code.
 
 This is an optimization: getting it *wrong in the conservative direction*

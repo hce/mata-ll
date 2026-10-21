@@ -14,7 +14,10 @@
 //!
 //! Cross-function propagation: if callee `g` is strict in position j,
 //! then `f(... g(x) ...)` where x is a parameter of f propagates
-//! strictness — x is demanded because g will force it.
+//! strictness — x is demanded because g will force it. A row describes
+//! what the callee forces when it RUNS, so it applies only to a call
+//! that saturates it (`call_saturates`): a partial application builds a
+//! closure and forces nothing.
 
 use std::collections::{HashMap, HashSet};
 use crate::tir::*;
@@ -522,9 +525,21 @@ pub fn analyze(module: &TModule) -> DemandInfo {
                     None => s,
                     Some(prev) => {
                         // Positional AND; a position missing from either row
-                        // (differing arities) is lazy.
-                        let n = prev.len().min(s.len());
-                        (0..n).map(|i| prev[i] && s[i]).collect()
+                        // (differing arities) is lazy. The meet keeps the
+                        // LONGER length: a row's length is the arity the
+                        // saturation gate reads (`call_saturates`), and a
+                        // call must saturate every member before any
+                        // member's row may apply — truncating to the
+                        // shorter member let the row fire on a partial
+                        // application of the longer one. (The structured
+                        // rows size a group by its longest member too.)
+                        let n = prev.len().max(s.len());
+                        (0..n)
+                            .map(|i| {
+                                prev.get(i).copied().unwrap_or(false)
+                                    && s.get(i).copied().unwrap_or(false)
+                            })
+                            .collect()
                     }
                 });
             }
@@ -1384,16 +1399,40 @@ fn arg_emitted_eagerly(expr: &TExpr) -> bool {
 /// scoping rules that keep the name-keyed injection sound.
 type CapturedEnv = HashMap<String, (usize, HashSet<String>)>;
 
+/// Does an application that supplies `supplied` arguments to a callee of
+/// `arity` parameters RUN the callee? A strictness row — boolean or
+/// structured, module-level or where-local — and a captured-demand set
+/// both describe what the callee forces when it runs, and a call runs it
+/// only when it saturates it: `g x` for a two-parameter `g` builds a
+/// closure and forces nothing, so `f x = seq (g x) 1` is lazy in `x`
+/// (GHC prints 1 for `f ⊥`) even though `g` is strict in its first
+/// parameter. An over-saturated call (`g x y z` for a two-parameter `g`
+/// whose result is a function) runs `g` and applies the row to its own
+/// positions; the surplus arguments go to the result and claim nothing.
+/// The one predicate every row consumer in this module reads
+/// (`demand_strict_args`, `apply_callee_row`, the captured-demand rule);
+/// the composition rule carries it implicitly (rows of length one, one
+/// argument each), and codegen's fusion row reader checks the same
+/// equality on its own spine.
+fn call_saturates(supplied: usize, arity: usize) -> bool {
+    supplied >= arity
+}
+
 /// Demand every argument sitting in a strict position of the callee's
-/// boolean mask. Shared by the prefix-application, SpecCall, and DictCall
-/// arms of `demanded_vars_in`.
+/// boolean mask — when the call saturates the mask (`call_saturates`); a
+/// partial application contributes nothing, whatever the mask says.
+/// Shared by the prefix-application, SpecCall, and DictCall arms of
+/// `demanded_vars_in`, so no arm can forget the gate.
 fn demand_strict_args<'a>(
     s: &mut HashSet<String>,
     mask: &[bool],
-    args: impl IntoIterator<Item = &'a TExpr>,
+    args: impl ExactSizeIterator<Item = &'a TExpr>,
     rec: &dyn Fn(&TExpr) -> HashSet<String>,
 ) {
-    for (i, arg) in args.into_iter().enumerate() {
+    if !call_saturates(args.len(), mask.len()) {
+        return;
+    }
+    for (i, arg) in args.enumerate() {
         if mask.get(i).copied().unwrap_or(false) {
             // A strict position forces the argument to WHNF only. For an
             // ACTION value, WHNF is the built (suspended) closure —
@@ -1479,7 +1518,9 @@ fn demanded_vars_in(
                 }
 
             // Cross-function propagation: if callee is a known function
-            // and is strict in position i, demand that argument's vars.
+            // and is strict in position i, demand that argument's vars —
+            // for a call that saturates the row (the gate lives in
+            // demand_strict_args; a partial application runs nothing).
             // A shadowed callee name may be a local of unknown strictness:
             // no row applies (under-claim, safe).
             if let TExprKind::Var(name) = &f.kind
@@ -1547,12 +1588,13 @@ fn demanded_vars_in(
             // condition under which the argument demand above fires — so
             // the outer variables the body forces on every path (`go`'s
             // guard `i > n` forcing the captured `n`) are demanded here
-            // too. Gated on SATURATION: a partial application only builds
-            // a closure and forces none of the body's captures.
+            // too. Gated on saturation exactly like the rows
+            // (`call_saturates`): a partial application only builds a
+            // closure and forces none of the body's captures.
             if let TExprKind::Var(name) = &f.kind
                 && !shadowed(name)
                 && let Some((arity, caps)) = captured.get(name)
-                    && args_rev.len() >= *arity {
+                    && call_saturates(args_rev.len(), *arity) {
                         s.extend(caps.iter().cloned());
                     }
 
@@ -2376,15 +2418,21 @@ fn demand_expr<'t>(cx: &RowCx<'_, 't>, expr: &'t TExpr, rd: &Demand, run_pos: bo
 }
 
 /// Apply a callee's structured parameter row: each argument in a demanded
-/// position contributes its own demands under that position's demand.
-/// Shared by the prefix-application, SpecCall, and DictCall arms.
+/// position contributes its own demands under that position's demand —
+/// when the call saturates the row (`call_saturates`; the structured twin
+/// of `demand_strict_args`'s gate). A partial application builds a closure
+/// and contributes nothing. Shared by the prefix-application, SpecCall,
+/// and DictCall arms, so no arm can forget the gate.
 fn apply_callee_row<'t>(
     cx: &RowCx<'_, 't>,
     m: &mut DemandMap,
     row: &[Option<Demand>],
-    args: impl IntoIterator<Item = &'t TExpr>,
+    args: impl ExactSizeIterator<Item = &'t TExpr>,
 ) {
-    for (i, arg) in args.into_iter().enumerate() {
+    if !call_saturates(args.len(), row.len()) {
+        return;
+    }
+    for (i, arg) in args.enumerate() {
         if let Some(Some(d)) = row.get(i).map(|x| x.as_ref()) {
             map_join(m, demand_expr(cx, arg, d, false));
         }

@@ -625,6 +625,15 @@ clause.
 Strict parameters can be passed eagerly at call sites (avoiding thunk
 allocation) and forced at function entry rather than at each use site.
 
+Strictness propagates across calls: a call of a function with a known
+row demands the arguments in its strict positions. A row describes what
+the callee forces when it *runs*, so it applies only to a call that
+saturates it — one supplying at least as many arguments as the row has
+positions. A partial application builds a closure and forces nothing:
+`f x = seq (g x) 1` is lazy in `x` for a two-parameter `g`, exactly as
+in GHC, where `f undefined` is 1. The same gate governs the structured
+rows and the captured-demand sets of where-local functions.
+
 A multi-clause function's first clause pins a second kind of entry
 force: it is tried on every call, so a column its pattern scrutinizes
 is forced on every path — but only up to its first column that can

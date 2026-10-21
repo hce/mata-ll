@@ -44,6 +44,41 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A callee's strictness row applies to a call only when the call
+  saturates the row** (crash where GHC returns a value). The demand
+  analysis propagates strictness across calls: a call of a function with
+  a known row demands the arguments in the row's strict positions. The
+  row was zipped with whatever arguments the call supplied, with no check
+  that the call saturates it — but a row says what the callee forces when
+  it RUNS, and a partial application builds a closure and runs nothing:
+  `g a b = a + b; f x = seq (g x) 1` was judged strict in `x`, the entry
+  force (or the call site, through the shared convention row) evaluated
+  `x`, and `f (error "boom")` raised where GHC prints 1. The same zip ran
+  for a specialized call (`gn :: Num a => …` at `Int`), a dictionary-
+  passing call, a class method, a where-local function's row and a
+  where-local group's captured demand, and for the structured rows that
+  decide strict `let`/`where` bindings. One predicate now gates every row
+  consumer in the analysis — the boolean rows, the structured rows and
+  the captured-demand sets alike, inside the one helper each family of
+  call arms shares — so a row contributes only when the call supplies at
+  least as many arguments as the row has positions; an over-saturated
+  call still applies the row to its own positions, and the meet of
+  same-named rows keeps the longer arity so the gate reads it. The code
+  generator's partial-application closures were already lazy at build
+  time (an argument in a strict position is evaluated inside the closure,
+  when it is invoked); the bench, program and case corpora are
+  byte-identical. The precision cost is a partial application the body
+  saturates later (`case g x of k -> k 1`, `apply (g x)`): the analysis
+  does not model call demands on function values, so such an argument
+  now stays a thunk. Found by the 2026-10 fresh-eyes review (L8).
+  (GHC-goldened case `partial_application_rows`: a partial application
+  under `seq`, under `$!`, bound by `let` and `where`, stored in a data
+  field, passed to a function that never calls it, returned from an
+  eta-padded function, of a where-local and a let-bound function, of a
+  specialized constrained function, of a class method, through
+  dictionary passing from an existential, through a point-free
+  composition; the saturated twin of each, an over-saturated call, a
+  partial application whose argument another use demands.)
 - **A clause's eta padding is applied by the clause's result alone**
   (crash). A function with fewer patterns than arrows and a function-valued
   body is emitted with padding parameters its clause result is applied to
