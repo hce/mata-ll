@@ -75,6 +75,29 @@ API of the `mllc` library crate.)
   field selector, a where-bound function, a strict let and a do-bound
   variable; `shadow_lazy_outer`: the other direction, with the emission
   twin test in codegen_shape.rs.)
+- **A clause's where group is emitted once, after the clause's pattern
+  bindings** (crash and silent wrong output). A single-clause function
+  with a destructuring pattern — a tuple, constructor, record, list,
+  nested or as-pattern — emitted its `where` group twice: once in the
+  function arm, before any pattern variable was a Lua local, and again
+  in the clause-intro path after the bindings (the second copy was bare
+  assignments, since the first had already declared the names). An eager
+  where value in the first copy read the pattern variables as nil
+  globals — `f (a, b) = a + b + c where c = a * 10` raised "attempt to
+  perform arithmetic on a nil value"; a lazy value survived only because
+  the second thunk overwrote the first; every
+  where function was emitted and registered twice. The group now has one
+  owner: the emitter that has just bound the clause's pattern variables
+  (the clause-intro path for every destructuring or multi-clause clause,
+  the all-simple arm for plain parameters, the value arms for a CAF or
+  IO action). Emitted Lua is byte-identical for every program whose
+  group was not double-emitted; for the others the first copy is gone.
+  Found while fixing the 2026-10 review's L5. (GHC-goldened case
+  `where_after_patterns`: tuple, constructor, record, list, nested and
+  as-patterns with a strict, lazy, exact-first-force and shadowing where
+  value, a where function reading a pattern variable and a mutually
+  recursive pair; the same with guards, eta padding, a nested group, an
+  IO body and a CAF.)
 - **A first-class operator is the value of whatever the operator denotes**
   (silent wrong output and crashes). An operator in parentheses used as a
   value — `zipWith (^) xs ns`, `foldr (<+>) 0 xs`, `(=<<) f m` — was

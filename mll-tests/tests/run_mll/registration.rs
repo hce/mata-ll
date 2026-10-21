@@ -445,6 +445,10 @@ mll_test!(shadowed_demand_rows, "shadowed_demand_rows.mll");
 // codegen_shape.rs).
 mll_test!(shadow_concrete_binders, "shadow_concrete_binders.mll");
 mll_test!(shadow_lazy_outer, "shadow_lazy_outer.mll");
+// A clause's where group is emitted once, after the clause's pattern
+// bindings: a destructuring single-clause function's where values and
+// functions read the pattern variables as locals (found while fixing L5).
+mll_test!(where_after_patterns, "where_after_patterns.mll");
 mll_test!(seq_action_value, "seq_action_value.mll");
 mll_test!(rank2, "rank2.mll");
 

@@ -401,6 +401,15 @@ Responsibilities beyond the obvious translation:
   `let`/`where` value, a WHNF-yielding bound action, a fused loop local);
   the scope snapshots (`ScopeSnapshot`, `VarsSnapshot` in function.rs)
   restore the set at every scope exit.
+- **Where groups:** a clause's `where` group (`where_binds_stmts`) is
+  emitted exactly once, by the emitter that has just bound the clause's
+  pattern variables — `clause_intro_stmts` (pattern.rs) for every
+  destructuring or multi-clause clause, the all-simple single-clause arm
+  of `function_stmts` (its parameters are the pattern variables) and the
+  value arms (a CAF or IO action has no patterns). No arm that goes on to
+  `pattern_match_block` emits the group itself: the group's values and
+  functions read the pattern variables, and a copy emitted before they
+  are locals reads globals.
 - **Constructor tracking:** record/ADT layout for construction and field access.
 - **Type-specialized operations:** e.g. `show` for lists/tuples is emitted per
   element type, using the `Ty` carried on each `TExpr`.

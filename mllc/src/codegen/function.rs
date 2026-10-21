@@ -754,8 +754,22 @@ impl CodeGen {
                         | super::analysis::ParamConv::Lazy => {}
                     }
                 }
-                let demanded = self.clause_demanded(clause);
-                body.extend(self.where_binds_stmts(clause, demanded));
+                // The clause's where group is NOT emitted here: a where
+                // group belongs to the emitter that has just bound the
+                // clause's pattern variables, and for a destructuring clause
+                // that is clause_intro_stmts (pattern.rs), reached through
+                // pattern_match_block below. This arm once emitted the group
+                // itself first, before any pattern variable was a local, and
+                // clause_intro_stmts emitted it again after the bindings
+                // (`where_binds_stmts` forward-declares only names not yet
+                // local, so the second copy was bare assignments, not a
+                // duplicate `local`): an eager where value read the pattern
+                // variables as nil globals — `f (a, b) = a + b + c where c =
+                // a * 10` raised "arithmetic on a nil value" — and a lazy one
+                // survived only because the second thunk overwrote the first.
+                // The all-simple arm above keeps its own emission: its
+                // parameters are the pattern variables, bound by the arm
+                // itself, and it never enters pattern_match_block.
                 // The eta padding must be CONSUMED here too (G9): the match
                 // tail applies the clause result to it via clause_eta_params.
                 // This arm never set it, so a destructuring single-clause
@@ -999,6 +1013,18 @@ impl CodeGen {
     /// Takes the whole clause (not just its where_binds) because the local
     /// strictness rows installed here are scoped by scanning the clause for
     /// rebindings of the local function names (see local_fn_strict_params).
+    ///
+    /// Ownership: a clause's where group is emitted exactly once, by the
+    /// emitter that has just bound the clause's pattern variables — the
+    /// group's values and functions read them, and the forward
+    /// declarations below skip a name that is already a local precisely so
+    /// a where value may shadow a pattern variable or parameter in place
+    /// (see where_value_stmt). The callers are the module-level value arms
+    /// of function_stmts (no patterns), its all-simple single-clause arm
+    /// (the parameters ARE the pattern variables, bound by that arm) and
+    /// clause_intro_stmts (pattern.rs) for every destructuring or
+    /// multi-clause clause, after the clause's pattern bindings. No arm
+    /// that goes on to pattern_match_block emits the group itself.
     pub(super) fn where_binds_stmts(&mut self, clause: &TClause, demanded: crate::demand::DemandMap) -> Vec<Stmt> {
         let binds: &[TLocalDef] = &clause.where_binds;
         let mut stmts = Vec::new();
