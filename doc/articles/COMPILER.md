@@ -268,6 +268,28 @@ constant folding (§7) can then recognize them.
   time (`__mll_hmd_*` in runtime.lua: the scalar encoder means the
   scalar store); the enumerators read the key order off the handle and
   need no evidence.
+- **First-class operators** (`opfunc_value`): a first-class `(op)` is
+  the value of whatever `op` denotes, decided once in the monomorphizer
+  (the main walk and the dictionary rewrite call it from their `OpFunc`
+  arms). The resolver binds an operator-position name like a prefix
+  reference, so `op` names one entity: a local binder or an ordinary
+  function — a user operator, a Prelude source operator (`^`, `$!`,
+  `=<<`, `<$`), a backtick name — is the name's own use, a `Var` at the
+  instantiated type walked on like the prefix spelling (specialization,
+  arity-widening copies, dictionary passing, the cap); a class method is
+  dispatched like an infix use; and only a spelling codegen lowers as a
+  first-class value itself (`names::first_class_op_lowered`: `++`, `!!`,
+  `:`, `$`, `.`, `>>=`, `>>`, the integer division wrappers, and the
+  Lua-native operators `names::native_binary_op` spells) keeps the
+  `OpFunc` node, after a method of that spelling has resolved natively
+  (`+` at Int, IO's `>>=`) or been deferred. Codegen's `op_func_ast` emits
+  exactly those lowerings — each a codegen-emitted function returning
+  WHNF, so a higher-order consumer's single unwrap of its result is sound
+  (`(++)` forces the suffix it hands the runtime, which returns it
+  unchanged for an empty prefix) — and `builtin_op_lambda` refuses any
+  spelling outside the native table: the old fallback emitted the
+  spelling as a Lua operator, which made `(^)` Lua's float power and a
+  user operator a Lua syntax error.
 - **Dictionary construction** (`build_dict_expr`) is one decision tree
   per demanded (class, type): the body's parameter for a constrained
   variable, the captured binder for an existential skolem, and

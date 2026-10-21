@@ -44,6 +44,37 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A first-class operator is the value of whatever the operator denotes**
+  (silent wrong output and crashes). An operator in parentheses used as a
+  value — `zipWith (^) xs ns`, `foldr (<+>) 0 xs`, `(=<<) f m` — was
+  handed to codegen's operator-lambda fallback unless it was a class
+  method, and that fallback emitted the spelling as a Lua binary operator:
+  `(^)` became Lua's float power (`zipWith (^) [3 :: Int, 7] [39, 22]`
+  printed `[4052555153018976256,…]` where GHC prints
+  `[4052555153018976267,…]`, and `(^) 2 100 :: Integer` raised "attempt to
+  perform arithmetic on a table value"), and a user operator or one of the
+  Prelude's source-defined operators (`($!)`, `(=<<)`, `(<$)`) made the
+  emitted Lua fail to load (`unexpected symbol near '+'`). The
+  monomorphizer now decides every first-class operator in one place
+  (`opfunc_value`): an ordinary function — a user operator, a Prelude
+  source operator, an imported one — is the function itself at the
+  instantiated type, so it specializes, widens its arity and takes the
+  dictionary fallback exactly as the prefix spelling does; a class method
+  is dispatched like an infix use; only the operators codegen lowers
+  itself (`++`, `!!`, `:`, `$`, `.`, `>>=`, `>>`, the integer division
+  wrappers, the Lua-native set) keep their lowering, and the operator
+  lambda refuses any other spelling. Each lowered value also returns a
+  value in WHNF: `foldr (++) [] [[1], []]` crashed in `__mll_head` because
+  the first-class `(++)` returned the suspended next step itself when its
+  left list was empty — GHC prints `[1]`. Found by the 2026-10 fresh-eyes
+  review (M5, T8). (GHC-goldened case `first_class_operators`: `(^)` at
+  Int, Number and Integer in prefix, first-class, `zipWith` and fold
+  positions; `(++)` with empty and nested lists; `(:)`, `(!!)`, `($)`,
+  `(.)`, `(>>=)`, `(>>)` at list, Maybe and IO; `($!)`, `(=<<)`, `(<$)`,
+  `(<$>)`, `(<*>)`; a user operator through `foldr`, `zipWith`, `map`, a
+  partial application, a data field and a returned function; a user
+  class-method operator; an imported operator; a constrained operator at
+  21 types, past the specialization cap, and at a widened arity.)
 - **A `where`-bound function named `seq`, used in backtick form, keeps an
   operand it ignores unevaluated** (silent wrong output). `x \`seq\` y
   where seq _ b = b` applied to `error "boom"` raised where GHC returns

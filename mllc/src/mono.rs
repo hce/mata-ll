@@ -41,6 +41,18 @@ struct SpecKey {
     ty: Ty,
 }
 
+/// What a first-class operator is the value of (`opfunc_value`).
+enum OpFuncValue {
+    /// A dispatched method: an instance function, a dictionary read, or
+    /// the bare method name where no evidence will come.
+    Resolved(TExpr),
+    /// A spelling codegen lowers itself: the `OpFunc` node stays.
+    Lowered,
+    /// A function or a local: the name's own use, `Var(op)`, which the
+    /// caller walks on.
+    Named,
+}
+
 /// What a class-method use lowers to — the ONE decision for every form a
 /// method takes (a named use, an infix operator on either operand, a
 /// first-class operator or section, prefix negation, an overloaded
@@ -1051,6 +1063,62 @@ impl Monomorphizer {
             Some(name) => MethodUse::Impl(name),
             None => MethodUse::Deferred,
         }
+    }
+
+    /// What a first-class operator `(op)` — `TExprKind::OpFunc` — is the
+    /// value of. The resolver binds an operator-position name like a
+    /// prefix reference, so `op` is a canonical name denoting exactly one
+    /// entity, and this is the ONE decision for all of them, made by the
+    /// main walk and the dictionary rewrite alike:
+    ///
+    ///   * a local binder (`let (<+>) = (+) in foldr (<+>) 0 xs`) or an
+    ///     ordinary function — a user operator, a Prelude source operator
+    ///     (`^`, `$!`, `=<<`, `<$`), a backtick name — is `Named`: the
+    ///     value is the name's own use, `Var(op)` at this type, which the
+    ///     caller walks on so specialization, arity-widening copies,
+    ///     dictionary passing and the cap apply as for the prefix
+    ///     spelling;
+    ///   * a class method is dispatched exactly like an infix use
+    ///     (`dispatch_method` at the operator type the checker recorded on
+    ///     the node): an instance function or a dictionary read is
+    ///     `Resolved`; a NATIVE implementation (`+` at Int, IO's `>>=`) or
+    ///     a deferred one keeps the node when codegen lowers the spelling
+    ///     itself, and is the bare name otherwise (`(<$>)`, a user class's
+    ///     operator in the retained generic copy — the same reference the
+    ///     infix spelling makes);
+    ///   * a spelling codegen lowers as a first-class value
+    ///     (`codegen::first_class_op_lowered`: `++`, `!!`, `:`, `$`, `.`,
+    ///     `>>=`, `>>`, the integer division wrappers, the Lua-native
+    ///     operators) is `Lowered`: the node stays an `OpFunc`.
+    ///
+    /// Codegen's operator lambda is restricted to the Lua-native set and
+    /// refuses anything else, so a first-class `(^)` can no longer become
+    /// Lua's float power and a first-class `(<+>)` a Lua syntax error.
+    fn opfunc_value(&mut self, op: &str, ty: &Ty, ev: &DictEnv, report_missing: bool) -> OpFuncValue {
+        if self.locals.contains(op) {
+            return OpFuncValue::Named;
+        }
+        let lowered = crate::codegen::first_class_op_lowered(op);
+        if self.method_to_class.contains_key(op) {
+            match self.dispatch_method(op, ty, ev) {
+                MethodUse::Impl(mangled) => {
+                    return OpFuncValue::Resolved(TExpr { kind: TExprKind::Var(mangled), ty: ty.clone() });
+                }
+                MethodUse::Evidence(kind) => {
+                    return OpFuncValue::Resolved(TExpr { kind, ty: ty.clone() });
+                }
+                MethodUse::Missing(binding) => {
+                    if report_missing {
+                        self.push_no_instance(op, &binding);
+                    }
+                }
+                MethodUse::Native | MethodUse::Deferred => {}
+            }
+            if !lowered {
+                return OpFuncValue::Resolved(TExpr { kind: TExprKind::Var(op.to_string()), ty: ty.clone() });
+            }
+        }
+        if lowered { OpFuncValue::Lowered } else { OpFuncValue::Named }
     }
 
     /// Does a `class` method at binding `ty` need runtime evidence — is
@@ -2631,33 +2699,23 @@ impl Monomorphizer {
                     None => TExprKind::Con(name),
                 }
             }
+            // A FIRST-CLASS operator `(op)`: the value of what `op`
+            // denotes (`opfunc_value`). A function — a user operator, a
+            // Prelude source operator (`^`, `$!`, `=<<`, `<$`), a local —
+            // is the name's own use, walked as the Var it is so it
+            // specializes, widens its arity, takes dictionaries and meets
+            // the cap exactly as the prefix spelling would; a method is
+            // dispatched like an infix use; only a spelling codegen lowers
+            // itself keeps the node.
             TExprKind::OpFunc(ref op) => {
-                // A FIRST-CLASS section of a class-method operator
-                // (`foldr (<>) mempty`, `zipWith (<+>) xs ys`): dispatch it
-                // exactly like an infix use, from the operator type the
-                // checker recorded on this node. Without this, codegen's
-                // OpFunc fallback hard-codes a Lua operator — `<>` becomes
-                // string concatenation regardless of the instance, and a
-                // user-defined operator symbol would be emitted verbatim (a
-                // Lua syntax error). Only a successful resolution rewrites;
-                // deferred/missing uses keep the old fallback.
                 let op = op.clone();
-                if self.method_to_class.contains_key(&op) && !self.locals.contains(&op) {
-                    match self.dispatch_method(&op, &ty, &DictEnv::default()) {
-                        // A real instance function (a user Num type, `<>`,
-                        // …) or a dictionary read becomes the value; a
-                        // NATIVE operator (`+` at Int/Number) stays an
-                        // OpFunc so codegen emits the operator lambda —
-                        // byte-identical to before the operator became a
-                        // class method, and never a reference to a
-                        // nonexistent `_plus_`-style global.
-                        MethodUse::Impl(mangled) => return TExpr { kind: TExprKind::Var(mangled), ty },
-                        MethodUse::Evidence(kind) => return TExpr { kind, ty },
-                        MethodUse::Missing(binding) => self.push_no_instance(&op, &binding),
-                        MethodUse::Native | MethodUse::Deferred => {}
+                match self.opfunc_value(&op, &ty, &DictEnv::default(), true) {
+                    OpFuncValue::Resolved(e) => return e,
+                    OpFuncValue::Lowered => TExprKind::OpFunc(op),
+                    OpFuncValue::Named => {
+                        return self.mono_expr_node(TExpr { kind: TExprKind::Var(op), ty });
                     }
                 }
-                expr.kind
             }
             TExprKind::InfixApp { op, lhs, rhs } => {
                 // Typeclass method dispatch on infix operators. The TIR drops
@@ -3691,17 +3749,18 @@ impl Monomorphizer {
             }
             // A FIRST-CLASS operator or section of a class method (`zipWith
             // (==) xs ys`, `foldr (+) 0 xs`) at a binding this body has
-            // evidence for: the dictionary's method as a value.
+            // evidence for: the dictionary's method as a value. The main
+            // walk has already made every non-method, non-lowered operator
+            // the Var it denotes (a missing instance was reported there).
             TExprKind::OpFunc(ref op) => {
                 let op = op.clone();
-                if !self.locals.contains(&op) && self.method_to_class.contains_key(&op) {
-                    match self.dispatch_method(&op, &ty, ev) {
-                        MethodUse::Impl(mangled) => return TExpr { kind: TExprKind::Var(mangled), ty },
-                        MethodUse::Evidence(kind) => return TExpr { kind, ty },
-                        MethodUse::Native | MethodUse::Deferred | MethodUse::Missing(_) => {}
+                match self.opfunc_value(&op, &ty, ev, false) {
+                    OpFuncValue::Resolved(e) => return e,
+                    OpFuncValue::Lowered => TExprKind::OpFunc(op),
+                    OpFuncValue::Named => {
+                        return self.rewrite_dict_expr(TExpr { kind: TExprKind::Var(op), ty }, func_name, ev);
                     }
                 }
-                TExprKind::OpFunc(op)
             }
             // Prefix negation at a binding this body has evidence for: the
             // dictionary's `negate`. Left as a Negate node it reached

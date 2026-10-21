@@ -600,6 +600,38 @@ pub(crate) fn infix_operand_strictness(op: &str, lhs_ty: &crate::types::Ty, rhs_
     }
 }
 
+/// The Lua binary operator the first-class value of a Haskell operator
+/// spelling is built over (`builtin_op_lambda`): the closed set of
+/// operators the compiler itself lowers to a Lua operator over forced
+/// operands. `^` is not one — Lua's `^` is float power, and the Prelude's
+/// `(^)` is a source function (exponentiation by squaring over `*`), so
+/// its first-class value is that function like any user operator's. Every
+/// spelling outside this set that reaches `builtin_op_lambda` is an
+/// internal error, never a Lua operator of the same spelling.
+pub(crate) fn native_binary_op(op: &str) -> Option<&'static str> {
+    Some(match op {
+        "+" => "+", "-" => "-", "*" => "*", "/" => "/",
+        "==" => "==", "/=" => "~=", "<" => "<", ">" => ">", "<=" => "<=", ">=" => ">=",
+        "<>" => "..", "&&" => "and", "||" => "or",
+        _ => return None,
+    })
+}
+
+/// Is `op` an operator spelling whose first-class value codegen emits
+/// itself (`op_func_ast`)? These are the operators with no function of
+/// their own: the list and action structure operators the runtime and
+/// the emitter lower (`++`, `!!`, `:`, `$`, `.`, `>>=`, `>>`), the
+/// integer division methods (their forcing wrappers) and the Lua-native
+/// binary operators (`native_binary_op`). Monomorphization keeps an
+/// `OpFunc` of exactly these spellings (after method dispatch has had its
+/// say); a first-class operator of any other spelling is the value of the
+/// function its name denotes and becomes a `Var` there, so no other
+/// spelling ever reaches `op_func_ast`.
+pub(crate) fn first_class_op_lowered(op: &str) -> bool {
+    matches!(op, "++" | "!!" | ":" | "$" | "." | ">>=" | ">>" | "div" | "mod" | "quot" | "rem")
+        || native_binary_op(op).is_some()
+}
+
 pub(crate) fn is_builtin_op(op: &str) -> bool {
     // NOTE: `^` is deliberately NOT here — Lua's `^` is float power. It is a
     // Prelude function ((^), exponentiation by squaring over `*`), emitted as a

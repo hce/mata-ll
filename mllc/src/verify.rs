@@ -208,6 +208,21 @@ impl Verifier {
                 op, e.ty, ctx
             ));
         }
+        // A first-class operator of a spelling codegen does not lower
+        // itself (a user operator, `^`, `$!`): monomorphization makes it
+        // the Var it denotes (`opfunc_value`); an OpFunc of it here would
+        // reach the operator lambda, which refuses it.
+        if let TExprKind::OpFunc(op) = &e.kind
+            && !crate::codegen::first_class_op_lowered(op)
+        {
+            self.violations.push(format!(
+                "internal: first-class '({})' reached codegen as an operator node \
+                 in '{}' — monomorphization makes every first-class operator the \
+                 value of what it denotes, and only a spelling codegen lowers \
+                 itself keeps the operator node",
+                op, ctx
+            ));
+        }
         // Recurse into every sub-expression.
         e.for_each_child(&mut |c| self.walk(c, ctx));
     }

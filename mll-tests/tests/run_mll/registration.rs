@@ -424,6 +424,7 @@ mll_test!(action_value_bindings, "action_value_bindings.mll");
 mll_test!(action_value_positions, "action_value_positions.mll");
 mll_test!(try_catch_first_class, "try_catch_first_class.mll");
 mll_test!(infix_application, "infix_application.mll");
+mll_test!(first_class_operators, "first_class_operators.mll");
 mll_test!(ffi_action_values, "ffi_action_values.mll");
 mll_test!(ffi_try_catch_values, "ffi_try_catch_values.mll");
 mll_test!(quot_rem_fixity, "quot_rem_fixity.mll");

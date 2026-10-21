@@ -1812,20 +1812,49 @@ impl CodeGen {
     /// A first-class operator as a Lua function value: the ONE emission of
     /// the operators that have no runtime function of their own — the
     /// list and action structure operators (`++`, `!!`, `:`, `>>=`, `>>`,
-    /// `$`, `.`) and the native Lua operators (`builtin_op_lambda`). Used
-    /// for an `OpFunc` node and for the same operator stored as a method
-    /// entry of a static dictionary (`SpecKind::Dict`): the builtin IO
-    /// Monad instance maps `>>=` to itself, and a `Monad m =>` body past
-    /// the specialization limit reads it from the dictionary.
+    /// `$`, `.`), the integer division methods' forcing wrappers and the
+    /// native Lua operators (`builtin_op_lambda`); exactly the spellings
+    /// `names::first_class_op_lowered` lists. Monomorphization keeps an
+    /// `OpFunc` of these alone — a first-class operator of any other
+    /// spelling (a user operator, a Prelude source operator such as `^`,
+    /// `$!`, `=<<`, `<$`, a local, a method dispatched to an instance
+    /// function) is the value of the function its name denotes and arrives
+    /// here as a `Var`. Used for an `OpFunc` node and for the same operator
+    /// stored as a method entry of a static dictionary (`SpecKind::Dict`):
+    /// the builtin IO Monad instance maps `>>=` to itself, and a `Monad m
+    /// =>` body past the specialization limit reads it from the dictionary.
+    ///
+    /// Each value is a codegen-emitted function and keeps the runtime's
+    /// WHNF-return invariant (see the head-consumption contract in
+    /// runtime.lua): a higher-order consumer (`foldr`, `zipWith`, `map`)
+    /// applies it and uses the result as a value, so it must return one,
+    /// exactly as the inline infix form's result is forced by its
+    /// consumer. `!!` returns the forced element, `:` a cons cell, `>>=`
+    /// and `>>` an action closure, `$` and `.` the callee's result (a
+    /// compiled function returns WHNF); `++` must force the suffix it
+    /// hands the runtime, since an empty prefix makes the append RETURN
+    /// that suffix — unforced, a `foldr (++) []` step returned the
+    /// suspended next step itself, and the consumer's single unwrap
+    /// yielded a thunk where a list was due.
     fn op_func_ast(op: &str) -> Expr {
         if op == "++" {
             return Expr::Func(
                 vec!["_a".into(), "_b".into()],
                 FuncBody::Inline(vec![Stmt::Return(Expr::call_named(
                     "__mll_list_append",
-                    vec![Expr::name("_a"), Expr::inline_fn0(Expr::name("_b"))],
+                    vec![Expr::name("_a"), Expr::inline_fn0(Expr::force(Expr::name("_b")))],
                 ))]),
             );
+        }
+        // The Integral Int methods: the forcing wrappers a prefix or
+        // partially applied `div` gets (the Var arm), so a dictionary
+        // entry and a first-class use agree.
+        match op {
+            "div" => return Expr::name("__mll_div_fn"),
+            "mod" => return Expr::name("__mll_mod_fn"),
+            "quot" => return Expr::name("__mll_quot_fn"),
+            "rem" => return Expr::name("__mll_rem_fn"),
+            _ => {}
         }
         if op == "!!" {
             return Expr::Func(
@@ -1973,10 +2002,17 @@ impl CodeGen {
     /// `(&&)`, …): a two-argument closure forcing both operands, the exact
     /// forcing the inline infix emission does. Shared by the `OpFunc` arm
     /// and the dictionary builder (a builtin instance's self-mapped method).
+    /// The operators are the closed set `names::native_binary_op` spells;
+    /// any other spelling here is an internal error — the old fallback
+    /// emitted the spelling as a Lua operator, which made `(^)` Lua's float
+    /// power and a user operator a Lua syntax error.
     fn builtin_op_lambda(op: &str) -> Expr {
-        let lua_op = match op {
-            "<>" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
-            other => other,
+        let Some(lua_op) = super::names::native_binary_op(op) else {
+            unreachable!(
+                "internal: first-class operator `({op})` reached codegen as an OpFunc — \
+                 monomorphization decides what every first-class operator is the value \
+                 of, and only a Lua-native operator keeps an OpFunc node"
+            );
         };
         Expr::Func(
             vec!["_a".into(), "_b".into()],
@@ -2046,16 +2082,11 @@ impl CodeGen {
                     // builtin IO/LuaIO/ST instances map to themselves
                     // (the inline bind chain is codegen's): the entry is
                     // the first-class operator's value.
-                    let value = match f.as_str() {
-                        "div" => Expr::name("__mll_div_fn"),
-                        "mod" => Expr::name("__mll_mod_fn"),
-                        "quot" => Expr::name("__mll_quot_fn"),
-                        "rem" => Expr::name("__mll_rem_fn"),
-                        op if is_builtin_op(op) || op == ">>=" || op == ">>" => Self::op_func_ast(op),
-                        _ => {
-                            let sv = sanitize_name(f);
-                            Expr::name(self.lua_ref(&sv))
-                        }
+                    let value = if super::names::first_class_op_lowered(f) {
+                        Self::op_func_ast(f)
+                    } else {
+                        let sv = sanitize_name(f);
+                        Expr::name(self.lua_ref(&sv))
                     };
                     items.push(Item::KV(format!("{} = ", self.dict_field(m)), value));
                 }

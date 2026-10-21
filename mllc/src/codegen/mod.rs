@@ -93,6 +93,7 @@ pub(crate) use names::runtime_spellings;
 pub(crate) use runtime::bound_names as runtime_bound_names;
 #[cfg(test)]
 pub(crate) use names::is_builtin_op;
+pub(crate) use names::first_class_op_lowered;
 pub(crate) use names::infix_operand_strictness;
 
 /// Public for the strictness-contract check in mll-tests (G5): the harness
