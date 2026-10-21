@@ -44,6 +44,38 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A clause's eta padding is applied by the clause's result alone**
+  (crash). A function with fewer patterns than arrows and a function-valued
+  body is emitted with padding parameters its clause result is applied to
+  (the N-ary convention, G9). The padding travelled as emitter state that
+  the first match emitted inside the clause consumed, and a clause's where
+  group is emitted before its result: a where VALUE whose right-hand side
+  is a guarded `case` applied the padding to every branch of that case —
+  `f (a, b) = \x -> x + c where c = case a of n | n > 0 -> n * b |
+  otherwise -> b` raised "attempt to call a number value" where GHC prints
+  16, in a destructuring single clause and a multi-clause function alike
+  (a plain-parameter clause was unaffected: it applies its result inline).
+  The padding is now an argument of the match emitter, handed to the
+  clause/guard result emission alone; nothing else emitted inside the
+  clause — the where group, a nested `case` in the body, a lambda, a guard
+  condition — can observe it, and the hand-written save/restore around
+  where-local function groups and the sub-generator's clear are gone with
+  the state they guarded. Every program without such a where value is
+  byte-identical. The demand analysis's padded view of such a function
+  padded only its plain clauses, so a guarded clause beside a plain one
+  (`f (Just a) | a > 5 = \x -> x * a | otherwise = \x -> x + a; f
+  Nothing = \x -> x`) was one pattern short in the analysis — a
+  debug-build assertion, and in a release build a strictness row sized
+  from whichever clause came first; the view now pads every clause and
+  applies each guard result to the padding, as the emitter does. Found
+  while fixing the where-group emission.
+  (GHC-goldened case `eta_where_value`: a where value whose RHS is a
+  guarded case, a plain case, an if, a lambda with a guarded case, a call
+  of a where-local function with guards, a function-valued case applied in
+  the body, a case used lazily, an action, under padding of one and two
+  parameters, in a destructuring single clause, a multi-clause function, a
+  guarded clause, a where-local group that is itself padded, an IO body; a
+  nested case in the clause body; the same shapes without padding.)
 - **A multi-clause function forces only the columns GHC's left-to-right
   match would force** (crash where GHC returns a value). Every column the
   FIRST clause scrutinized was forced at entry — or, when every call site

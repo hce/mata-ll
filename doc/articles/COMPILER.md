@@ -448,7 +448,13 @@ Responsibilities beyond the obvious translation:
 - **Calling convention:** a function value of type `T` is a Lua function
   of `count_arrows(T)` parameters, applied to all of them in one call;
   monomorphization gives each instantiation its own copy, so compiled
-  code meets the convention at every call site. The runtime's definitions
+  code meets the convention at every call site. A definition with fewer
+  patterns than arrows and a function-valued body declares the missing
+  parameters as padding (`_etaN`) and applies each clause or guard result
+  to them (`eta_call_ast`); the padding is an argument of the match
+  emitter that reaches the result emission alone — never the clause's
+  where group, a nested `case` in its body, or a where-local group, which
+  is padded by its own arrow count. The runtime's definitions
   have no mata-ll body and exist once: their parameter lists fix their
   arity (`known_callee_arity` splits a call that over-applies one), and a
   function they are handed is called with the arguments of its declared

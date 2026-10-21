@@ -46,6 +46,9 @@ impl CodeGen {
     }
 
     /// A clause's bindings (`local x = <path>`) plus its where bindings.
+    /// The enclosing function's eta padding is not an input here: it
+    /// belongs to the clause RESULT alone (`match_tail_stmts`), so a where
+    /// value whose RHS is a `case` emits an ordinary match.
     fn clause_intro_stmts(&mut self, clause: &TClause, bindings: &[(String, Expr)]) -> Vec<Stmt> {
         let mut stmts = Vec::new();
         for (var, val) in bindings {
@@ -81,44 +84,54 @@ impl CodeGen {
     /// `tails: None` is the classic emission — one `return` through
     /// `tail_ast` in value position (no action performing; a do-block body
     /// becomes a first-class action closure the caller's runner performs —
-    /// the two-level shape multi-clause IO functions keep).
+    /// the two-level shape multi-clause IO functions keep). With a
+    /// non-empty `eta` — the enclosing function's padding parameters — the
+    /// result is applied to the padding instead (`eta_call_ast`, the
+    /// consuming half of the N-ary convention, G9). The padding is an
+    /// input of THIS emission and of nothing else emitted inside the
+    /// clause: the where group never sees it, and a nested match in the
+    /// body (a `case` expression) is emitted with no padding of its own,
+    /// so the body walk cannot re-apply it.
     ///
     /// `Some(inside_action)` builds the result through `bind_chain_block`
     /// instead: used by the flattened `case` terminal (the Case arm in
     /// bind_chain_block), where each branch takes its own tail decision — a
     /// terminal `pure e` goes through `pure_action_ast` (the box
     /// convention), a nested do/if/case flattens further, and a saturated
-    /// self call may return bare (see action_run_ast).
-    fn match_tail_stmts(&mut self, body: &TExpr, tails: Option<bool>) -> Vec<Stmt> {
-        // The enclosing function's eta padding, if any (clause_eta_params —
-        // set only by the multi-clause/guarded function emitters): TAKEN
-        // for the duration of the body walk, so a nested match inside the
-        // body (a `case` expression) does not re-apply it, and restored for
-        // the sibling clauses. Each clause/guard result is applied to the
-        // padding — the consuming half of the N-ary convention (G9).
-        let eta = std::mem::take(&mut self.clause_eta_params);
-        let stmts = match tails {
+    /// self call may return bare (see action_run_ast). That terminal is a
+    /// nested match, never a padded clause result, so it carries no
+    /// padding.
+    fn match_tail_stmts(&mut self, body: &TExpr, tails: Option<bool>, eta: &[String]) -> Vec<Stmt> {
+        match tails {
             Some(inside_action) => self.bind_chain_block(body, inside_action).0,
             None if !eta.is_empty() => {
-                vec![Stmt::Return(self.eta_call_ast(body, &eta))]
+                vec![Stmt::Return(self.eta_call_ast(body, eta))]
             }
             None => vec![Stmt::Return(self.tail_ast(body, false))],
-        };
-        self.clause_eta_params = eta;
-        stmts
+        }
     }
 
-    pub(super) fn pattern_match_block(&mut self, params: &[String], clauses: &[TClause]) -> Block {
-        self.pattern_match_block_tails(params, clauses, None)
+    /// The clause matrix of a function (or a `case` expression, which
+    /// passes an empty `eta`): `eta` is the enclosing function's padding
+    /// parameters, applied to every clause/guard RESULT and to nothing
+    /// else — see `match_tail_stmts`.
+    pub(super) fn pattern_match_block(
+        &mut self,
+        params: &[String],
+        clauses: &[TClause],
+        eta: &[String],
+    ) -> Block {
+        self.pattern_match_block_tails(params, clauses, None, eta)
     }
 
-    /// `tails` selects how clause/guard results are built — see
-    /// `match_tail_stmts`.
+    /// `tails` selects how clause/guard results are built and `eta` is the
+    /// padding they are applied to — see `match_tail_stmts`.
     pub(super) fn pattern_match_block_tails(
         &mut self,
         params: &[String],
         clauses: &[TClause],
         tails: Option<bool>,
+        eta: &[String],
     ) -> Block {
         // Clauses with guards need fallthrough semantics (a clause whose pattern
         // matches but whose guards all fail must drop to the next clause). The
@@ -127,9 +140,9 @@ impl CodeGen {
         // The dispatch is total, so the chain below handles only guard-free
         // clauses.
         if clauses.iter().any(|c| !c.guards.is_empty()) {
-            return self.pattern_match_guarded_block_tails(params, clauses, tails);
+            return self.pattern_match_guarded_block_tails(params, clauses, tails, eta);
         }
-        self.match_chain_block(params, clauses, 0, tails)
+        self.match_chain_block(params, clauses, 0, tails, eta)
     }
 
     /// The if/elseif chain over `clauses[start..]` (`start` is nonzero only
@@ -146,6 +159,7 @@ impl CodeGen {
         clauses: &[TClause],
         start: usize,
         tails: Option<bool>,
+        eta: &[String],
     ) -> Block {
         // When the clauses cover every constructor of the scrutinized type,
         // the last clause's condition is implied by every earlier one failing:
@@ -167,7 +181,7 @@ impl CodeGen {
                     Expr::force(Expr::name(pname.clone())),
                 )];
                 self.concrete_vars.insert(pname);
-                bs.extend(self.match_chain_block(params, clauses, i, tails).0);
+                bs.extend(self.match_chain_block(params, clauses, i, tails, eta).0);
                 else_b = Some(Block(bs));
                 // The nested chain carries its own non-exhaustive fall-off.
                 fell_through = false;
@@ -195,7 +209,7 @@ impl CodeGen {
                 // string emitter, the clause scope is NOT restored on this
                 // early exit (the enclosing function restores its own scope).
                 let mut bs = self.clause_intro_stmts(clause, &bindings);
-                bs.extend(self.match_tail_stmts(clause.plain_body(), tails));
+                bs.extend(self.match_tail_stmts(clause.plain_body(), tails, eta));
                 if i > start {
                     else_b = Some(Block(bs));
                 } else {
@@ -207,7 +221,7 @@ impl CodeGen {
 
             let cond = Expr::and_chain(conditions);
             let mut bs = self.clause_intro_stmts(clause, &bindings);
-            bs.extend(self.match_tail_stmts(clause.plain_body(), tails));
+            bs.extend(self.match_tail_stmts(clause.plain_body(), tails, eta));
             if chain.is_none() {
                 chain = Some((cond, Block(bs)));
             } else if exhaustive && i == clauses.len() - 1 {
@@ -314,13 +328,14 @@ impl CodeGen {
     /// is exactly Haskell's semantics. (The flat if/elseif chain cannot do this:
     /// once a pattern's `then` arm is entered there is no way back to the next
     /// `elseif`.)
-    /// `tails` selects how clause/guard results are built — see
-    /// `match_tail_stmts`.
+    /// `tails` selects how clause/guard results are built and `eta` is the
+    /// padding they are applied to — see `match_tail_stmts`.
     pub(super) fn pattern_match_guarded_block_tails(
         &mut self,
         params: &[String],
         clauses: &[TClause],
         tails: Option<bool>,
+        eta: &[String],
     ) -> Block {
         let mut stmts = Vec::new();
         for clause in clauses {
@@ -342,13 +357,13 @@ impl CodeGen {
             }
             let mut bs = self.clause_intro_stmts(clause, &bindings);
             if clause.guards.is_empty() {
-                bs.extend(self.match_tail_stmts(clause.plain_body(), tails));
+                bs.extend(self.match_tail_stmts(clause.plain_body(), tails, eta));
             } else {
                 let mut gchain: Option<(Expr, Block)> = None;
                 let mut gelseifs: Vec<(Expr, Block)> = Vec::new();
                 for guard in &clause.guards {
                     let cond = self.guard_cond_ast(&guard.condition);
-                    let body = Block(self.match_tail_stmts(&guard.body, tails));
+                    let body = Block(self.match_tail_stmts(&guard.body, tails, eta));
                     if gchain.is_none() {
                         gchain = Some((cond, body));
                     } else {

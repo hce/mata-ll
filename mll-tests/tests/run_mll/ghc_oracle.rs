@@ -236,6 +236,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_shadow_lazy_outer, "cases", "shadow_lazy_outer.mll"),
         (ghc_oracle_where_after_patterns, "cases", "where_after_patterns.mll"),
         (ghc_oracle_first_clause_column_order, "cases", "first_clause_column_order.mll"),
+        (ghc_oracle_eta_where_value, "cases", "eta_where_value.mll"),
         (ghc_oracle_seq_action_value, "cases", "seq_action_value.mll"),
         (ghc_oracle_record_update_lazy, "cases", "record_update_lazy.mll"),
         (ghc_oracle_record_update_call_sites, "cases", "record_update_call_sites.mll"),

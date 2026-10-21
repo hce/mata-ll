@@ -771,15 +771,13 @@ impl CodeGen {
                 // parameters are the pattern variables, bound by the arm
                 // itself, and it never enters pattern_match_block.
                 // The eta padding must be CONSUMED here too (G9): the match
-                // tail applies the clause result to it via clause_eta_params.
-                // This arm never set it, so a destructuring single-clause
-                // function with fewer patterns than arrows and a
-                // function-valued body (`showsPrec d (Cx a b) = showParen …`
-                // at three arrows) declared `_eta0` and returned the closure
+                // tail applies the clause result to it. This arm once
+                // passed none, so a destructuring single-clause function
+                // with fewer patterns than arrows and a function-valued
+                // body (`showsPrec d (Cx a b) = showParen …` at three
+                // arrows) declared `_eta0` and returned the closure
                 // unapplied — a saturated call yielded a function value.
-                self.clause_eta_params = eta_params.clone();
-                body.extend(self.pattern_match_block(&params, clauses).0);
-                self.clause_eta_params.clear();
+                body.extend(self.pattern_match_block(&params, clauses, &eta_params).0);
             }
             let stmts = if split_performer {
                 self.performer_pair_stmts(func, target, all_params, Block(body))
@@ -806,10 +804,9 @@ impl CodeGen {
             func.name);
         // Eta padding must be CONSUMED, not just declared: every clause and
         // guard result is applied to the padding parameters by
-        // match_tail_stmts (via clause_eta_params — the single-clause arm
-        // above does the same inline; this arm's clause bodies used to
-        // ignore them, G9).
-        self.clause_eta_params = eta_params_multi.clone();
+        // match_tail_stmts, which receives them from the pattern_match_block
+        // call below (the single-clause arm above does the same inline;
+        // this arm's clause bodies used to ignore them, G9).
         let mut all_params = dict_param_names.clone();
         all_params.extend(params.iter().cloned());
         let target = self.fn_target(&lua_name);
@@ -859,8 +856,7 @@ impl CodeGen {
                 super::analysis::ParamConv::Lazy => {}
             }
         }
-        body.extend(self.pattern_match_block(&params, clauses).0);
-        self.clause_eta_params.clear();
+        body.extend(self.pattern_match_block(&params, clauses, &eta_params_multi).0);
         let stmts = vec![
             Stmt::Function { target, params: all_params, body: Block(body) },
             Stmt::Raw(String::new()),
@@ -1354,13 +1350,10 @@ impl CodeGen {
                         self.concrete_vars.insert(format!("_warg{}", j));
                     }
                 }
-                // Save/restore, not set/clear: this emitter runs from
-                // clause_intro_stmts of an ENCLOSING clause matrix, whose
-                // own padding must survive for its match_tail_stmts.
-                let saved_eta = std::mem::replace(
-                    &mut self.clause_eta_params, eta_params.clone());
-                body.extend(self.pattern_match_block(&params, &clauses).0);
-                self.clause_eta_params = saved_eta;
+                // This group's own padding; the enclosing clause's (this
+                // emitter runs from its clause_intro_stmts) is an input of
+                // that clause's result emission alone and cannot reach here.
+                body.extend(self.pattern_match_block(&params, &clauses, &eta_params).0);
             }
         } else {
             // Same entry-force rule as the top-level multi-clause emitter
@@ -1392,11 +1385,8 @@ impl CodeGen {
                     self.concrete_vars.insert(format!("_warg{}", j));
                 }
             }
-            // Save/restore — same rationale as the single-clause arm above.
-            let saved_eta = std::mem::replace(
-                &mut self.clause_eta_params, eta_params.clone());
-            body.extend(self.pattern_match_block(&params, &clauses).0);
-            self.clause_eta_params = saved_eta;
+            // This group's own padding (see the single-clause arm above).
+            body.extend(self.pattern_match_block(&params, &clauses, &eta_params).0);
         }
         self.local_fn_fall_off = saved_fall_off;
         spill.exit(self);

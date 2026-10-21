@@ -349,35 +349,50 @@ fn ty_arrow_count(ty: &Ty) -> usize {
 }
 
 /// The clause as codegen emits it: patterns padded to the type's arrow
-/// count with `__mll_eta_d*` variables and the body APPLIED to them (the
-/// eta-padded emission applies the callee — see `emitted_value_arity`).
-/// `None` when no clause needs padding, so `analyze` borrows the original.
+/// count with `__mll_eta_d*` variables and every clause or guard RESULT
+/// applied to them (the eta-padded emission applies each result to the
+/// padding — see `emitted_value_arity` and codegen's `match_tail_stmts`).
+/// A guarded clause's results are its guard bodies, so they are padded
+/// exactly as a plain clause's body is: padding only the plain clauses
+/// left a guarded sibling one pattern short, and the row — sized from the
+/// first clause — covered either too few columns or a column the guarded
+/// clause did not bind. `None` when no clause needs padding, so `analyze`
+/// borrows the original.
 fn eta_padded_view(func: &TFunction) -> Option<TFunction> {
     let arrows = ty_arrow_count(&func.ty);
-    if !func.clauses.iter().any(|c| {
-        c.patterns.len() < arrows && c.body.is_some()
-    }) {
+    if !func.clauses.iter().any(|c| c.patterns.len() < arrows) {
         return None;
     }
-    let mut padded = func.clone();
-    for clause in &mut padded.clauses {
-        let missing = arrows.saturating_sub(clause.patterns.len());
-        let Some(body) = clause.body.take() else { continue };
-        let mut body = body;
-        for i in 0..missing {
-            let name = format!("__mll_eta_d{i}");
-            clause.patterns.push(TPattern::Var(name.clone(), Ty::Unit));
+    fn apply_padding(mut body: TExpr, names: &[String]) -> TExpr {
+        for name in names {
             let result_ty = match &body.ty {
                 Ty::Arrow(_, r, _) => (**r).clone(),
                 _ => Ty::Unit,
             };
-            let arg = TExpr::new(TExprKind::Var(name), Ty::Unit);
+            let arg = TExpr::new(TExprKind::Var(name.clone()), Ty::Unit);
             body = TExpr::new(
                 TExprKind::App(Box::new(body), Box::new(arg)),
                 result_ty,
             );
         }
-        clause.body = Some(body);
+        body
+    }
+    let mut padded = func.clone();
+    for clause in &mut padded.clauses {
+        let missing = arrows.saturating_sub(clause.patterns.len());
+        if missing == 0 {
+            continue;
+        }
+        let names: Vec<String> = (0..missing).map(|i| format!("__mll_eta_d{i}")).collect();
+        for name in &names {
+            clause.patterns.push(TPattern::Var(name.clone(), Ty::Unit));
+        }
+        if let Some(body) = clause.body.take() {
+            clause.body = Some(apply_padding(body, &names));
+        }
+        for guard in &mut clause.guards {
+            guard.body = apply_padding(guard.body.clone(), &names);
+        }
     }
     Some(padded)
 }

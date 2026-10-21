@@ -283,7 +283,10 @@ impl CodeGen {
                     body: b.body.clone(),
                     where_binds: vec![],
                 }).collect();
-                let b = self.pattern_match_block(&["_cg".to_string()], &clauses);
+                // A `case` is a nested match: no eta padding of its own —
+                // the enclosing clause's padding applies to that clause's
+                // result, of which this expression may be a part.
+                let b = self.pattern_match_block(&["_cg".to_string()], &clauses, &[]);
                 stmts.extend(b.0);
                 spill.exit(self);
                 scope.restore(self);

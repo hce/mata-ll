@@ -1155,6 +1155,7 @@ impl CodeGen {
                         &[sref],
                         &clauses,
                         Some(inside_action),
+                        &[],
                     );
                     stmts.extend(b.0);
                     scope.restore(self);
