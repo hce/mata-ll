@@ -84,6 +84,7 @@ excluded_reason() {
         cases/hashmap_key_defaulting)    echo "HashMap builtins (Lua tables)";;
         cases/hashmap_nil_values)        echo "HashMap builtins (Lua tables)";;
         cases/hm_lookup_case_fused)      echo "HashMap builtins (Lua tables)";;
+        cases/hm_lookup_lazy_operands)   echo "HashMap builtins (Lua tables)";;
         cases/hashmap_structural_keys)   echo "HashMap builtins (Lua tables)";;
         cases/hashmap_dict_form_builtins) echo "HashMap builtins (Lua tables)";;
         cases/hashmap_versions)          echo "HashMap builtins (Lua tables)";;

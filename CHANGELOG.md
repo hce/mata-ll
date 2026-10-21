@@ -44,6 +44,45 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **An operand the emitted code reads itself is delivered in WHNF by the
+  emitter** (crash, and a silent wrong value, where GHC returns the right
+  one). A bind-chain `v <- readSTArray arr i` is spelled inline at its
+  site — `local v = arr[i + 1]` and a thunk arm — so the emitted code
+  indexes the array and adds to the index itself. Both operands were
+  built by the strict-position rule, which passes a bare variable raw on
+  the contract that the CALLEE forces the position on every path; the
+  inline read has no callee. An ordinary ST loop `sumArr arr i acc = do
+  { n <- stArrayLength arr; if i >= n then pure acc else do { v <-
+  readSTArray arr i; sumArr arr (i + 1) (acc + v) } }` passed its next
+  index as a suspension and raised "attempt to perform arithmetic on a
+  table value" where GHC prints the sum; a lazy handle (`let arr = pick
+  (length [()] > 5) a a`) was indexed as the thunk table and the read
+  returned its evaluated marker (`False` where GHC prints `True`); the
+  same for an index from a lazy parameter, a lazy let, a record field or
+  a list element. One rule now: an operand the emitted code reads itself
+  is delivered in WHNF by the emitter (`site_forced_arg_ast`, raw where
+  the emission already proves it, under one `__force` otherwise); the raw
+  bare-variable shortcut stays for a callee that forces — the fused
+  `__mll_st_*`/`__mll_ioref_*` runtime calls, the `__mll_st_read` helper
+  the non-duplicable shapes keep, the fused `hmLookup` case's
+  `__mll_hm_slot`, all of which force their operands themselves and are
+  unchanged. A non-concrete LOCAL operand (the loop's handle on every
+  iteration: an action builder's parameters have no run-time strictness
+  row) is forced in place once (`arr = __force(arr)`) and read bare for
+  the rest of its bind chain, rather than once per read; thunklift knows
+  that assignment leaves the variable's value unchanged and keeps lifting
+  suspensions over it. Every program whose reads had proven operands is
+  byte-identical in those reads (an inlined index function's arithmetic
+  is proven by the WHNF mirror of the previous entry); the tracker's
+  mixer loop forces its handle once per channel-frame where it read it
+  raw. Found by the 2026-10 fresh-eyes review (L9).
+  (GHC-goldened case `st_inline_read_lazy_operands`: the loop with a lazy
+  and with a `seq`-forced index, a lazy index from a let, a parameter, a
+  record field, a list element and a list pattern, a lazy handle from an
+  if, a case, a let, a function returning one of two handles and a lazy
+  parameter, writeSTArray/modifySTArray and the IORef operations with the
+  same lazy operands; case `hm_lookup_lazy_operands`: the fused lookup
+  with a lazy key and a lazy map.)
 - **The WHNF mirror claims an inlined call by its substituted body**
   (a redundant force; no observable change). `expr_yields_whnf`, the
   predicate that mirrors which emissions already yield WHNF, declined

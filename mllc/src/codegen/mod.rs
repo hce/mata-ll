@@ -194,6 +194,14 @@ struct CodeGen {
     forward_declared: std::collections::HashSet<String>,
     /// Variables known to hold concrete values (not thunks), skip __force
     concrete_vars: std::collections::HashSet<String>,
+    /// The locals a bind chain has forced IN PLACE (`x = __force(x)`, the
+    /// write-back an emitter-read operand of an inline ST read takes —
+    /// see `forced_local_in_place`) and claimed concrete for the rest of
+    /// that chain. A stack: `bind_chain_block` marks its length on entry
+    /// and withdraws the claims pushed past the mark when the chain
+    /// closes, so a claim never outlives the block whose statements prove
+    /// it (an `else` chain's write-back says nothing after the `if`).
+    chain_forced_locals: Vec<String>,
     /// Whole-program call-site analysis: for each function, which param
     /// positions are always passed cheap (non-thunk) arguments at every call site.
     /// If true, the param never needs __force at entry.
@@ -415,6 +423,7 @@ impl CodeGen {
             constructors: Vec::new(), newtypes: Vec::new(), newtype_types: Vec::new(),
             forward_declared: std::collections::HashSet::new(),
             concrete_vars: std::collections::HashSet::new(),
+            chain_forced_locals: Vec::new(),
             params_always_cheap: std::collections::HashMap::new(),
             param_conv: std::collections::HashMap::new(),
             inline_fns: std::collections::HashMap::new(),

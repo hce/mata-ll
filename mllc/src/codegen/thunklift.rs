@@ -54,6 +54,22 @@
 //! themselves by (b); the per-iteration `_w` copies those loops make for
 //! exactly this capture reason are single-assignment and lift fine.
 //!
+//! One assignment shape is not an assignment in the sense of (b): the
+//! IN-PLACE FORCE `x = __force(x)` (an emitter-read operand of an inline
+//! ST read, action.rs `forced_local_in_place`). It replaces the thunk a
+//! variable holds by the value that thunk memoizes — the same mata-ll
+//! value under a different representation — and running it again is the
+//! identity, so the value a closure reads from `x` at any later time is
+//! the value a carrier copied from `x` at any time: a copy taken before
+//! the force holds the thunk, which the body it was compiled for still
+//! forces on read (the emitter claims `x` concrete only after the force);
+//! a copy taken after holds the value, which a bare read is right about.
+//! Such a statement is left out of the frame's assignment accounting
+//! (`is_inplace_force`), so a suspension over `x` lifts across it even
+//! when `x` is a parameter of an enclosing function (a `\i -> do …`
+//! lambda's index, forced in the action body it returns), where the
+//! settling rule above cannot reach.
+//!
 //! The BODY must also be Raw-free (its free names must be trustworthy) and
 //! must not assign any of its captures (the value copy would break the
 //! write-through). Captures are capped at 4 for a `__thunk` site
@@ -74,6 +90,16 @@ use std::collections::{HashMap, HashSet};
 use super::annot::is_plain_ident;
 use super::hoist::free_names_func;
 use super::lua::{Block, Expr, FnTarget, FuncBody, Stmt, TKF_TABLE};
+
+/// `x = __force(x)` — the in-place force of a variable (see the module
+/// doc): the one assignment that leaves the variable's mata-ll value
+/// unchanged, excluded from the assignment accounting.
+fn is_inplace_force(lhs: &str, rhs: &Expr) -> bool {
+    matches!(rhs, Expr::Call(f, args)
+        if matches!(f.as_ref(), Expr::Name(n) if n == "__force")
+            && args.len() == 1
+            && matches!(&args[0], Expr::Name(a) if a == lhs))
+}
 
 /// One enclosing function scope on the walk path.
 struct Frame {
@@ -146,8 +172,8 @@ fn prescan(
             // name is `assigned` in the sense that matters: its value is
             // not final at declaration.
             Stmt::Local(names, None) => assigned.extend(names.iter().cloned()),
-            Stmt::Assign(lhs, _) => {
-                if is_plain_ident(lhs) {
+            Stmt::Assign(lhs, rhs) => {
+                if is_plain_ident(lhs) && !is_inplace_force(lhs, rhs) {
                     note(lhs, assigned, counts);
                 }
             }
@@ -265,6 +291,7 @@ fn stmt_assigns(s: &Stmt, out: &mut HashMap<String, usize>) {
         }
     };
     match s {
+        Stmt::Assign(lhs, rhs) if is_inplace_force(lhs, rhs) => {}
         Stmt::Assign(lhs, _) | Stmt::AssignIf { lhs, .. } => note(lhs),
         Stmt::MultiAssign(lhs, _) => {
             for l in lhs {

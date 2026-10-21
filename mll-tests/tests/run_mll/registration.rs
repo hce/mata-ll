@@ -635,6 +635,9 @@ mll_test!(hashmap_nil_values, "hashmap_nil_values.mll");
 // hit/miss/stored-nil-sentinel, both branch orders, wildcard, and the
 // guarded shape that must NOT fuse.
 mll_test!(hm_lookup_case_fused, "hm_lookup_case_fused.mll");
+// The fused hmLookup case with a lazy key and a lazy map handle: the
+// runtime slot read forces both.
+mll_test!(hm_lookup_lazy_operands, "hm_lookup_lazy_operands.mll");
 // Persistent-map versioning (the diff+reroot representation): held old
 // versions, forks, overwrite diffs, the materialize path past the
 // reroot cap, stored-Nothing across flips, the frozen shared empty,
@@ -678,6 +681,10 @@ mll_test!(show_shows_prec_instance, "show_shows_prec_instance.mll");
 // GHC's boxed-STArray laziness: stores keep the value as given (a
 // never-read bottom is silent); reads force the slot.
 mll_test!(st_lazy_store, "st_lazy_store.mll");
+// A bind-chain readSTArray spelled inline at its site delivers its array
+// and index in WHNF itself (a lazy loop index, a lazy handle), beside the
+// writes, modifies and IORef operations whose runtime forces them.
+mll_test!(st_inline_read_lazy_operands, "st_inline_read_lazy_operands.mll");
 // Guard-established nonzero divisors are evaluated eagerly; a `>=` guard
 // establishes nothing and the modulus stays a suspension.
 mll_test!(guard_nonzero_divisor, "guard_nonzero_divisor.mll");

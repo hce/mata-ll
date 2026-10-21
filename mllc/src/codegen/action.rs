@@ -696,10 +696,12 @@ impl CodeGen {
     /// if __mll_getmt(x) == __thunk_mt then x = __mll_st_settle(arr, i + 1, x) end
     /// ```
     ///
-    /// `None` for any other action. For a read: the declaration's RHS and
-    /// the settle statement, which assigns through `xref` — the bound
-    /// name's Lua reference, already declared by the caller. The array
-    /// and index expressions appear twice (the load, the settle arm), so
+    /// `None` for any other action. For a read: the statements that
+    /// precede the declaration (an operand's in-place force, see below),
+    /// the declaration's RHS and the settle statement, which assigns
+    /// through `xref` — the bound name's Lua reference, already declared
+    /// by the caller. The array and index expressions appear twice (the
+    /// load, the settle arm), so
     /// the inline form is taken only when both EMITTED expressions are
     /// duplicable (`lua_expr_duplicable`: a name, a literal, arithmetic or
     /// a force over those — every ST index in practice, including an
@@ -727,7 +729,22 @@ impl CodeGen {
     /// The bound name is assigned twice by this shape (the declaration,
     /// the settle arm); thunklift settles it once the settle statement
     /// has passed, so a later suspension capturing it still lifts.
-    fn try_inline_st_read(&mut self, action: &TExpr, xref: &str) -> Option<(Expr, Option<Stmt>)> {
+    ///
+    /// OPERAND DELIVERY. The emitted code reads both operands itself — it
+    /// indexes the array and adds to the index — so this site delivers
+    /// them in WHNF (`site_forced_arg_ast`: raw where the emission
+    /// already proves it, under one `__force` otherwise); the raw
+    /// bare-variable shortcut of `arg_ast(…, true)` is for a callee that
+    /// forces the position on every path, and here there is no callee. A
+    /// lazy `i` (a loop's suspended `i + 1`) was added to as a thunk
+    /// table, a lazy `arr` (a `let` picking between two handles) was
+    /// indexed as one. An operand that is a non-concrete LOCAL is forced
+    /// in place instead of per use (`forced_local_in_place`): the handle
+    /// of an ST loop is such a local on every iteration (an action
+    /// builder's parameters have no run-time strictness row), and a
+    /// `__force` per read on the tracker's mixer loop cost a tenth of the
+    /// canary.
+    fn try_inline_st_read(&mut self, action: &TExpr, xref: &str) -> Option<(Vec<Stmt>, Expr, Option<Stmt>)> {
         let mut a = action;
         while let TExprKind::Paren(inner) = &a.kind {
             a = inner.as_ref();
@@ -737,12 +754,23 @@ impl CodeGen {
             return None;
         }
         // Both positions are strict (the `__mll_st_read` row of the fused
-        // strictness masks): an array and an index are always forced.
-        let arr = self.arg_ast(fargs[0], true);
-        let idx = self.arg_ast(fargs[1], true);
+        // strictness masks): an array and an index are always forced —
+        // by THIS emission (see the operand-delivery note above).
+        let arr = self.site_forced_arg_ast(fargs[0]);
+        let idx = self.site_forced_arg_ast(fargs[1]);
         if !Self::lua_expr_duplicable(&arr) || !Self::lua_expr_duplicable(&idx) {
-            return Some((Expr::call_named(fused, vec![arr, idx]), None));
+            // The helper call IS a callee that forces (`__mll_st_read`
+            // forces its array and its index before use), so each operand
+            // goes raw here — the site force, when one was added, is the
+            // one the helper repeats; peeling it hands the helper exactly
+            // what `arg_ast(…, true)` would have built.
+            let arr = Self::without_site_force(arr);
+            let idx = Self::without_site_force(idx);
+            return Some((vec![], Expr::call_named(fused, vec![arr, idx]), None));
         }
+        let mut pre = Vec::new();
+        let arr = self.forced_local_in_place(fargs[0], arr, &mut pre);
+        let idx = self.forced_local_in_place(fargs[1], idx, &mut pre);
         let slot = Self::st_slot_index(idx);
         let mut slot_s = String::new();
         slot.render(0, &mut slot_s);
@@ -760,7 +788,64 @@ impl CodeGen {
             elseifs: vec![],
             else_b: None,
         };
-        Some((read, Some(stmt)))
+        Some((pre, read, Some(stmt)))
+    }
+
+    /// An emitter-read operand that is a non-concrete LOCAL variable,
+    /// delivered as `__force(x)` by `site_forced_arg_ast`, is forced IN
+    /// PLACE instead: the statement `x = __force(x)` goes before the read
+    /// and the operand becomes the bare `x`, claimed concrete for the rest
+    /// of the enclosing bind chain (`chain_forced_locals`, withdrawn when
+    /// the chain closes). Same force at the same point — the variable
+    /// denoted a thunk-or-value and now denotes the value that thunk
+    /// memoized, which every reader of the variable (a later statement, a
+    /// closure created after this point) would have obtained by forcing
+    /// it — so the bare reads that follow are the forces they replace,
+    /// run once. The assignment is to the variable's own Lua reference (a
+    /// local, or a spill slot); thunklift knows the shape (`x =
+    /// __force(x)` leaves the variable's value unchanged, see
+    /// `is_inplace_force` there) and keeps lifting suspensions over the
+    /// variable across it. Any other delivery (a concrete variable, an
+    /// expression, a module-level name) is returned unchanged.
+    fn forced_local_in_place(&mut self, operand: &TExpr, delivered: Expr, pre: &mut Vec<Stmt>) -> Expr {
+        let mut o = operand;
+        while let TExprKind::Paren(inner) = &o.kind {
+            o = inner.as_ref();
+        }
+        let TExprKind::Var(name) = &o.kind else { return delivered };
+        let sname = sanitize_name(name);
+        if !self.local_vars.contains(&sname) || self.concrete_vars.contains(&sname) {
+            return delivered;
+        }
+        let lref = self.lua_ref(&sname);
+        let is_force_of_lref = matches!(&delivered,
+            Expr::Call(f, args) if matches!(f.as_ref(), Expr::Name(n) if n == "__force")
+                && args.len() == 1
+                && matches!(&args[0], Expr::Name(a) if *a == lref));
+        if !is_force_of_lref {
+            return delivered;
+        }
+        pre.push(Stmt::Assign(lref.clone(), delivered));
+        self.concrete_vars.insert(sname.clone());
+        self.chain_forced_locals.push(sname);
+        Expr::name(lref)
+    }
+
+    /// The operand without the one `__force` a site delivery wrapped around
+    /// it, for a position that is handed on to a runtime function which
+    /// forces it itself (`__mll_st_read`): `__force(__force(x))` is
+    /// `__force(x)`, so the peel is exact, and what remains is the raw
+    /// delivery `arg_ast(…, true)` builds for a forcing callee. An operand
+    /// the delivery left raw (proven WHNF) is returned unchanged.
+    fn without_site_force(e: Expr) -> Expr {
+        match e {
+            Expr::Call(f, mut args)
+                if matches!(f.as_ref(), Expr::Name(n) if n == "__force") && args.len() == 1 =>
+            {
+                args.pop().unwrap()
+            }
+            other => other,
+        }
     }
 
     /// The 1-based Lua slot of an emitted 0-based ST index: `idx + 1`,
@@ -833,6 +918,10 @@ impl CodeGen {
         // keyed by source name and must not outlive the chain they belong
         // to (a lambda's body is a chain without a clause scope around it).
         let mut rows_scope: Option<LocalRowsSnapshot> = None;
+        // The locals this chain forces in place (forced_local_in_place)
+        // are concrete for its remaining statements only: their claims
+        // are withdrawn when the chain closes.
+        let forced_mark = self.chain_forced_locals.len();
         loop {
             match &expr.kind {
                 TExprKind::InfixApp { op, lhs, rhs } if op == ">>=" => {
@@ -884,11 +973,12 @@ impl CodeGen {
                         // a following statement); every other action is a
                         // single RHS expression.
                         let xref = self.lua_ref(&param_name);
-                        let (rhs_e, settle) = match self.try_inline_st_read(lhs, &xref) {
+                        let (pre_read, rhs_e, settle) = match self.try_inline_st_read(lhs, &xref) {
                             Some(read) => read,
-                            None => (self.bound_action_ast(lhs), None),
+                            None => (vec![], self.bound_action_ast(lhs), None),
                         };
                         self.cur_result_demand = saved_rd;
+                        stmts.extend(pre_read);
                         stmts.push(decl.stmt(rhs_e));
                         stmts.extend(settle);
                         // The bound value is force-free downstream only if the
@@ -1171,6 +1261,9 @@ impl CodeGen {
         }
         if let Some(rows) = rows_scope {
             rows.restore(self);
+        }
+        for name in self.chain_forced_locals.drain(forced_mark..) {
+            self.concrete_vars.remove(&name);
         }
         Block(stmts)
     }

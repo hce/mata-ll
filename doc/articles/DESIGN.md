@@ -671,6 +671,18 @@ name is read bare, exactly as a fresh name would be. Scope snapshots
 restore the set at every scope exit, so a claim never outlives its
 binding either.
 
+A strict position passes a bare variable raw — thunk-or-value, no
+`__force` at the site — on the contract that the callee forces the
+position on every path (the entry force behind a strict parameter's
+claim, a runtime body held to its strictness mask). That shortcut is
+for a callee that forces, and only for that: an operand the emitted
+code reads itself — the inline ST read indexes the array and adds to
+the index — is delivered in WHNF by the emitter (`site_forced_arg_ast`:
+raw where the emission already proves it, under one `__force`
+otherwise). A non-concrete local in such a position is forced in place
+once (`arr = __force(arr)`) and claimed concrete for the rest of its
+bind chain; the claim is withdrawn when the chain closes.
+
 ### Call-site analysis
 
 A whole-program pass before code generation examines every call site
