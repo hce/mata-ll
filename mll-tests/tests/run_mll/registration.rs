@@ -449,6 +449,10 @@ mll_test!(shadow_lazy_outer, "shadow_lazy_outer.mll");
 // bindings: a destructuring single-clause function's where values and
 // functions read the pattern variables as locals (found while fixing L5).
 mll_test!(where_after_patterns, "where_after_patterns.mll");
+// A multi-clause function forces only the columns GHC's left-to-right match
+// would force (L7): a column the first clause scrutinizes to the right of a
+// column that can fail is forced inside the clause condition, not at entry.
+mll_test!(first_clause_column_order, "first_clause_column_order.mll");
 mll_test!(seq_action_value, "seq_action_value.mll");
 mll_test!(rank2, "rank2.mll");
 

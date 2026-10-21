@@ -352,6 +352,21 @@ This is an optimization: getting it *wrong in the conservative direction*
 param strict that is *not* always forced would change semantics — that's the
 direction to be careful about when editing.
 
+The rows feed the per-parameter calling convention
+(`codegen/analysis.rs`, `analyze_param_conventions`): one row per function,
+computed once and read by BOTH the parameter binding and every call site,
+so the two ends cannot drift. A position is forced on every path when the
+demand row says so, or when the function's FIRST clause forces it on every
+call — its pattern scrutinizes the column and no column to its left can
+fail (`first_clause_forces_on_every_path`; a clause matches left to right
+and is abandoned at the first failing column, so `f (x : _) (y : _) = …;
+f _ _ = 0` forces column 1 only after column 0 matched, and `f []
+undefined` is 0 as in GHC). Every other scrutinized column is forced inside
+the clause conditions by the match emitter (`pattern.rs`,
+`match_scrutinee`), once at the chain split when sound
+(`later_clause_force_col`). A where-local function group applies the same
+predicate.
+
 ---
 
 ## 6. Exhaustiveness & pattern matching

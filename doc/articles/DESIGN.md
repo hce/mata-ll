@@ -625,6 +625,20 @@ clause.
 Strict parameters can be passed eagerly at call sites (avoiding thunk
 allocation) and forced at function entry rather than at each use site.
 
+A multi-clause function's first clause pins a second kind of entry
+force: it is tried on every call, so a column its pattern scrutinizes
+is forced on every path — but only up to its first column that can
+fail. Clauses match their columns left to right and are abandoned at
+the first failing column, so a column to the right of one that can
+fail (a cons, a literal, a `Just`) is reached only when that column
+matched: `f (x : _) (y : _) = x + y; f _ _ = 0` forces its first
+argument on every call and its second only after the first matched —
+`f [] undefined` is 0. Such a column is forced inside the clause
+condition, in column order, exactly as a column only a later clause
+scrutinizes is. A column to the left that cannot fail — a variable, a
+tuple, a single-constructor record, a newtype — is either matched or
+diverged on, never failed, so the entry force behind it stands.
+
 ### Concrete variable tracking
 
 The code generator maintains a set of names known to hold non-thunk

@@ -820,14 +820,18 @@ impl CodeGen {
         for p in &all_params { self.bind_local_name(p); }
         for dp in &dict_param_names { self.concrete_vars.insert(dp.clone()); }
         // Bind each parameter per its convention row (see
-        // analyze_param_conventions, which folds the first-clause-scrutinizes
-        // rule, the demand row — a guard chain like `go n i | i >= 64 = n | …`
-        // would otherwise re-force n and i at every use — and the always-cheap
-        // judgment into one decision the call sites share). An arg scrutinized
-        // only by LATER clauses stays Lazy and is forced once earlier clauses
-        // have failed (see later_clause_force_col) — GHC's top-to-bottom,
+        // analyze_param_conventions, which folds the first-clause rule
+        // (first_clause_forces_on_every_path), the demand row — a guard
+        // chain like `go n i | i >= 64 = n | …` would otherwise re-force n
+        // and i at every use — and the always-cheap judgment into one
+        // decision the call sites share). An arg scrutinized only by LATER
+        // clauses, or by the first clause to the right of a column that can
+        // fail, stays Lazy and is forced inside the clause conditions — once
+        // at the chain split when earlier clauses have failed (see
+        // later_clause_force_col), per use otherwise — GHC's top-to-bottom,
         // left-to-right laziness: `zip [] _` must return `[]` without forcing
-        // the second argument.
+        // the second argument, and `f (x : _) (y : _) = …; f _ _ = 0` must
+        // return 0 for `f [] ⊥`.
         let conv_row = self.param_conv.get(&func.name).cloned();
         for (i, p) in params.iter().enumerate() {
             if i >= num_params { break; }
@@ -1359,25 +1363,28 @@ impl CodeGen {
                 self.clause_eta_params = saved_eta;
             }
         } else {
-            // Same entry-force rule as the top-level multi-clause emitter:
-            // force a parameter at entry only when the FIRST clause
-            // scrutinizes it (then every path forces it — clause 0 is always
-            // tried first) or the local's demand row proves every path
-            // strict; a parameter scrutinized only by LATER clauses stays
-            // lazy and is forced after earlier clauses fail — a single
+            // Same entry-force rule as the top-level multi-clause emitter
+            // (the one predicate, first_clause_forces_on_every_path): force
+            // a parameter at entry only when the FIRST clause forces it on
+            // every call — its pattern scrutinizes it and no column to its
+            // left can fail — or the local's demand row proves every path
+            // strict; a parameter scrutinized only by LATER clauses, or by
+            // the first clause right of a column that can fail, stays lazy
+            // and is forced inside the clause conditions — a single
             // chain-split rebind when sound (later_clause_force_col), else
-            // per use via match_scrutinee. That is GHC's top-to-bottom, left-to-right
-            // laziness — a where-local `go [] _ = []` must return [] without
-            // forcing its second argument. (Forcing on ANY clause's scrutiny,
-            // as this once did, raised on `go [] (error …)`.)
+            // per use via match_scrutinee. That is GHC's top-to-bottom,
+            // left-to-right laziness — a where-local `go [] _ = []` must
+            // return [] without forcing its second argument, and `go (x : _)
+            // (y : _) = …; go _ _ = 0` must return 0 for `go [] ⊥`. (Forcing
+            // on ANY clause's scrutiny, as this once did, raised on `go []
+            // (error …)`; forcing on the first clause's scrutiny alone
+            // raised on `go [] (error …)` with a cons pattern in column 0.)
             let strict_row = self.local_strict_params.get(name).cloned();
             for j in 0..num_params {
-                let first_scrutinizes = clauses.first().is_some_and(|c| {
-                    c.patterns.get(j).is_some_and(TPattern::forces_scrutinee)
-                });
+                let first_forces = self.first_clause_forces_on_every_path(&clauses, j);
                 let is_strict = strict_row.as_ref()
                     .is_some_and(|v| v.get(j).copied().unwrap_or(false));
-                if first_scrutinizes || is_strict {
+                if first_forces || is_strict {
                     body.push(Stmt::Assign(
                         format!("_warg{}", j),
                         Expr::force(Expr::name(format!("_warg{}", j))),

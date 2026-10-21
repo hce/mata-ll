@@ -44,6 +44,39 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A multi-clause function forces only the columns GHC's left-to-right
+  match would force** (crash where GHC returns a value). Every column the
+  FIRST clause scrutinized was forced at entry — or, when every call site
+  was visible, by the call site — on the reasoning that the first clause
+  is tried on every call. But a clause tries its columns left to right
+  and is abandoned at the first column that fails, so a column to the
+  right of a failing one is never forced: `f (x : _) (y : _) = x + y;
+  f _ _ = 0` raised "boom" on `f [] (error "boom")` where GHC prints 0;
+  `h 0 0 = 1; h _ _ = 2` raised on `h 1 undefined` (GHC 2); the
+  Prelude's `zip3`, `zipWith3`, `(<*>)` and `liftA2` at `Maybe` and
+  `Either` had the same shape (`length (zip3 [] [] undefined)` raised, GHC
+  0; `Nothing <*> undefined` raised, GHC `Nothing`), and a where-local
+  group followed the same rule. An entry force now stands on the first
+  clause's columns only up to and including its first column that can
+  fail (a variable, tuple, single-constructor record or newtype column
+  cannot fail — it is matched or diverged on — so a force behind one
+  stays); the demand row still proves a column every clause body forces;
+  every other scrutinized column is forced inside the clause condition in
+  column order, exactly as a column only a later clause scrutinizes
+  already was, and bound raw. One predicate decides it for the module-
+  level convention row — which the call sites read, so a site no longer
+  evaluates such an argument either — and for where-local groups. The
+  bench corpus is byte-identical; a function whose first clause has two or
+  more columns that can fail forces the later ones per use inside the
+  match instead of once at entry, and its call sites suspend those
+  arguments. Found by the 2026-10 fresh-eyes review (L7). (GHC-goldened
+  case `first_clause_column_order`: the report's four shapes, three
+  columns with the refutable column first, middle and last and every pair
+  of them, a literal column, a variable column scrutinized only by the
+  second clause, a where-local group, a body-strict pair, a tuple column
+  left of a cons, as- and nested patterns on the right, guards, an
+  instance method, an IO body, `zip3`/`zipWith3`/`(<*>)` at `Maybe` and
+  `Either`, a partial application.)
 - **A binder's concreteness claim is a property of that binding alone**
   (silent wrong output and crashes). Codegen tracks which Lua locals are
   known to hold a value rather than a thunk by NAME, and a binder whose

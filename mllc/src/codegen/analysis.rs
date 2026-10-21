@@ -117,6 +117,42 @@ impl CodeGen {
         self.analyze_param_conventions(module, &scan);
     }
 
+    /// Does the FIRST clause force column `i` on every call — so an entry
+    /// force (or its site-forced upgrade) reorders no evaluation? The
+    /// first clause is tried on every call, but it tries its columns left
+    /// to right and is abandoned at the first column that fails, so a
+    /// column is forced by it on every path only when its pattern forces
+    /// the scrutinee AND every column to its left cannot fail
+    /// (`pattern_cannot_fail`: a binder, a tuple, a single-constructor
+    /// record, a newtype — a column that is either matched or diverged on,
+    /// never failed). `f (x : _) (y : _) = …; f _ _ = 0` forces column 0 on
+    /// every call and column 1 only after column 0 matched: `f [] ⊥` is 0
+    /// in GHC, and an entry force on column 1 raised instead. The columns
+    /// to the right of the first column that can fail are forced inside
+    /// the clause condition, in column order, by the match emitter
+    /// (`match_scrutinee`) — exactly as a later clause's columns are — and
+    /// bound raw; the demand row can still prove such a column forced on
+    /// every path through the BODIES (`strict`), and that entry force
+    /// stays. One rule for the module-level multi-clause arm (through the
+    /// convention row) and the where-local group emitter
+    /// (`where_func_group_body_stmts`), so a local `go` behaves as its
+    /// top-level twin does.
+    ///
+    /// The single-clause destructuring arm is deliberately NOT under this
+    /// rule: with no fallback clause, a failed column ends in a
+    /// pattern-match failure — ⊥ — so every column IS forced on every
+    /// non-⊥ path, and forcing a later column first changes only WHICH
+    /// exception is raised (`error "boom"` instead of "Non-exhaustive
+    /// patterns"), the same latitude GHC's own strictness analysis takes
+    /// under its imprecise-exceptions semantics and the same one the
+    /// demand row already takes for a body that is strict in a column
+    /// another column's non-exhaustive match may skip.
+    pub(super) fn first_clause_forces_on_every_path(&self, clauses: &[TClause], i: usize) -> bool {
+        let Some(first) = clauses.first() else { return false };
+        first.patterns.get(i).is_some_and(TPattern::forces_scrutinee)
+            && first.patterns[..i].iter().all(|p| self.pattern_cannot_fail(p))
+    }
+
     /// Decide each parameter's convention (see `ParamConv`), mirroring the
     /// force decisions the three parameter-emission paths of function_stmts
     /// make — through the SHARED dispatch predicates above and the same
@@ -125,8 +161,9 @@ impl CodeGen {
     /// delivery is visible:
     ///
     ///   * the position is forced on every path (demand row, or the
-    ///     scrutinizing pattern that pins an entry force), so evaluating
-    ///     the argument at the site cannot change what is forced;
+    ///     first clause's left-to-right match that pins an entry force —
+    ///     `first_clause_forces_on_every_path`), so evaluating the
+    ///     argument at the site cannot change what is forced;
     ///   * some site covers it and NO delivery bypasses the sites
     ///     (`ever_uncovered`): no partial application forwards into it, no
     ///     `$`/`.` hidden extra reaches it, the function never escapes as
@@ -180,11 +217,12 @@ impl CodeGen {
                     upgraded(clauses[0].patterns.get(i).is_some_and(TPattern::forces_scrutinee))
                 } else {
                     // Multiple clauses / guards: forced when the FIRST
-                    // clause scrutinizes the position (tried on every call)
-                    // or the demand row proves every path forces it;
-                    // always-cheap only marks concreteness otherwise.
-                    let needs_force = clauses.first()
-                        .is_some_and(|c| c.patterns.get(i).is_some_and(TPattern::forces_scrutinee));
+                    // clause forces the position on every call (its
+                    // pattern scrutinizes it and no column to its left can
+                    // fail — see first_clause_forces_on_every_path) or the
+                    // demand row proves every path forces it; always-cheap
+                    // only marks concreteness otherwise.
+                    let needs_force = self.first_clause_forces_on_every_path(clauses, i);
                     if needs_force || strict { upgraded(true) }
                     else if cheap { ParamConv::Cheap }
                     else { ParamConv::Lazy }

@@ -294,14 +294,11 @@ impl CodeGen {
                     continue 'col;
                 }
             }
-            // Column k must contribute a condition, and every condition a
-            // pattern contributes reads a path rooted at the (forced)
-            // scrutinee — so the first of them forces the param.
-            let scrut = Expr::force(Expr::name(pname.clone()));
-            let mut conds = Vec::new();
-            let mut binds = Vec::new();
-            self.collect_pattern_conditions(&scrut, pat, &mut conds, &mut binds);
-            if conds.is_empty() {
+            // Column k must contribute a condition (`pattern_cannot_fail`
+            // is the structural answer), and every condition a pattern
+            // contributes reads a path rooted at the (forced) scrutinee —
+            // so the first of them forces the param.
+            if self.pattern_cannot_fail(pat) {
                 continue;
             }
             return Some(k);
@@ -481,6 +478,45 @@ impl CodeGen {
         pattern.forces_scrutinee()
     }
 
+    /// Does matching this pattern contribute NO test to a clause condition
+    /// — once its scrutinee is forced, the match cannot fail? True for a
+    /// binder (`Var`, `Wildcard`), a tuple, a single-constructor ADT or
+    /// LuaDict record and a newtype wrapper whose sub-patterns all cannot
+    /// fail; false for a literal, an enum tag, a multi-constructor ADT, a
+    /// LuaDict enum and the builtin `True`/`False`/`Nothing`/`Just`/`[]`/
+    /// `(:)` tags. The structural mirror of `collect_pattern_conditions`'
+    /// condition-pushing arms, so the two cannot be asked separately (the
+    /// chain split and the entry-force rule both read this; neither runs
+    /// the emitter to find out, which would also register big-literal
+    /// pool entries out of emission order).
+    ///
+    /// A column of a clause whose pattern cannot fail is tried on every
+    /// call that reaches the clause and either diverges there or matches:
+    /// the columns to its right are then tried on every non-⊥ path
+    /// through the clause. That is what lets an entry force stand on a
+    /// column right of a tuple or record column, and what blocks one
+    /// right of a cons, literal or `Just` column (GHC abandons the clause
+    /// at the first failing column and never forces the rest).
+    pub(super) fn pattern_cannot_fail(&self, pattern: &TPattern) -> bool {
+        match pattern {
+            TPattern::Var(..) | TPattern::Wildcard => true,
+            TPattern::Paren(inner) | TPattern::As(_, inner) => self.pattern_cannot_fail(inner),
+            TPattern::LitPat(..) => false,
+            TPattern::Tuple(pats) => pats.iter().all(|p| self.pattern_cannot_fail(p)),
+            TPattern::Constructor { name, args, .. } => {
+                if self.is_newtype(name) {
+                    args.iter().all(|a| self.pattern_cannot_fail(a))
+                } else if self.luadict_enum_tag.contains_key(name) {
+                    false
+                } else if let Some((_, total, is_enum)) = self.constructor_info(name) {
+                    !is_enum && total == 1 && args.iter().all(|a| self.pattern_cannot_fail(a))
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
     /// Build an indexing path into a field, forcing it when the sub-pattern
     /// will inspect it. The field may hold a thunk (lazy construction), so
     /// indexing into it (`field[1]`, `field == tag`, ...) requires forcing.
@@ -506,9 +542,12 @@ impl CodeGen {
     /// The scrutinee expression to match `pat` against for top-level parameter
     /// `param`. A refutable pattern (constructor/literal) needs the value
     /// forced to WHNF to inspect its tag; if the param was not already forced
-    /// at entry (it is scrutinized only by a later clause — see `needs_force`),
-    /// force it HERE, inside the clause's `elseif` condition, so a matching
-    /// earlier clause never forces it. An irrefutable pattern (Var/Wildcard)
+    /// at entry (it is scrutinized only by a later clause, or by the first
+    /// clause to the right of a column that can fail — see
+    /// `first_clause_forces_on_every_path`), force it HERE, inside the
+    /// clause's condition, so a matching earlier clause — or an earlier
+    /// column of this clause that fails — never forces it: the condition is
+    /// an `and` chain in column order. An irrefutable pattern (Var/Wildcard)
     /// binds lazily and must stay the raw (unforced) param.
     pub(super) fn match_scrutinee(&self, param: &str, pat: &TPattern) -> Expr {
         if !pat.forces_scrutinee() || self.concrete_vars.contains(param) {
