@@ -44,6 +44,28 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **The WHNF mirror claims an inlined call by its substituted body**
+  (a redundant force; no observable change). `expr_yields_whnf`, the
+  predicate that mirrors which emissions already yield WHNF, declined
+  every call of an inline candidate — the call re-emits the candidate's
+  body, so the result is not a function return, and the mirror had no
+  way to judge the body — so a value-position consumer (an operator
+  operand, a list index, a scrutinee, a strict primitive argument)
+  wrapped the inlined emission in a `__force` it did not need:
+  `boxStart r c = 3 * (r `div` 3) + c `div` 3` indexing a row became
+  `__force((3 * …) + …)`, a one-line concatenation helper
+  `__force(… .. …)`. The inliner's decision now lives in one gate
+  (`inline_plan`: the arity and sharing check, the relocation check, the
+  capture check, the substitution), read by the emitter and by the
+  mirror alike, and the mirror's claim for a call the gate takes is the
+  claim of the substituted body — by construction the expression the
+  emitter emits, so the two cannot judge a site differently. The
+  refutation build checks every retained claim at run time across the
+  corpus. 146 of the 554 corpus programs lose forces (3,594 `__force`
+  occurrences on the changed lines become 1,479; no suspension changes
+  between its closure and carrier forms); the tracker's hot loops are
+  byte-identical and the canary unchanged. Found while fixing the
+  2026-10 review's L9.
 - **A callee's strictness row applies to a call only when the call
   saturates the row** (crash where GHC returns a value). The demand
   analysis propagates strictness across calls: a call of a function with

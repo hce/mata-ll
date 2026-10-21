@@ -152,7 +152,7 @@ pub(super) fn expr_references_name(expr: &TExpr, name: &str) -> bool {
 ///   (GHC only inlines into a lambda when the argument is work-free);
 /// - a lambda whose own parameter rebinds `name` shadows it — inner
 ///   occurrences are the lambda's parameter, never substituted (mirrors
-///   the `inner_subst.remove` in expr_subst_ast's Lambda arm);
+///   the `hide` of subst_texpr's Lambda arm);
 /// - `let` is counted as a plain sum without modelling its shadowing:
 ///   over-counting only declines an inline, never mis-emits (and is_cheap
 ///   keeps `let`/`case` out of inline-candidate bodies anyway).

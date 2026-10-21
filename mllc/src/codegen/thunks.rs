@@ -434,6 +434,21 @@ impl CodeGen {
                 {
                     return true;
                 }
+                // A call the inliner takes is emitted as the candidate's
+                // body under the call's substitution (try_inline_call →
+                // inline_plan, then the ordinary emitter), so its claim is
+                // the substituted body's own claim — judged by the same
+                // gate that decides the emission, so the mirror cannot
+                // see a site the emitter decides differently. The tracker's
+                // `fi ch off = ch * nf + off` index arithmetic is such a
+                // call: native `+`/`*` over forced operands, WHNF. A call
+                // the gate declines is an ordinary call, judged below.
+                if let TExprKind::App(func, arg) = &expr.kind {
+                    let (f, args) = Self::collect_app_spine(func, arg);
+                    if let Some(inlined) = self.inline_plan(f, &args) {
+                        return self.expr_yields_whnf(&inlined);
+                    }
+                }
                 // A saturated call to a scalar-HashMap runtime function
                 // returns a built value, never a thunk: the bodies return
                 // a fresh handle table (insert/delete/fromList), a

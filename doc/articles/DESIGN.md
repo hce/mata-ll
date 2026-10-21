@@ -688,7 +688,11 @@ function entry can skip forcing that parameter entirely.
 Small, pure, non-recursive functions with a single clause and no
 guards are identified as inline candidates. At call sites, their
 bodies are substituted with parameters replaced. This eliminates
-function-call overhead for trivial helpers.
+function-call overhead for trivial helpers. One gate (`inline_plan`)
+decides whether a call inlines, for the emitter and for the WHNF
+mirror alike: an inlined call yields WHNF exactly when the substituted
+body does, so an inlined index function's arithmetic is read without a
+force.
 
 ### Bind chain flattening
 

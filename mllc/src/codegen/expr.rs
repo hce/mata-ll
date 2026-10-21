@@ -1068,7 +1068,7 @@ impl CodeGen {
     /// Collect all applied arguments of a (possibly curried) application,
     /// split out only to keep `expr_ast_inner` readable: returns the head
     /// callee and the arguments in application order.
-    fn collect_app_spine<'a>(func: &'a TExpr, arg: &'a TExpr) -> (&'a TExpr, Vec<&'a TExpr>) {
+    pub(super) fn collect_app_spine<'a>(func: &'a TExpr, arg: &'a TExpr) -> (&'a TExpr, Vec<&'a TExpr>) {
         let mut args = vec![arg];
         let mut f = func;
         while let TExprKind::App(inner_f, inner_arg) = &f.kind {
@@ -1174,51 +1174,66 @@ impl CodeGen {
 
     /// The small-function inliner gate of the App arm, split out only to
     /// keep `expr_ast_inner` readable: inline small pure functions at the
-    /// call site. Substitution re-emits each argument at every occurrence
-    /// of its parameter, so an argument whose evaluation costs anything
-    /// is admitted only where the parameter is emitted at most once
-    /// (occ_counts, see find_inline_candidates) — otherwise `sq x = x * x`
-    /// at `sq (nfib 30)` would run the call twice, a sharing loss GHC's
-    /// inliner never allows. A declined site falls through to the ordinary
-    /// call (general_call_ast), which evaluates (or thunks) the argument
-    /// exactly once.
+    /// call site — the body `inline_plan` substituted, emitted by the
+    /// ordinary emitter and grouped. A declined site falls through to the
+    /// ordinary call (general_call_ast), which evaluates (or thunks) the
+    /// argument exactly once.
     fn try_inline_call(&mut self, f: &TExpr, args: &[&TExpr]) -> Option<Expr> {
-        if let TExprKind::Var(name) = &f.kind
-            && !self.is_local_shadowed(name)
-            && let Some((params, body, occ_counts)) = self.inline_fns.get(name)
-                && args.len() == params.len()
-                && args.iter().zip(occ_counts.iter())
-                    .all(|(a, &n)| n <= 1 || Self::is_trivial_arg(a)) {
-                    let (params, body) = (params.clone(), body.clone());
-                    // Relocation check: the body's OTHER free names (module
-                    // constants, primitive method heads) must resolve here
-                    // exactly as at the definition — a call site whose LOCAL
-                    // binding shadows one of them would capture it (`addP x
-                    // = x + p` inlined under `let p = …` read the local p:
-                    // wrong value, and a crash when the local's type
-                    // differed). Same gate as the fused-pipeline inliner;
-                    // collect_var_refs over-approximates (body binders
-                    // included), which only declines, and the site falls
-                    // back to the ordinary call.
-                    let mut fv = std::collections::HashSet::new();
-                    Self::collect_var_refs(&body, &mut fv);
-                    if fv.iter().any(|v| !params.contains(v) && self.is_local_shadowed(v)) {
-                        return None;
-                    }
-                    let mut subst = std::collections::HashMap::new();
-                    for (param, arg) in params.iter().zip(args.iter()) {
-                        subst.insert(param.clone(), *arg);
-                    }
-                    // Capture check: subst_texpr does not alpha-rename, so
-                    // an argument whose variables collide with a binder in
-                    // the body must not be inlined (see subst_would_capture).
-                    if Self::subst_would_capture(&body, &subst) {
-                        return None;
-                    }
-                    let inlined = self.expr_subst_ast(&body, &subst);
-                    return Some(Expr::paren(inlined));
-                }
-        None
+        let inlined = self.inline_plan(f, args)?;
+        Some(Expr::paren(self.expr_ast(&inlined)))
+    }
+
+    /// The inlined body of a call of an inline candidate — the candidate's
+    /// body with the call's arguments substituted for its parameters
+    /// (`subst_texpr`) — or `None` where the call is emitted as an
+    /// ordinary call. ONE gate for the two readers of that decision: the
+    /// emitter (`try_inline_call`, which emits what this returns) and the
+    /// WHNF mirror (`expr_yields_whnf`, which claims what the emission of
+    /// what this returns yields), so neither can judge a site the other
+    /// decides differently. Substitution re-emits each argument at every
+    /// occurrence of its parameter, so an argument whose evaluation costs
+    /// anything is admitted only where the parameter is emitted at most
+    /// once (occ_counts, see find_inline_candidates) — otherwise `sq x = x
+    /// * x` at `sq (nfib 30)` would run the call twice, a sharing loss
+    /// GHC's inliner never allows.
+    pub(super) fn inline_plan(&self, f: &TExpr, args: &[&TExpr]) -> Option<TExpr> {
+        let TExprKind::Var(name) = &f.kind else { return None };
+        if self.is_local_shadowed(name) {
+            return None;
+        }
+        let (params, body, occ_counts) = self.inline_fns.get(name)?;
+        if args.len() != params.len()
+            || !args.iter().zip(occ_counts.iter())
+                .all(|(a, &n)| n <= 1 || Self::is_trivial_arg(a))
+        {
+            return None;
+        }
+        // Relocation check: the body's OTHER free names (module
+        // constants, primitive method heads) must resolve here
+        // exactly as at the definition — a call site whose LOCAL
+        // binding shadows one of them would capture it (`addP x
+        // = x + p` inlined under `let p = …` read the local p:
+        // wrong value, and a crash when the local's type
+        // differed). Same gate as the fused-pipeline inliner;
+        // collect_var_refs over-approximates (body binders
+        // included), which only declines, and the site falls
+        // back to the ordinary call.
+        let mut fv = std::collections::HashSet::new();
+        Self::collect_var_refs(body, &mut fv);
+        if fv.iter().any(|v| !params.contains(v) && self.is_local_shadowed(v)) {
+            return None;
+        }
+        let mut subst = std::collections::HashMap::new();
+        for (param, arg) in params.iter().zip(args.iter()) {
+            subst.insert(param.clone(), *arg);
+        }
+        // Capture check: subst_texpr does not alpha-rename, so
+        // an argument whose variables collide with a binder in
+        // the body must not be inlined (see subst_would_capture).
+        if Self::subst_would_capture(body, &subst) {
+            return None;
+        }
+        Some(Self::subst_texpr(body, &subst))
     }
 
     /// `case hmLookup k m of Just v -> A; Nothing -> B` (either branch

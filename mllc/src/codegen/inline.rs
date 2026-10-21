@@ -1,10 +1,11 @@
 //! Call-site inlining: an inline candidate's body emitted at a call site
 //! with the call's arguments in place of its parameters.
 //!
-//! The substitution is applied at the TIR level (`subst_texpr`) and the
-//! result goes through the ordinary emitter, so a substituted parameter is
-//! emitted and weighed exactly as the call-site expression it stands for —
-//! by construction, not by a mirrored walk. (An earlier version carried a
+//! The substitution is applied at the TIR level (`subst_texpr`, under the
+//! one gate `inline_plan` in expr.rs) and the result goes through the
+//! ordinary emitter, so a substituted parameter is emitted and weighed
+//! exactly as the call-site expression it stands for — by construction,
+//! not by a mirrored walk. (An earlier version carried a
 //! substituting twin of every builder and predicate — expr/arg/callee/
 //! forced/yields-whnf/cheap-to-force — that had to mirror its plain twin
 //! arm for arm; the `.` twin had drifted and its fallback arm dropped the
@@ -17,12 +18,6 @@ use super::CodeGen;
 use super::util::count_arrows;
 
 impl CodeGen {
-    /// The inlined body under `subst`, emitted by the ordinary emitter.
-    pub(super) fn expr_subst_ast(&mut self, expr: &TExpr, subst: &std::collections::HashMap<String, &TExpr>) -> super::lua::Expr {
-        let e = Self::subst_texpr(expr, subst);
-        self.expr_ast(&e)
-    }
-
     /// Would substituting `subst` into `body` CAPTURE a variable?
     /// `subst_texpr` is shadow-aware (a binder hides same-named entries of
     /// the map in its scope) but performs no alpha-renaming, so an argument
