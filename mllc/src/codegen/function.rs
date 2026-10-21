@@ -162,26 +162,6 @@ impl LocalRowsSnapshot {
     }
 }
 
-/// Narrow snapshot for the per-BRANCH loop of the plain (guard-free)
-/// value-position `case` emission, which registers pattern-bound names for
-/// reference resolution but makes no concreteness claims of its own. A
-/// full [`ScopeSnapshot`] there cloned five collections per branch —
-/// including the module-sized `concrete_vars` — only to write back one.
-/// The capture/restore pair keeps the field list in one place, same as the
-/// full snapshot's variants.
-pub(super) struct LocalVarsSnapshot {
-    local_vars: std::collections::HashSet<String>,
-}
-
-impl LocalVarsSnapshot {
-    pub(super) fn capture(cg: &CodeGen) -> Self {
-        LocalVarsSnapshot { local_vars: cg.local_vars.clone() }
-    }
-    pub(super) fn restore(self, cg: &mut CodeGen) {
-        cg.local_vars = self.local_vars;
-    }
-}
-
 /// Spill scope for an emitted INNER Lua function (a lambda, a let or
 /// guarded-case IIFE, a where-group function, a where-IIFE). The inner
 /// function has its own 200-local budget, and its spilled locals are
@@ -539,8 +519,10 @@ impl CodeGen {
             } else if expr_references_name(clauses[0].plain_body(), &func.name) {
                 // Self-referencing value binding (e.g., infinite list).
                 // Use the bare name (not fn_table slot) so self-references
-                // resolve to this local binding, not a potentially missing slot.
-                self.local_vars.insert(lua_name.clone());
+                // resolve to this local binding, not a potentially missing
+                // slot. Bound like any binder (bind_local_name); the arms
+                // below state the binding's own claim.
+                self.bind_local_name(&lua_name);
                 if !self.forward_declared.contains(&lua_name) {
                     stmts.push(Stmt::Local(vec![lua_name.clone()], None));
                 }
@@ -548,7 +530,9 @@ impl CodeGen {
                     // Cons-headed (`xs = 0 : xs`): the value is an eagerly built
                     // cons cell whose TAIL self-reference `expr_lazy_ast` defers
                     // into a thunk. The cell itself is a concrete value, so the
-                    // deferred self-reference reads it after assignment.
+                    // deferred self-reference reads it after assignment — the
+                    // binding's own claim, stated before its body is emitted.
+                    self.concrete_vars.insert(lua_name.clone());
                     let rhs = self.expr_lazy_ast(clauses[0].plain_body());
                     stmts.push(Stmt::Assign(lua_name.clone(), rhs));
                     is_concrete = true;
@@ -562,13 +546,13 @@ impl CodeGen {
                     // RHS as a thunk so every self-reference resolves after the
                     // binding is assigned. The self-reference INSIDE the thunk
                     // must stay a bare (deferred) name, not `__force(xs)` — that
-                    // would force the in-progress thunk and loop — so mark it
-                    // concrete only while emitting the body; external uses of
-                    // the (thunked) binding still force it.
-                    let was_concrete = self.concrete_vars.contains(&lua_name);
+                    // would force the in-progress thunk and loop — so the name
+                    // is claimed while the body is emitted; the binding's own
+                    // outcome (`is_concrete = false`, written back below)
+                    // withdraws it, so external uses of the thunked binding
+                    // force it.
                     self.concrete_vars.insert(lua_name.clone());
                     let rhs = self.expr_ast(clauses[0].plain_body());
-                    if !was_concrete { self.concrete_vars.remove(&lua_name); }
                     stmts.push(Stmt::Assign(lua_name.clone(), Expr::thunk(rhs)));
                     is_concrete = false;
                 }
@@ -662,6 +646,10 @@ impl CodeGen {
             // The function name is concrete (it's a function value) — allow
             // self-recursive calls to skip __force
             self.concrete_vars.insert(lua_name.clone());
+            // The Lua parameters are binders (bind_local_name): a dictionary
+            // parameter is a table value and is claimed at once; `_argN` is
+            // claimed per its convention row below.
+            for p in &all_params { self.bind_local_name(p); }
             for dp in &dict_param_names { self.concrete_vars.insert(dp.clone()); }
 
             let all_simple = Self::emission_all_simple(clause);
@@ -813,6 +801,9 @@ impl CodeGen {
         let target = self.fn_target(&lua_name);
         let mut body = Vec::new();
         self.concrete_vars.insert(lua_name.clone());
+        // The Lua parameters are binders (bind_local_name); the dictionary
+        // parameters are table values, claimed at once.
+        for p in &all_params { self.bind_local_name(p); }
         for dp in &dict_param_names { self.concrete_vars.insert(dp.clone()); }
         // Bind each parameter per its convention row (see
         // analyze_param_conventions, which folds the first-clause-scrutinizes
@@ -1201,6 +1192,12 @@ impl CodeGen {
         } else {
             // Thunked: the name must not be considered concrete, even if a
             // same-named outer binding was (this assignment shadows it).
+            // Withdrawn HERE, not by a declaration reset: where_binds_stmts
+            // does not re-declare a name that is already a local (a
+            // parameter or pattern variable the where-binding shadows is
+            // assigned in place), so this is the binding's only chance to
+            // state its claim — the one remove the bind_local_name rule
+            // leaves standing.
             self.concrete_vars.remove(&sname);
             if let Some(v) = bare_var_alias(binds, i) {
                 // Bare-variable RHS: share the existing thunk-or-value
@@ -1274,7 +1271,9 @@ impl CodeGen {
         // provably WHNF: mark it concrete so the clause conditions built by
         // match_scrutinee do not re-force it. `_warg` names are shared by
         // every where-group, so the marks — and the parameter locals the
-        // body registers — must not outlive this one.
+        // body registers — must not outlive this one, and a group nested in
+        // an enclosing group's clause body must not inherit the enclosing
+        // group's marks either: its parameters are bound afresh below.
         let scope = VarsSnapshot::capture(self);
         // This group's match fall-off names the function (see
         // `local_fn_fall_off`); saved and restored because the group's
@@ -1286,6 +1285,7 @@ impl CodeGen {
         // enclosing function's (a recursive call would clobber its
         // caller's slots — see FnSpillScope).
         let spill = FnSpillScope::enter(self);
+        for p in &params { self.bind_local_name(p); }
 
         if clauses.len() == 1 {
             let clause = &clauses[0];

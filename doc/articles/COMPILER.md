@@ -392,7 +392,15 @@ test).
 Responsibilities beyond the obvious translation:
 - **Laziness:** emits thunks for non-strict values; uses `demand_info` to skip
   thunking strict params and `analyze_call_sites` to skip redundant `__force`
-  calls on values already known concrete.
+  calls on values already known concrete. The concreteness set
+  (`concrete_vars`, consulted by the `Var` emission) is keyed by Lua name,
+  and a claim is a property of ONE binding: every binder is introduced
+  through `bind_local_name` (mod.rs), which withdraws any claim a
+  same-named enclosing binder left, and the binding site inserts its own
+  claim exactly where its source proves WHNF (a convention row, a strict
+  `let`/`where` value, a WHNF-yielding bound action, a fused loop local);
+  the scope snapshots (`ScopeSnapshot`, `VarsSnapshot` in function.rs)
+  restore the set at every scope exit.
 - **Constructor tracking:** record/ADT layout for construction and field access.
 - **Type-specialized operations:** e.g. `show` for lists/tuples is emitted per
   element type, using the `Ty` carried on each `TExpr`.

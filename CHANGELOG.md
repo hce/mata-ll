@@ -44,6 +44,37 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A binder's concreteness claim is a property of that binding alone**
+  (silent wrong output and crashes). Codegen tracks which Lua locals are
+  known to hold a value rather than a thunk by NAME, and a binder whose
+  source was not a value left a same-named enclosing claim standing, so an
+  inner binder named like a concrete outer one — a case or clause pattern
+  variable under a strict parameter (`k x ys = … case ys of (x : _) -> if
+  x == 7 …` printed `other` where GHC prints `seven`), a record matched
+  with its own field names (`describe (P name age) = … age + 1` raised
+  "attempt to perform arithmetic on a table value"), a comprehension
+  generator, where-local clause or tuple-pattern lambda binder named like
+  a top-level function, a nested where-group's parameter, a guarded
+  `case` nested in another's branch — was read without its `__force`.
+  Every binder is now introduced through one helper that withdraws any
+  claim for the name, and each binding site states its own claim exactly
+  where its source proves a value; the hand-written save/restore and
+  remove dances that guarded a few sites are gone. The fused
+  `case hmLookup … of Just v` emission also let its binder's claim outlive
+  the branch. A concrete inner binder over a lazy outer name keeps its
+  bare reads (its emission is byte-identical to a fresh name's); the
+  bench, program and test corpora are byte-identical apart from the
+  forces gained at inherited-name binders. Found by the 2026-10
+  fresh-eyes review (L5). (GHC-goldened cases `shadow_concrete_binders`:
+  case alternatives in value and action position, guarded cases, top-level
+  and where-local clause patterns, do-let function groups, variable and
+  pattern lambdas, let patterns and values, where values, do-binds and
+  do-pattern binds, comprehension generators and lets, pattern guards,
+  as- and nested patterns, fused `foldl'`/`sum`/`length` loops, each with
+  binders named like a strict parameter, a top-level function, a record
+  field selector, a where-bound function, a strict let and a do-bound
+  variable; `shadow_lazy_outer`: the other direction, with the emission
+  twin test in codegen_shape.rs.)
 - **A first-class operator is the value of whatever the operator denotes**
   (silent wrong output and crashes). An operator in parentheses used as a
   value — `zipWith (^) xs ns`, `foldr (<+>) 0 xs`, `(=<<) f m` — was

@@ -20,7 +20,7 @@
 use crate::tir::*;
 use crate::types::Ty;
 use super::CodeGen;
-use super::function::{FnSpillScope, LocalRowsSnapshot, LocalVarsSnapshot, VarsSnapshot};
+use super::function::{FnSpillScope, LocalRowsSnapshot, VarsSnapshot};
 use super::lua::{Block, Expr, FuncBody, Item, Stmt};
 use super::names::{dict_field_name, is_builtin_op, lua_field_index, lua_number_literal, lua_quoted_string, primitive_method_lua_op, sanitize_name};
 use super::util::{count_arrows};
@@ -258,6 +258,11 @@ impl CodeGen {
                 let first_forces = branches
                     .first()
                     .is_none_or(|b| b.pattern.forces_scrutinee());
+                // The dispatch closure's parameter is a binder like any
+                // other: bound first (an enclosing guarded case's forced
+                // `_cg` must not lend this one its claim), claimed below
+                // only when forced here.
+                self.bind_local_name("_cg");
                 if first_forces {
                     if !self.expr_yields_whnf(scrutinee) {
                         stmts.push(Stmt::Assign("_cg".into(), Expr::force(Expr::name("_cg"))));
@@ -271,7 +276,6 @@ impl CodeGen {
                     }
                     self.concrete_vars.insert("_cg".to_string());
                 }
-                self.local_vars.insert("_cg".to_string());
                 let clauses: Vec<TClause> = branches.iter().map(|b| TClause {
                     span: None,
                     patterns: vec![b.pattern.clone()],
@@ -333,23 +337,26 @@ impl CodeGen {
                     let mut conditions = Vec::new();
                     let mut bindings = Vec::new();
                     self.collect_pattern_conditions(&Expr::name("_s"), &branch.pattern, &mut conditions, &mut bindings);
-                    // Register pattern-bound names as locals (scoped to this
-                    // branch) so references resolve to them rather than a
-                    // same-named top-level/prelude function.
-                    let scope = LocalVarsSnapshot::capture(self);
+                    // Bind the pattern-bound names (scoped to this branch)
+                    // so references resolve to them rather than a same-named
+                    // top-level/prelude function — and read them forced: a
+                    // branch binder is a lazy field or the unforced `_s`,
+                    // never a value, whatever a same-named enclosing binder
+                    // (a site-forced parameter `x` over `(x : _)`) claimed.
+                    let scope = VarsSnapshot::capture(self);
                     if conditions.is_empty() {
                         if i > 0 {
                             let mut bs = Vec::new();
                             for (var, val) in &bindings {
                                 bs.push(Stmt::Local(vec![var.clone()], Some(val.clone())));
-                                self.local_vars.insert(var.clone());
+                                self.bind_local_name(var);
                             }
                             bs.push(Stmt::Return(self.tail_ast(branch.plain_body(), false)));
                             else_b = Some(Block(bs));
                         } else {
                             for (var, val) in &bindings {
                                 direct.push(Stmt::Local(vec![var.clone()], Some(val.clone())));
-                                self.local_vars.insert(var.clone());
+                                self.bind_local_name(var);
                             }
                             direct.push(Stmt::Return(self.tail_ast(branch.plain_body(), false)));
                         }
@@ -360,7 +367,7 @@ impl CodeGen {
                     let mut bs = Vec::new();
                     for (var, val) in &bindings {
                         bs.push(Stmt::Local(vec![var.clone()], Some(val.clone())));
-                        self.local_vars.insert(var.clone());
+                        self.bind_local_name(var);
                     }
                     bs.push(Stmt::Return(self.tail_ast(branch.plain_body(), false)));
                     if chain.is_none() {
@@ -480,9 +487,9 @@ impl CodeGen {
                         stmts.push(Stmt::Assign(lval, rhs));
                         self.concrete_vars.insert(sname);
                     } else {
-                        // Thunked: must not stay marked concrete (a same-named
-                        // outer binding may have been).
-                        self.concrete_vars.remove(&sname);
+                        // Thunked: no claim — the group's forward declaration
+                        // withdrew any a same-named outer binding left
+                        // (bind_local_name).
                         if let Some(v) = bare_var_alias(binds, i) {
                             // Bare-variable RHS: share the existing
                             // thunk-or-value (see bare_var_alias).
@@ -527,12 +534,10 @@ impl CodeGen {
                     std::mem::replace(&mut self.cur_result_demand, crate::demand::Demand::Head);
                 // A lambda parameter is NOT guaranteed forced: when the lambda
                 // is invoked through a higher-order position the caller cannot
-                // see its strictness and may pass a thunk. Drop the params from
-                // concrete_vars (a same-named outer binding may be concrete) so
-                // their uses in the body are forced rather than emitted bare.
+                // see its strictness and may pass a thunk. Bound without a
+                // claim (bind_local_name), so uses in the body are forced.
                 for p in &ps {
-                    self.local_vars.insert(p.clone());
-                    self.concrete_vars.remove(p);
+                    self.bind_local_name(p);
                 }
                 let mut all_params = ps.clone();
                 all_params.extend(eta_params.iter().cloned());
@@ -1288,7 +1293,10 @@ impl CodeGen {
             vec!["_s".into()],
             Some(Expr::call_named("__mll_hm_slot", vec![k_e, m_e])),
         )];
-        let scope = LocalVarsSnapshot::capture(self);
+        // The Just binder is scoped to its branch: its claim must not reach
+        // the Nothing branch or the continuation (a same-named enclosing
+        // binder is read there).
+        let scope = VarsSnapshot::capture(self);
         let mut just_stmts = Vec::new();
         if let TPattern::Var(v, _) = just_pat {
             let vn = sanitize_name(v);
@@ -1302,7 +1310,8 @@ impl CodeGen {
                 else_b: None,
             });
             just_stmts.push(Stmt::Local(vec![vn.clone()], Some(Expr::name("_s"))));
-            self.local_vars.insert(vn.clone());
+            // The slot read is a WHNF value: bound, then claimed.
+            self.bind_local_name(&vn);
             self.concrete_vars.insert(vn);
         }
         just_stmts.push(Stmt::Return(self.tail_ast(just_body, false)));

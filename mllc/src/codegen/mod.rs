@@ -574,13 +574,51 @@ impl CodeGen {
     /// Lua's per-function local variable limit.
     const LOCAL_LIMIT: usize = 180;
 
+    /// Introduce a binder named `name` in the current scope: the ONE place a
+    /// Lua name becomes a local of the emission (`local_vars`, so references
+    /// resolve to it rather than a same-named top-level or prelude function)
+    /// — and the one place a concreteness claim is withdrawn.
+    ///
+    /// A binder's concreteness (`concrete_vars`: the name holds a WHNF value,
+    /// so reads skip `__force`) is a property of THAT binding alone, never
+    /// inherited by name: an inner binder named like a concrete outer one — a
+    /// clause pattern variable under a site-forced parameter, a record
+    /// matched with its own field names, a comprehension generator or lambda
+    /// pattern named like a top-level function, a nested where-group's
+    /// `_wargN` — holds whatever ITS source delivers, which is a lazy field or
+    /// a raw argument far more often than a value. So every binder starts
+    /// without a claim here, and the binding site inserts one again exactly
+    /// where its own source proves WHNF: a concrete source variable
+    /// (clause_intro_stmts), a parameter's convention row, a strict or
+    /// exact-first-force `let`/`where` value, a WHNF-yielding bound action, a
+    /// fused loop's accumulator. Without this reset the stale claim made
+    /// `x == 7` compare a thunk table with 7 and `age + 1` raise "arithmetic
+    /// on a table value" (2026-10 review, L5).
+    ///
+    /// Every declaration path goes through here: `declare_local_parts` for a
+    /// counted `local`/spill slot, and the sites whose binder is not a counted
+    /// local call it directly — the Lua function parameter lists (`_argN`,
+    /// `_wargN`, `_etaN`, dictionary parameters, lambda parameters, the
+    /// guarded-case closure's `_cg`), the value-position `case` branch
+    /// binders (that arm's branch-block locals are not budget-counted), the
+    /// `__mll_fu_*` fused-loop locals, the fused IORef-modify lambda's
+    /// parameter, the fused HashMap lookup's `Just` binder, and a
+    /// module-level value binding's forward declaration (a slot, not a
+    /// counted local).
+    fn bind_local_name(&mut self, name: &str) {
+        self.local_vars.insert(name.to_string());
+        self.concrete_vars.remove(name);
+    }
+
     /// Declare a local variable for a block-building emission path. Returns
     /// an optional statement that must precede the declaration (the one-time
     /// `local _v = {}` spill-table setup) and the declaration itself: a fresh
     /// `local name` under the limit, a `_v[N]` slot assignment over it.
-    /// Also registers the name in `local_vars` (and `var_slots` if tabled).
+    /// Binds the name (`bind_local_name`: registered in `local_vars`, its
+    /// concreteness claim withdrawn) and records its slot in `var_slots` if
+    /// tabled.
     fn declare_local_parts(&mut self, name: &str) -> (Option<lua::Stmt>, LocalDecl) {
-        self.local_vars.insert(name.to_string());
+        self.bind_local_name(name);
         self.local_count += 1;
         if self.local_count > Self::LOCAL_LIMIT {
             let pre = if !self.var_table_emitted {

@@ -1384,3 +1384,57 @@ main = print (runST (do
         "the stored suspension must be a lifted carrier: {body}"
     );
 }
+
+/// A binder's concreteness claim is a property of that binding alone, in
+/// both directions: an inner binder whose own source proves a value — a
+/// parameter every call site delivers concrete, a strict `let`/`where`
+/// value, a bound action yielding WHNF — is read bare even when it is named
+/// like a suspended enclosing binding (a thunked CAF, a lazy parameter). So
+/// the program with the shadowing names must emit byte-identical Lua to its
+/// twin with fresh inner names (modulo the spelling of those names): a
+/// `__force` gained here would be a claim lost to the name-keyed reset.
+#[test]
+fn concrete_inner_binder_over_lazy_outer_emits_like_the_unshadowed_twin() {
+    let template = "lazyTop :: Int\n\
+         lazyTop = length [(), ()] + 40\n\
+         strictParam :: Int -> Int\n\
+         strictParam INNER = INNER * 2 + 1\n\
+         strictLet :: Int -> Int\n\
+         strictLet n = let INNER = n * 3 in INNER + 1\n\
+         strictWhere :: Int -> Int\n\
+         strictWhere n = INNER + 2\n\
+         \x20 where\n\
+         \x20\x20\x20 INNER = n * 4\n\
+         boundAction :: Int -> IO ()\n\
+         boundAction n = do\n\
+         \x20\x20\x20 INNER <- pure (n + 1)\n\
+         \x20\x20\x20 print (INNER * 10)\n\
+         lazyParam :: Int -> Int -> Int\n\
+         lazyParam INNER n = if n > 0 then n else INNER\n\
+         innerOverLazyParam :: Int -> Int\n\
+         innerOverLazyParam lazyTop = case map (+ 1) [lazyTop] of\n\
+         \x20\x20\x20 (v : _) -> let INNER = v * 2 in INNER + 3\n\
+         \x20\x20\x20 [] -> 0\n\
+         main :: IO ()\n\
+         main = do\n\
+         \x20\x20\x20 print lazyTop\n\
+         \x20\x20\x20 print (strictParam 5)\n\
+         \x20\x20\x20 print (strictLet 5)\n\
+         \x20\x20\x20 print (strictWhere 5)\n\
+         \x20\x20\x20 boundAction 5\n\
+         \x20\x20\x20 print (lazyParam (length [(), ()] + 7) 0)\n\
+         \x20\x20\x20 print (innerOverLazyParam (length [()] + 1))\n";
+    let shadowed = template.replace("INNER", "lazyTop");
+    let fresh = template.replace("INNER", "lazyTopX");
+    let a = compile(&shadowed, Path::new("tests/cases"), &[])
+        .expect("the shadowing program must compile")
+        .lua_code;
+    let b = compile(&fresh, Path::new("tests/cases"), &[])
+        .expect("the fresh-name twin must compile")
+        .lua_code
+        .replace("lazyTopX", "lazyTop");
+    assert!(
+        a == b,
+        "a concrete inner binder named like a lazy outer one must emit exactly as a fresh name does"
+    );
+}

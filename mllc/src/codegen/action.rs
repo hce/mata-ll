@@ -677,8 +677,7 @@ impl CodeGen {
             &mut self.cur_result_demand, crate::demand::Demand::Head);
         let cell = self.forced_ast(fargs[0]);
         let scope = VarsSnapshot::capture(self);
-        self.local_vars.insert(vname.clone());
-        self.concrete_vars.remove(&vname);
+        self.bind_local_name(&vname);
         let rhs = self.forced_ast(body);
         scope.restore(self);
         self.cur_result_demand = saved_rd;
@@ -895,12 +894,10 @@ impl CodeGen {
                         // The bound value is force-free downstream only if the
                         // action yields WHNF. A `return ⊥` binds a thunk (kept
                         // lazy per the eagerness contract), so its uses must
-                        // force it — do NOT mark it concrete (and clear any
-                        // concreteness a same-named outer binding left).
+                        // force it — the declaration above withdrew any claim
+                        // a same-named outer binding left (bind_local_name).
                         if self.action_result_is_whnf(lhs) {
                             self.concrete_vars.insert(param_name);
-                        } else {
-                            self.concrete_vars.remove(&param_name);
                         }
                         expr = body;
                         inside_action = true;
@@ -1072,9 +1069,9 @@ impl CodeGen {
                                 stmts.push(Stmt::Assign(lval, rhs_e));
                                 self.concrete_vars.insert(bname);
                             } else {
-                                // Thunked: must not stay marked concrete (a
-                                // same-named outer binding may have been).
-                                self.concrete_vars.remove(&bname);
+                                // Thunked: no claim — the group's forward
+                                // declaration withdrew any a same-named outer
+                                // binding left (bind_local_name).
                                 if let Some(v) = bare_var_alias(binds, i) {
                                     // Bare-variable RHS: share the existing
                                     // thunk-or-value (see bare_var_alias).

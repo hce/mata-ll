@@ -2073,7 +2073,11 @@ the identical force-first-then-yield-second behaviour.
 The compiler tracks concrete variables (already-forced values) to
 skip redundant `__force` calls at runtime. Function parameters forced
 at entry, top-level bindings, and monadic bind continuation
-parameters are marked concrete.
+parameters are marked concrete. The mark belongs to one binding, not
+to a name: a binder that shadows a concrete name starts unmarked and
+is marked only by what its own source proves, so a pattern variable
+named like a strict parameter or a top-level function is still read
+as the suspended value it may be.
 
 ## Tail calls
 

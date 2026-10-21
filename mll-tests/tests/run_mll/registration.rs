@@ -438,6 +438,13 @@ mll_test!(demand_shadowing, "demand_shadowing.mll");
 // where-local / top-level name must not eagerize a binding the real callee
 // never demands.
 mll_test!(shadowed_demand_rows, "shadowed_demand_rows.mll");
+// A binder's concreteness claim is a property of that binding alone (L5):
+// an inner binder named like a concrete enclosing name holds what ITS
+// source delivers and is read forced; a concrete inner binder over a lazy
+// outer name is read bare (its emission equals the unshadowed twin's —
+// codegen_shape.rs).
+mll_test!(shadow_concrete_binders, "shadow_concrete_binders.mll");
+mll_test!(shadow_lazy_outer, "shadow_lazy_outer.mll");
 mll_test!(seq_action_value, "seq_action_value.mll");
 mll_test!(rank2, "rank2.mll");
 

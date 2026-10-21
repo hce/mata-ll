@@ -633,6 +633,21 @@ values (`concrete_vars`). References to concrete variables skip the
 primitives and forward-declared function names, and grows as
 assignments to known-concrete values are encountered.
 
+A claim is a property of one binding, never of a name: every binder —
+a `local`, a spill slot, a Lua function parameter, a loop temporary —
+is introduced through one helper (`bind_local_name`), which registers
+the name as a local and withdraws any claim a same-named enclosing
+binder made; the binding site then states its own claim exactly where
+its source proves a value (a convention row, a strict `let`/`where`
+value, a bound action that yields WHNF, a fused loop's accumulator). An
+inner binder named like a concrete outer one — a clause pattern
+variable under a strict parameter, a record matched with its own field
+names, a comprehension generator named like a top-level function — is
+therefore read forced, and a concrete inner binder over a lazy outer
+name is read bare, exactly as a fresh name would be. Scope snapshots
+restore the set at every scope exit, so a claim never outlives its
+binding either.
+
 ### Call-site analysis
 
 A whole-program pass before code generation examines every call site

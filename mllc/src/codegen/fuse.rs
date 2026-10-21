@@ -541,7 +541,7 @@ impl CodeGen {
                     vec![xn.clone()],
                     Some(Expr::call_named(n, vec![Expr::name(cur)])),
                 )];
-                self.local_vars.insert(xn.clone());
+                self.bind_local_name(&xn);
                 if *whnf_result {
                     self.concrete_vars.insert(xn.clone());
                 }
@@ -557,7 +557,7 @@ impl CodeGen {
                     &[(cur, ty)],
                 );
                 let mut out = vec![Stmt::Local(vec![xn.clone()], Some(e))];
-                self.local_vars.insert(xn.clone());
+                self.bind_local_name(&xn);
                 if whnf {
                     self.concrete_vars.insert(xn.clone());
                 }
@@ -835,9 +835,9 @@ impl CodeGen {
         // its provable WHNF-ness, and an unproven one is read through
         // `__force` exactly like any lazy local. The scope snapshot
         // captured above unregisters everything on exit.
-        self.local_vars.insert("__mll_fu_a".to_string());
+        self.bind_local_name("__mll_fu_a");
         self.concrete_vars.insert("__mll_fu_a".to_string());
-        self.local_vars.insert("__mll_fu_x".to_string());
+        self.bind_local_name("__mll_fu_x");
         self.concrete_vars.insert("__mll_fu_x".to_string());
         let source_first: Vec<StageLocal> =
             stage_locals.into_iter().rev().collect();
