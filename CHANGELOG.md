@@ -44,6 +44,40 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A fused `take` decides on its budget before anything inside it is
+  evaluated** (a spent budget over a bottom source raised). List-pipeline
+  fusion emits `sum`/`length`/`foldl'` over `take`/`map`/`filter` chains
+  as one loop, and the loop head checked every take's budget before
+  advancing the source — but the source itself (a leaf list, or a range's
+  two bounds) was bound ABOVE the loop, so `sum (take n (map g ⊥))` and
+  `sum (take n [lo .. 5])` with a bottom `lo` raised at `n = 0` where the
+  lazy `take 0 xs` is `[]` without touching `xs`, and GHC prints 0 (the
+  unfused shapes already agreed with GHC). Each budget's exhaustion check
+  is now emitted once at the budget's own position, immediately after the
+  budget is evaluated and before any stage function, inner budget or
+  source expression inside that take is bound: `take 0 ⊥` returns the
+  seed, `take 0 (map g (take ⊥ ys))` never evaluates the inner budget,
+  and a bottom budget still raises first (`take ⊥ xs`) — the evaluation
+  order of the lazy pipeline. The per-iteration checks at the loop top
+  and after a leaf's body are unchanged. In the same seam, a map or filter
+  LAMBDA whose body is a `case` with an irrefutable first pattern
+  (`\x -> case x of y -> 1`) was judged strict in its parameter — the
+  lambda strictness gate counted the scrutinee as forced without asking
+  whether the first pattern inspects it — so the fused loop forced every
+  element and `sum (map (\x -> case x of y -> 1) [⊥, 2])` raised where
+  GHC prints 2; a lambda calling a `let` binder or a sibling parameter
+  that shadows a module function consulted that function's demand row.
+  The gate now mirrors the rule the demand analyzer applies to named
+  functions: a `case` forces its scrutinee only when the first branch's
+  pattern scrutinizes it, and a call through a name the lambda itself
+  binds is a call of an unknown local value. Found by the 2026-10
+  fresh-eyes review (L10 a and b). (GHC-goldened case
+  `fuse_take_budget_first`: bottom leaf variables and range bounds under
+  `sum`, `length` and `foldl'`, nested takes with either budget spent, a
+  take on each side of a filter, a `1 : ⊥` source at budgets 0 and 1,
+  the same shapes unfused, and case-lambdas with an irrefutable, a
+  wildcard and a scrutinizing first pattern over `[⊥, 2]`, fused and
+  unfused.)
 - **A Lua function literal never captures more enclosing locals than the
   host allows** (LuaJIT refused to load the program). A Lua closure keeps
   every enclosing local it mentions as an upvalue, LuaJIT's parser allows

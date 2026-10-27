@@ -198,6 +198,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_mconcat_method, "cases", "mconcat_method.mll"),
         (ghc_oracle_list_pipeline_fused, "cases", "list_pipeline_fused.mll"),
         (ghc_oracle_list_fusion_growth, "cases", "list_fusion_growth.mll"),
+        (ghc_oracle_fuse_take_budget_first, "cases", "fuse_take_budget_first.mll"),
         (ghc_oracle_lazy_generics_parity, "cases", "lazy_generics_parity.mll"),
         (ghc_oracle_program_corpus_regressions, "cases", "program_corpus_regressions.mll"),
         // Excluded as un-twinnable while mata-ll had no Integer; the case

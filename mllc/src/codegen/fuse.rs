@@ -26,8 +26,9 @@
 //!     local __mll_fu_f  = <F>          -- bound once, in the ORIGINAL
 //!     local __mll_fu_a  = <Z>          -- left-to-right evaluation order
 //!     local __mll_fu_s0 = <G or P>     -- of the nested call expressions
-//!     local __mll_fu_k0 = <N>          -- a take stage's budget
-//!     …
+//!     local __mll_fu_k0 = <N>          -- a take stage's budget …
+//!     if __mll_fu_k0 <= 0 then return __mll_fu_a end       -- … decided at
+//!     …                                                    -- its position
 //!     local __mll_fu_i, __mll_fu_hi = <A>, <B>
 //!     while true do
 //!         if __mll_fu_k0 <= 0 then return __mll_fu_a end   -- take gates
@@ -103,16 +104,34 @@
 //!   eager-argument rule in this backend takes).
 //! * TAKE — a take stage owns a budget counter. It DECREMENTS at the
 //!   stage's position (only elements that reach it — surviving the
-//!   filters inside it — consume budget) but its exhaustion CHECK runs at
-//!   the TOP of the loop, before the source is even advanced: when a
-//!   take's budget is spent the lazy pipeline stops pulling entirely, so
-//!   no cell is forced, no inner filter runs, and no further source
-//!   element is touched. `take 0 (⊥ : …)` returns without forcing the
-//!   head, exactly as the lazy `take` would. On a LEAF source the budgets
-//!   are re-checked after the body too, before the tail advance: the
-//!   element that spends the last budget must not force the next cell's
-//!   suspension (`take 2 (filter odd (1 : 3 : ⊥))` never touches ⊥). The
-//!   budget expression evaluates where the original `take n …` call did.
+//!   filters inside it — consume budget). Its exhaustion CHECK runs in
+//!   three places, and every take in the chain — at any position — is
+//!   checked in all three, because a spent take anywhere ends the pull of
+//!   everything inside it and hands `[]` to everything outside it: the
+//!   result is the seed, nothing else is touched.
+//!     1. ONCE, at the budget's own position in the prologue: the budget
+//!        expression evaluates where the original `take n …` call did
+//!        (a bottom budget raises first, like the lazy `take ⊥ xs`), and
+//!        the check follows it immediately — before any stage function,
+//!        budget or source expression INSIDE that take is bound. The lazy
+//!        `take n xs` decides on n before it demands xs, so `take 0 ⊥`
+//!        is `[]` without forcing ⊥, and `take 0 (map g (take ⊥ ys))`
+//!        never evaluates the inner budget. A stage function OUTSIDE an
+//!        exhausted take is still bound: the gates admit only named
+//!        functions, operators, partial applications, compositions and
+//!        lambdas, and binding any of those builds a closure and
+//!        evaluates nothing. The source — a leaf list, or a range's
+//!        bounds — is bound only after every budget has been checked.
+//!     2. at the TOP of the loop, before the source is advanced or a cell
+//!        is forced: when a take's budget is spent the lazy pipeline
+//!        stops pulling entirely, so no cell is forced, no inner filter
+//!        runs, and no further source element is touched. `take 0
+//!        (⊥ : …)` returns without forcing the head, exactly as the lazy
+//!        `take` would.
+//!     3. on a LEAF source, after the body too, before the tail advance:
+//!        the element that spends the last budget must not force the
+//!        next cell's suspension (`take 2 (filter odd (1 : 3 : ⊥))` never
+//!        touches ⊥).
 //! * LENGTH — `length` forces the spine, never the elements: a Map stage
 //!   with no Filter outside it produces values nothing demands, so those
 //!   stages are DROPPED from the loop entirely — the lazy pipeline
@@ -222,7 +241,8 @@ enum StageLocal {
     FilterInline(String, TExpr, Ty),
     /// A map whose function BODY is emitted in place of the call.
     MapInline(String, TExpr, Ty),
-    /// A take budget counter (checked at loop top, decremented in place).
+    /// A take budget counter (checked once at its binding and at the
+    /// loop top, decremented in place).
     Take(String),
 }
 
@@ -278,32 +298,62 @@ impl CodeGen {
     /// Does evaluating `e` to WHNF force the variable `p` on every path?
     /// Conservative and syntactic: false when unsure. Used to judge a
     /// lambda's parameter strictness (sections desugar to lambdas).
-    fn forces_param(&self, e: &TExpr, p: &str) -> bool {
+    /// `shadow` names the lambda's OTHER parameters and the `let` binders
+    /// met on the way down: a call through one of those names is a call
+    /// of an unknown local value, never of the module function it
+    /// shadows, so no demand row is consulted for it.
+    ///
+    /// Each arm claims exactly what WHNF evaluation of that form does:
+    /// a `Var` is forced by being evaluated; `negate` and the arithmetic
+    /// and comparison operators force both operands (`shared_op_operands`,
+    /// the rule the demand analyzer uses for the same `InfixApp` forms),
+    /// `seq` forces both (the left to WHNF before the right, which is
+    /// the result), `&&`/`||`/`++` force only the left (the right runs
+    /// conditionally or stays suspended); an `if` forces its condition
+    /// and whatever BOTH branches force; a `case` forces its scrutinee
+    /// only when the first branch's pattern scrutinizes the value — an
+    /// irrefutable first pattern binds it unevaluated (`\x -> case x of
+    /// y -> 1` never touches x; the rule demand.rs applies to named
+    /// functions) — and branch bodies are not judged (they bind pattern
+    /// variables; staying out of them needs no scope bookkeeping); a
+    /// `let` forces what its body forces unless it rebinds `p`; a
+    /// saturated call forces the arguments in the callee's strict
+    /// positions, and calling `p` itself forces `p`; a lambda, a
+    /// literal, a constructor, a tuple and every other form force
+    /// nothing.
+    fn forces_param(&self, e: &TExpr, p: &str, shadow: &[&str]) -> bool {
         match &e.kind {
-            TExprKind::Paren(i) | TExprKind::Negate(i) => self.forces_param(i, p),
+            TExprKind::Paren(i) | TExprKind::Negate(i) => self.forces_param(i, p, shadow),
             TExprKind::Var(n) => n == p,
             TExprKind::InfixApp { op, lhs, rhs } => {
                 if strict_scalar_op(op) || op == "seq" {
-                    self.forces_param(lhs, p) || self.forces_param(rhs, p)
+                    self.forces_param(lhs, p, shadow) || self.forces_param(rhs, p, shadow)
                 } else if matches!(op.as_str(), "&&" | "||" | "++") {
-                    self.forces_param(lhs, p)
+                    self.forces_param(lhs, p, shadow)
                 } else {
                     false
                 }
             }
             TExprKind::If { cond, then_branch, else_branch } => {
-                self.forces_param(cond, p)
-                    || (self.forces_param(then_branch, p)
-                        && self.forces_param(else_branch, p))
+                self.forces_param(cond, p, shadow)
+                    || (self.forces_param(then_branch, p, shadow)
+                        && self.forces_param(else_branch, p, shadow))
             }
-            // Branch bodies bind pattern variables; judging only the
-            // scrutinee stays sound without scope bookkeeping.
-            TExprKind::Case { scrutinee, .. } => self.forces_param(scrutinee, p),
+            // Keyed on the FIRST pattern like every emitter and analysis:
+            // an irrefutable first pattern binds the scrutinee unevaluated
+            // (later branches are unreachable), so the scrutinee is forced
+            // only when that pattern inspects the value.
+            TExprKind::Case { scrutinee, branches } => {
+                branches.first().is_none_or(|b| b.pattern.forces_scrutinee())
+                    && self.forces_param(scrutinee, p, shadow)
+            }
             TExprKind::Let { binds, body } => {
                 if binds.iter().any(|b| b.name == p) {
                     false // shadowed; the outer p is not this p
                 } else {
-                    self.forces_param(body, p)
+                    let mut inner: Vec<&str> = shadow.to_vec();
+                    inner.extend(binds.iter().map(|b| b.name.as_str()));
+                    self.forces_param(body, p, &inner)
                 }
             }
             TExprKind::App(..) => {
@@ -311,6 +361,9 @@ impl CodeGen {
                 if let TExprKind::Var(n) = &h.kind {
                     if n == p {
                         return true; // calling p forces p itself
+                    }
+                    if shadow.contains(&n.as_str()) {
+                        return false; // an unknown local function value
                     }
                     // A saturated call of a function with a demand row:
                     // its strict positions are forced.
@@ -320,7 +373,7 @@ impl CodeGen {
                         return sp
                             .iter()
                             .zip(row.iter())
-                            .any(|(a, s)| *s && self.forces_param(a, p));
+                            .any(|(a, s)| *s && self.forces_param(a, p, shadow));
                     }
                 }
                 false
@@ -340,7 +393,17 @@ impl CodeGen {
                 return None;
             }
             return Some(
-                params.iter().map(|(p, _)| self.forces_param(body, p)).collect(),
+                params
+                    .iter()
+                    .map(|(p, _)| {
+                        let others: Vec<&str> = params
+                            .iter()
+                            .map(|(q, _)| q.as_str())
+                            .filter(|q| *q != p)
+                            .collect();
+                        self.forces_param(body, p, &others)
+                    })
+                    .collect(),
             );
         }
         if let TExprKind::OpFunc(op) = &e.kind {
@@ -453,6 +516,18 @@ impl CodeGen {
         let body2 = Self::subst_texpr(body, &subst);
         let whnf = self.expr_yields_whnf(&body2);
         (self.expr_ast(&body2), whnf)
+    }
+
+    /// `if <budget> <= 0 then return __mll_fu_a end` — a take's exhaustion
+    /// check: a spent budget ends the pipeline with the accumulator as it
+    /// stands (see SOUNDNESS: TAKE for the three places it is emitted).
+    fn take_exhausted_stmt(budget: &str) -> Stmt {
+        Stmt::If {
+            cond: Expr::binop("<=", Expr::name(budget), Expr::lit("0")),
+            then_b: Block(vec![Stmt::Return(Expr::name("__mll_fu_a"))]),
+            elseifs: vec![],
+            else_b: None,
+        }
     }
 
     /// The accumulator step for one surviving element (`cur` is always a
@@ -821,6 +896,11 @@ impl CodeGen {
                     // it must arrive WHNF (a do-bound count is a thunk).
                     let e = self.site_forced_arg_ast(ne);
                     stmts.push(Stmt::Local(vec![n.clone()], Some(e)));
+                    // Decided HERE, at the take's own position: a spent
+                    // budget returns the seed before anything inside the
+                    // take — an inner stage function, an inner budget,
+                    // the source — is evaluated (see SOUNDNESS: TAKE).
+                    stmts.push(Self::take_exhausted_stmt(&n));
                     take_counters.push(n.clone());
                     stage_locals.push(StageLocal::Take(n));
                 }
@@ -854,17 +934,12 @@ impl CodeGen {
             &step,
         );
 
-        // Every take's exhaustion check runs FIRST, before the source is
-        // advanced or a cell is forced: a spent budget means the lazy
-        // pipeline stopped pulling entirely.
+        // Every take's exhaustion check runs FIRST in each iteration,
+        // before the source is advanced or a cell is forced: a spent
+        // budget means the lazy pipeline stopped pulling entirely.
         let mut loop_head: Vec<Stmt> = take_counters
             .iter()
-            .map(|k| Stmt::If {
-                cond: Expr::binop("<=", Expr::name(k), Expr::lit("0")),
-                then_b: Block(vec![Stmt::Return(Expr::name("__mll_fu_a"))]),
-                elseifs: vec![],
-                else_b: None,
-            })
+            .map(|k| Self::take_exhausted_stmt(k))
             .collect();
 
         // The source loop. Exit is `return` from inside — WhileTrue's
@@ -932,14 +1007,7 @@ impl CodeGen {
                 // The range source needs no such check — `i + 1` cannot
                 // bottom, and the next iteration's top check returns.
                 for k in &take_counters {
-                    loop_body.push(Stmt::If {
-                        cond: Expr::binop("<=", Expr::name(k), Expr::lit("0")),
-                        then_b: Block(vec![Stmt::Return(Expr::name(
-                            "__mll_fu_a",
-                        ))]),
-                        elseifs: vec![],
-                        else_b: None,
-                    });
+                    loop_body.push(Self::take_exhausted_stmt(k));
                 }
                 loop_body.push(Stmt::Assign(
                     "__mll_fu_l".into(),

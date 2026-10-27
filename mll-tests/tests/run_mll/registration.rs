@@ -745,6 +745,13 @@ mll_test!(list_pipeline_fused, "list_pipeline_fused.mll");
 // declines — the round-1 fusion miscompiled those), and the demand
 // analyzer's composition + eta-padded rows that feed the gates.
 mll_test!(list_fusion_growth, "list_fusion_growth.mll");
+// A fused take's exhaustion check is decided at the budget's own
+// position, before anything inside the take (inner budgets, the source
+// list, a range's bounds) is evaluated (L10 a): `sum (take 0 (map g ⊥))`
+// is the seed, a bottom budget still raises first, and the unfused
+// shapes agree. A case-lambda stage is strict in its parameter only when
+// its first pattern scrutinizes the value (L10 b).
+mll_test!(fuse_take_budget_first, "fuse_take_budget_first.mll");
 // GHC laziness of the runtime generics: map/zipWith lazy in f with
 // per-head suspensions (call-by-need, shared), filter/foldr/foldl lazy
 // in f until a structure exists — every error in the case must stay
