@@ -490,6 +490,21 @@ Responsibilities beyond the obvious translation:
   `IORef (Int -> Int)`), the code generator wraps it in a currying
   adapter (`__mll_curry1`/`2`/`_n`) at every place it reaches the
   runtime (`adapt_runtime_args`).
+- **Host limits:** Lua caps a function's locals at 200 and its upvalues
+  at 60 (LuaJIT) or 255 (PUC). The emitter budgets locals as it
+  declares them (`declare_local_parts`, `LOCAL_LIMIT`): past 180 a
+  binding becomes a slot of a per-function `_v` spill table. Upvalues
+  are budgeted by the last Lua-level pass (`upvalues.rs`,
+  `UPVALUE_BUDGET` = 50) over the finished tree, where every earlier
+  pass has fixed the capture sets: it counts per function the distinct
+  enclosing locals it captures — chunk locals and runtime helpers
+  included, nested functions' captures passed through — and routes the
+  captures of a function over the budget through a table of the
+  declaring scope, replacing each routed variable by its slot at every
+  reference so the cell stays shared. The table local is budgeted
+  against the host's 200 (`LUA_MAX_LOCALS`) — the pass runs last, so
+  the emitter's margin is its to spend — and a function it cannot bring
+  under the budget is a compile error, not an unloadable chunk.
 - **Names:** `names::sanitize_name` is the one mapping from mata-ll names
   to Lua names, and it is injective: a runtime entity has its fixed Lua
   name; an identifier keeps its spelling with `'` as `_prime`, moved by

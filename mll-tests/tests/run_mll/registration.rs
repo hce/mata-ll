@@ -454,6 +454,17 @@ mll_test!(where_after_patterns, "where_after_patterns.mll");
 // column that can fail is forced inside the clause condition, not at entry.
 mll_test!(first_clause_column_order, "first_clause_column_order.mll");
 mll_test!(pattern_forces_without_tests, "pattern_forces_without_tests.mll");
+// A function literal never captures more enclosing locals than the host
+// allows (O11): LuaJIT refuses a function with more than 60 upvalues, so
+// the last Lua-level pass routes the captures of a function over its
+// budget through a table of the declaring scope, keeping every routed
+// variable one shared cell (a thunk made before the bindings it reads
+// are assigned; the ST in-place force), with one table per declaring
+// scope for an inner lambda past PUC's 255 as well.
+mll_test!(upvalue_budget, "upvalue_budget.mll");
+mll_test!(upvalue_budget_shared, "upvalue_budget_shared.mll");
+mll_test!(upvalue_budget_past_hosts, "upvalue_budget_past_hosts.mll");
+mll_test!(upvalue_budget_spilled, "upvalue_budget_spilled.mll");
 // A clause's eta padding is applied by the clause's result alone: a where
 // value whose RHS is a guarded case under padding emits an ordinary match
 // (found while fixing the where-group emission).

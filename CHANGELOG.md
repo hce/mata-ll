@@ -44,6 +44,53 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A Lua function literal never captures more enclosing locals than the
+  host allows** (LuaJIT refused to load the program). A Lua closure keeps
+  every enclosing local it mentions as an upvalue, LuaJIT's parser allows
+  60 per function (`LJ_MAX_UPVAL`; PUC Lua allows 255), and nothing
+  counted them: the emitter budgets locals per function (the `_v` spill
+  table), thunk lifting takes a suspension out of its closure only up to
+  four captures, and a lambda or a thunk over a `where` group, a `let`
+  group or a `do` block of more than sixty bindings — or over fifty
+  bindings plus the runtime helpers it calls, which are locals of the
+  chunk — captured all of them, so `luajit` failed with "function at line
+  N has more than 60 upvalues" where Lua 5.5 and GHC print the value; an
+  inner lambda over three hundred bindings of two enclosing scopes failed
+  on Lua 5.5 as well. A last pass over the finished Lua tree
+  (`codegen/upvalues.rs`) now counts, per function, the distinct
+  upvalues the host's parser will need — every name resolving to a local
+  of an enclosing function or of the chunk, runtime helpers included,
+  and the captures a nested function passes through — and a function
+  over the budget of 50 has as many captures as needed routed through a
+  table of the declaring scope: the variable is replaced by a slot of the
+  table at its declaration, every assignment and every read, so it stays
+  one shared cell (a thunk made before the bindings it reads are assigned,
+  an in-place force, a loop update all write the slot the closure reads),
+  the table is declared at the start of the innermost function body or
+  loop body so a loop's locals stay fresh per iteration, a parameter is
+  copied into its slot at entry, and a runtime helper is copied into the
+  chunk's table with only the over-budget function's mentions rewritten.
+  The table local is budgeted against the host's 200 active locals, not
+  the emitter's 180 (the pass runs last, so the margin is its to spend):
+  a function whose 300 where bindings spilled into `_v` still gets its
+  table. A function the pass cannot bring under the budget — a capture
+  mentioned by a host-level fragment in its scope, or no room for the
+  table — is a compile error naming the function, the count and the
+  captures, never a chunk the host refuses to load.
+  Every program whose functions were under the budget emits byte-identical
+  Lua (bench corpus, tracker, program corpus); one case of the test corpus
+  whose `main` sat at exactly 60 upvalues is routed. Found by the 2026-10
+  fresh-eyes review (O11).
+  (GHC-goldened cases `upvalue_budget`, `upvalue_budget_shared`,
+  `upvalue_budget_past_hosts`: a lambda over 70 where bindings, a do block
+  of 64 binds under `mapM_`, a lazily consumed list of 64 where bindings,
+  a lambda over 65 let bindings, a thunk over 70 let bindings declared
+  after and before them, the 49/50 budget boundary; 61 ST let bindings
+  with in-place forces, an inner lambda over 61 grandparent bindings, 50
+  bindings plus show and string helpers, 55 parameters; 130 bindings and
+  an inner lambda over 300 bindings of two scopes; `upvalue_budget_spilled`:
+  an applied lambda, a mapped lambda and a thunk over 300 where/let
+  bindings of one function.)
 - **A pattern that forces its scrutinee forces it in the clause condition,
   at its left-to-right position, whether or not it tests or binds
   anything** (a silent value where GHC raises). Forcing rode on a

@@ -93,6 +93,16 @@
 //! per iteration, and no FNEW on LuaJIT's trace. It runs after both loop
 //! passes because it hoists out of exactly the loops they build.
 //!
+//! Pass 8 — the upvalue budget (upvalues.rs), the LAST pass: a function
+//! literal that would need more upvalues than LuaJIT's parser allows (60;
+//! the pass budgets 50) has enough of its captured variables replaced by
+//! slots of a table in the declaring scope — the variable's declaration,
+//! every assignment and every read, so the cell stays shared — and
+//! captures the table instead. It runs after everything else because
+//! thunk lifting, IIFE flattening and hoisting all change capture sets;
+//! when it rewrites, the whole sequence runs again over the routed tree
+//! (see `run_with`). Under budget it changes nothing.
+//!
 //! (Retired: the direct-perform IO self-loop conversion, formerly
 //! performloop.rs. It looped an IO function that performs at call time and
 //! recurses through `return __mll_run_tail(<self>(…))` — the self call in
@@ -106,7 +116,8 @@
 //!
 //! Per-pass toggles: `MLL_OPT_DISABLE` (read per `run` call) is a
 //! comma-separated list of pass names to skip — `parens`, `dead`, `iife`,
-//! `force`, `tailloop`, `ioloop`, `hoist`. A debugging aid for
+//! `force`, `tailloop`, `ioloop`, `hoist`, `thunklift`, `upvalues`. A
+//! debugging aid for
 //! isolating a pass's effect; unset (the default) runs everything, and an
 //! unrecognized name warns on stderr so a typo cannot silently disable
 //! nothing. `CompileOptions::disable_opt_passes` carries the same list
@@ -119,6 +130,7 @@ use super::ioloop;
 use super::lua::{Block, Expr, FnTarget, FuncBody, Item, Stmt, render_stmts};
 use super::tailloop;
 use super::thunklift;
+use super::upvalues;
 
 /// Which passes to skip; see the module comment.
 #[derive(Default)]
@@ -131,6 +143,7 @@ struct Disable {
     ioloop: bool,
     hoist: bool,
     thunklift: bool,
+    upvalues: bool,
 }
 
 impl Disable {
@@ -161,9 +174,10 @@ impl Disable {
                 "hoist" => d.hoist = true,
                 "ioloop" => d.ioloop = true,
                 "thunklift" => d.thunklift = true,
+                "upvalues" => d.upvalues = true,
                 other => eprintln!(
                     "warning: MLL_OPT_DISABLE: unknown pass name '{}' \
-                     (known: parens, dead, iife, force, tailloop, ioloop, hoist, thunklift)",
+                     (known: parens, dead, iife, force, tailloop, ioloop, hoist, thunklift, upvalues)",
                     other
                 ),
             }
@@ -173,9 +187,10 @@ impl Disable {
 }
 
 /// Run all passes over the module body. `opt_disable`: see
-/// `Disable::from_spec`.
-pub(super) fn run(stmts: &mut Vec<Stmt>, opt_disable: Option<&str>) {
-    let _ = run_with(stmts, &Disable::from_spec(opt_disable), None);
+/// `Disable::from_spec`. `Err` is the upvalue budget's diagnostic (the
+/// only pass that can refuse a tree).
+pub(super) fn run(stmts: &mut Vec<Stmt>, opt_disable: Option<&str>) -> Result<(), String> {
+    run_with(stmts, &Disable::from_spec(opt_disable), None).map(|_| ())
 }
 
 /// Run the enabled passes; returns the annotation engine whose mirror is
@@ -190,7 +205,7 @@ fn run_with(
     stmts: &mut Vec<Stmt>,
     d: &Disable,
     mut per_pass: Option<&mut Vec<String>>,
-) -> (Option<annot::Engine>, bool) {
+) -> Result<(Option<annot::Engine>, bool), String> {
     // Refute `engine` over the tree as it stands after `pass` (overclaims
     // only: the residual-force obligation is owed on the FINAL tree, where
     // the caller checks it).
@@ -199,6 +214,18 @@ fn run_with(
             v.extend(engine.refute(stmts, false).into_iter().map(|m| format!("after {pass}: {m}")));
         }
     };
+    // The passes run as one sequence, and the sequence runs again whenever
+    // the upvalue budget (pass 8, the last) rewrote the tree: routing frees
+    // locals and shrinks capture sets, so an IIFE the local budget had
+    // declined to splice, a thunk with too many captures to lift, or a
+    // literal left in a loop may now qualify — and the idempotence the
+    // refutation demands of the final tree holds only once every pass
+    // finds nothing left. Routing strictly lowers the plain-local captures
+    // of the function it targets and no pass raises a function's count
+    // (a splice moves a body's references into a function that already
+    // passed them through), so the sequence settles; the bound is a
+    // backstop against a rewrite cycle, not an expected count.
+    for _round in 0..16 {
     if !d.thunklift {
         // Pass 0 — closure-free thunk lifting (thunklift.rs). Runs FIRST:
         // it rewrites suspension shapes wholesale, so every engine and
@@ -273,7 +300,18 @@ fn run_with(
             engine = Some(fresh);
         }
     }
-    (engine, !d.force)
+    if !d.upvalues && upvalues::run(stmts)? {
+        // Pass 8, the upvalue budget (see the module comment): last, over
+        // the capture sets every earlier pass left. It rewrote the tree:
+        // every pass runs again over the routed tree, and the engine of
+        // the round that ends with nothing to route mirrors the final tree.
+        continue;
+    }
+    return Ok((engine, !d.force));
+    }
+    Err("internal compiler error: the optimization passes did not settle after 16 rounds of \
+         upvalue routing"
+        .to_string())
 }
 
 /// Test-build entry (see verify::check_stamps): run the passes exactly as
@@ -295,11 +333,14 @@ pub(super) fn run_refuted(stmts: &mut Vec<Stmt>) -> Vec<String> {
     let d = Disable::from_spec(None);
     let mut per_pass = Vec::new();
     let mut findings = match run_with(stmts, &d, Some(&mut per_pass)) {
-        (Some(engine), force_ran) => engine.refute(stmts, force_ran),
+        Ok((Some(engine), force_ran)) => engine.refute(stmts, force_ran),
         // With every engine-run pass disabled there are no carried stamps
         // and no collapse obligation; a fresh analysis refuting itself
         // checks nothing.
-        (None, _) => Vec::new(),
+        Ok((None, _)) => Vec::new(),
+        // A tree the upvalue budget refuses is `generate`'s diagnostic, not
+        // a stamp finding; nothing further to refute.
+        Err(_) => return Vec::new(),
     };
     findings.extend(expression_pass_idempotence(stmts, &d));
     findings.extend(per_pass);
@@ -1142,7 +1183,7 @@ mod tests {
             )))]
         };
         let mut stmts = host();
-        run_with(&mut stmts, &Disable::default(), None);
+        run_with(&mut stmts, &Disable::default(), None).unwrap();
         assert!(
             matches!(&stmts[0], Stmt::Return(Expr::Paren(_))),
             "host callee must keep the truncating paren"
@@ -1152,7 +1193,7 @@ mod tests {
             Expr::name("show_Int"),
             vec![Expr::name("x")],
         )))];
-        run_with(&mut stmts, &Disable::default(), None);
+        run_with(&mut stmts, &Disable::default(), None).unwrap();
         assert!(
             matches!(&stmts[0], Stmt::Return(Expr::Call(..))),
             "runtime show helper may shed"
@@ -1209,10 +1250,10 @@ mod tests {
     fn force_collapse_toggle() {
         let make = || vec![Stmt::Return(Expr::force(Expr::lit("42")))];
         let mut on = make();
-        run_with(&mut on, &Disable::default(), None);
+        run_with(&mut on, &Disable::default(), None).unwrap();
         assert!(matches!(&on[0], Stmt::Return(Expr::Lit(s)) if s == "42"));
         let mut off = make();
-        run_with(&mut off, &Disable { force: true, ..Disable::default() }, None);
+        run_with(&mut off, &Disable { force: true, ..Disable::default() }, None).unwrap();
         assert!(
             matches!(&off[0], Stmt::Return(Expr::Call(..))),
             "disabled peephole must leave __force in place"
@@ -1227,7 +1268,7 @@ mod tests {
             Stmt::Local(vec!["x".into()], Some(Expr::force(Expr::name("y")))),
             Stmt::Return(Expr::force(Expr::name("x"))),
         ];
-        run_with(&mut stmts, &Disable::default(), None);
+        run_with(&mut stmts, &Disable::default(), None).unwrap();
         assert!(matches!(&stmts[1], Stmt::Return(Expr::Name(n)) if n == "x"));
     }
 
@@ -1258,7 +1299,7 @@ mod tests {
     #[test]
     fn force_of_unknown_stays() {
         let mut stmts = vec![Stmt::Return(Expr::force(Expr::call_named("f", vec![])))];
-        run_with(&mut stmts, &Disable::default(), None);
+        run_with(&mut stmts, &Disable::default(), None).unwrap();
         assert!(matches!(&stmts[0], Stmt::Return(Expr::Call(..))));
     }
 
@@ -1292,7 +1333,7 @@ mod tests {
             ]
         };
         let mut on = make();
-        let (engine, _) = run_with(&mut on, &Disable::default(), None);
+        let (engine, _) = run_with(&mut on, &Disable::default(), None).unwrap();
         let Stmt::Function { body, .. } = &on[1] else { panic!("shape") };
         assert!(
             matches!(&body.0[0], Stmt::Local(names, _) if names == &vec!["_lp".to_string()]),
@@ -1301,7 +1342,7 @@ mod tests {
         assert!(engine.expect("engine").refute(&on, true).is_empty());
 
         let mut off = make();
-        run_with(&mut off, &Disable { ioloop: true, ..Disable::default() }, None);
+        run_with(&mut off, &Disable { ioloop: true, ..Disable::default() }, None).unwrap();
         let Stmt::Function { body, .. } = &off[1] else { panic!("shape") };
         assert!(
             matches!(&body.0[0], Stmt::If { .. }),
@@ -1329,13 +1370,13 @@ mod tests {
             }]
         };
         let mut on = make();
-        let (engine, _) = run_with(&mut on, &Disable::default(), None);
+        let (engine, _) = run_with(&mut on, &Disable::default(), None).unwrap();
         let Stmt::Function { body, .. } = &on[0] else { panic!("shape") };
         assert!(matches!(body.0[0], Stmt::WhileTrue(_)), "enabled pass must convert");
         assert!(engine.expect("engine").refute(&on, true).is_empty());
 
         let mut off = make();
-        run_with(&mut off, &Disable { tailloop: true, ..Disable::default() }, None);
+        run_with(&mut off, &Disable { tailloop: true, ..Disable::default() }, None).unwrap();
         let Stmt::Function { body, .. } = &off[0] else { panic!("shape") };
         assert!(
             matches!(body.0[0], Stmt::If { .. }),

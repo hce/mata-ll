@@ -18,9 +18,10 @@
 //! 4. When source embedding is requested, `embed::embed_block` places the
 //!    embedded source block above everything else.
 //!
-//! The only error this pass can produce is the expression-depth diagnostic
-//! (see `expr_ast` in expr.rs); everything else was rejected by earlier
-//! passes.
+//! The errors this pass can produce are the expression-depth diagnostic
+//! (see `expr_ast` in expr.rs) and the upvalue budget's (upvalues.rs: a
+//! closure the host could not load); everything else was rejected by
+//! earlier passes.
 //!
 //! This file holds the `CodeGen` state struct and its basic plumbing: name
 //! resolution (`lua_ref`), local declaration and the `_v` spill table for
@@ -54,6 +55,8 @@
 //!   two-level dispatch/closure shape into one driver
 //! - hoist.rs — opt pass 7: loop-invariant closure hoisting (the FNEW
 //!   JIT-killer backstop)
+//! - upvalues.rs — opt pass 8: the upvalue budget (a function literal
+//!   never captures more enclosing locals than LuaJIT's parser allows)
 //! - util.rs — type- and TIR-shape helpers shared across the module
 //! - runtime.rs — the runtime prelude and its on-demand chunk selection
 
@@ -82,6 +85,7 @@ mod strictness;
 mod tailloop;
 mod thunklift;
 mod thunks;
+mod upvalues;
 mod util;
 
 pub(crate) use names::is_lua_keyword;
@@ -478,7 +482,7 @@ impl CodeGen {
                 i
             }
         };
-        lua::Expr::lit(format!("__mll_biglit[{n}]"))
+        lua::Expr::lit(format!("{}[{n}]", lua::BIGLIT_TABLE))
     }
 
     /// The `local __mll_biglit = { ... }` table defining every hoisted literal,
@@ -489,7 +493,7 @@ impl CodeGen {
         if pool.order.is_empty() {
             return String::new();
         }
-        let mut s = String::from("local __mll_biglit = {\n");
+        let mut s = format!("local {} = {{\n", lua::BIGLIT_TABLE);
         for lit in &pool.order {
             // `lit` is digits with an optional leading sign — safe to embed
             // directly, exactly as the pre-hoisting inline form did.
@@ -723,8 +727,8 @@ pub(crate) struct GeneratedLua {
 }
 
 /// Generate the Lua module. `Err` carries the codegen depth-guard
-/// diagnostic (see `CodeGen::expr_ast`) — the only error this pass can
-/// produce; everything else was rejected by earlier passes.
+/// diagnostic (see `CodeGen::expr_ast`) or the upvalue budget's
+/// (upvalues.rs); everything else was rejected by earlier passes.
 /// `opt_disable`: explicit optimization-pass skip list (comma-separated,
 /// the `MLL_OPT_DISABLE` vocabulary); `None` reads the environment
 /// variable — see `CompileOptions::disable_opt_passes`.
@@ -766,7 +770,7 @@ pub(crate) fn generate(
              that name in the variable's scope would be captured"
         ));
     }
-    opt::run(&mut stmts, opt_disable);
+    opt::run(&mut stmts, opt_disable)?;
     // Locate the entry-point marker AFTER the optimization passes: they may
     // splice top-level statements (so an index recorded at emission could
     // drift), but they treat `Stmt::Raw` as opaque and never synthesize or

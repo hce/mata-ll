@@ -128,8 +128,23 @@ struct Lift {
     counter: u32,
 }
 
+/// Re-entrant: the sequence of passes runs again after the upvalue budget
+/// rewrites the tree (see opt.rs), so a second run continues the slot
+/// numbering past the definitions already present and does not declare
+/// the table twice.
 pub(super) fn run(stmts: &mut Vec<Stmt>) {
-    let mut st = Lift { defs: Vec::new(), counter: 0 };
+    let declared = stmts
+        .iter()
+        .any(|s| matches!(s, Stmt::Local(names, _) if names.len() == 1 && names[0] == TKF_TABLE));
+    let next = stmts
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Function { target: FnTarget::ThunkSlot(k), .. } => Some(*k + 1),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let mut st = Lift { defs: Vec::new(), counter: next };
     let mut i = 0;
     let mut any = false;
     while i < stmts.len() {
@@ -144,7 +159,7 @@ pub(super) fn run(stmts: &mut Vec<Stmt>) {
         }
         i += n + 1;
     }
-    if any {
+    if any && !declared {
         stmts.insert(
             0,
             Stmt::Local(vec![TKF_TABLE.to_string()], Some(Expr::Table(vec![]))),

@@ -420,9 +420,16 @@ return-position `case`/`let` closures splice into the enclosing
 block, budgeted against Lua's 200-local limit), and a
 force-of-known-WHNF safety net (`__force(x)` of a single-assignment
 local whose one value is WHNF by construction rewrites to `x`).
-`Raw` nodes are opaque to every pass. The pipeline runs before
-printing, so the on-demand prelude scan sees the optimized body and
-shrinks with it.
+`Raw` nodes are opaque to every pass. After the loop passes
+(self-tail-call and IO self-loop conversion, loop-invariant closure
+hoisting) the upvalue budget runs last (`upvalues.rs`): LuaJIT allows
+a function 60 upvalues, so a function literal capturing more than 50
+enclosing locals — runtime helpers and pass-through captures of nested
+literals included — has enough of them routed through a table of the
+declaring scope, each routed variable replaced by its slot at its
+declaration and every reference so it stays one shared cell. The
+pipeline runs before printing, so the on-demand prelude scan sees the
+optimized body and shrinks with it.
 
 Generated output is deterministic: compiling the same source twice
 produces byte-identical Lua. The last source of non-determinism

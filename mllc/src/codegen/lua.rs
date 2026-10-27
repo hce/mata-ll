@@ -165,6 +165,10 @@ pub(super) const FN_TABLE: &str = "__mll_fn";
 /// The lifted-thunk function table (see thunklift.rs) — the one spelling,
 /// shared by the pass that fills it and the renderer.
 pub(super) const TKF_TABLE: &str = "__mll_tkf";
+/// The hoisted big-integer literal table (see `BigLitPool` in mod.rs): a
+/// chunk local declared between the runtime prelude and the module body,
+/// so a function referencing it captures it like a prelude name.
+pub(super) const BIGLIT_TABLE: &str = "__mll_biglit";
 
 /// Does a NON-`Slot` header mention the function table — in its target
 /// name or any parameter? Both consumers (the slot census's poison arm in
