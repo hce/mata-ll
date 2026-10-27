@@ -798,9 +798,20 @@ lcm _ 0 = 0
 lcm 0 _ = 0
 lcm x y = abs ((x `quot` gcd x y) * y)
 
--- Prefix/suffix split at an index (`splitAt n xs == (take n xs, drop n xs)`).
+-- Prefix/suffix split at an index. GHC's definition, not the Report's
+-- `(take n xs, drop n xs)`: strict in n, and for n > 0 in the list to
+-- WHNF, while the pair's parts stay lazy (`head (fst (splitAt 3 (1 : ⊥)))`
+-- is 1).
 splitAt :: Int -> [a] -> ([a], [a])
-splitAt n xs = (take n xs, drop n xs)
+splitAt n ls
+  | n <= 0 = ([], ls)
+  | otherwise = splitAt' n ls
+  where
+    splitAt' _ [] = ([], [])
+    splitAt' 1 (x : xs) = ([x], xs)
+    splitAt' m (x : xs) = (x : fst r, snd r)
+      where
+        r = splitAt' (m - 1) xs
 
 -- Longest prefix NOT satisfying p, paired with the remainder (the dual of span).
 break :: (a -> Bool) -> [a] -> ([a], [a])

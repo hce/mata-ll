@@ -182,7 +182,10 @@ const PROBES: &[Probe] = &[
     // (the mask's one deliberate laziness hole; GHC-visible).
     probe("take", &["0", ILIST], &[Strict, Lazy]),
     probe("drop", &["1", ILIST], &[Strict, Strict]),
-    probe("zipWith", &[ADD2, ILIST, ILIST], &[Lazy, Strict, Strict]),
+    // zipWith forces its second list only once the first is a cons
+    // (`zipWith f [] ⊥` is [], GHC's `go [] _ = []` first); with this
+    // non-empty first sample the position is ForcedOnRun.
+    probe("zipWith", &[ADD2, ILIST, ILIST], &[Lazy, Strict, ForcedOnRun]),
     // --- the boxed-Integer core (strict in every position — a limb walk
     // cannot go through a thunk; see the demand.rs block comment) ---
     probe("fromInteger_Integer", &["5"], &[Strict]),

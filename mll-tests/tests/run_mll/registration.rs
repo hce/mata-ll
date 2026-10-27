@@ -752,6 +752,15 @@ mll_test!(list_fusion_growth, "list_fusion_growth.mll");
 // shapes agree. A case-lambda stage is strict in its parameter only when
 // its first pattern scrutinizes the value (L10 b).
 mll_test!(fuse_take_budget_first, "fuse_take_budget_first.mll");
+// The runtime list primitives force exactly what GHC's definitions force,
+// in GHC's order (L11): take's realized-spine walk stops at a suspended
+// tail (`head (take 2 (1 : ⊥))`, the knot `xs = 1 : ys; ys = take 3 xs`),
+// zipWith matches its first list first and suspends both tails
+// (`zipWith f [] ⊥`, `zipWith f [1] (2 : ⊥)`), splitAt is GHC's strict
+// definition, `!!` forces the index before the list; zip/zip3/zipWith3,
+// drop, takeWhile, replicate, last and init pinned alongside, fused and
+// unfused.
+mll_test!(list_primitives_force_like_ghc, "list_primitives_force_like_ghc.mll");
 // GHC laziness of the runtime generics: map/zipWith lazy in f with
 // per-head suspensions (call-by-need, shared), filter/foldr/foldl lazy
 // in f until a structure exists — every error in the case must stay

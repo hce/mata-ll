@@ -198,7 +198,13 @@ impl CodeGen {
                     )
                 }
                 "!!" => {
-                    let l = self.expr_ast(lhs);
+                    // GHC's `xs !! n | n < 0 = negIndex | otherwise = …`
+                    // forces the index first and the list only after the
+                    // sign check, so the list is a LAZY operand here (a
+                    // variable travels raw, anything else is suspended):
+                    // an eager list expression evaluated as a Lua argument
+                    // raised its bottom before the index's.
+                    let l = self.arg_ast(lhs, false);
                     let r = self.forced_ast(rhs);
                     Expr::call_named("__mll_list_index", vec![l, r])
                 }

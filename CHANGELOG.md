@@ -44,6 +44,48 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **The runtime list primitives force exactly what GHC's definitions
+  force, in GHC's order** (`take` and `zipWith` raised bottoms GHC never
+  touches; a knot through `take` overflowed the stack). `take`'s
+  realized-spine walk — the iterative arm that builds the prefix of an
+  already-evaluated list without a Lua frame per element — treated a cons
+  cell whose tail is a suspension as realized and forced up to `n` tails
+  while building, where GHC's `take n (x : xs) = x : take (n - 1) xs`
+  forces nothing past the cell it returns: `head (take 2 (1 : ⊥))` raised
+  where GHC prints 1, and the knot `xs = 1 : ys; ys = take 3 xs` re-entered
+  its own thunk (a stack overflow) where GHC prints `[1,1,1,1]`. The walk
+  now decides "realized" one cell at a time, by the tail field itself: an
+  unevaluated thunk ends it there and the prefix so far gets a lazy tail
+  that takes the remainder on demand, exactly like a lazy cell did
+  already; a plain cell or an evaluated thunk is walked as before, so a
+  prefix over a realized spine costs what it cost. `zipWith` forced its
+  second list before testing the first for `[]`, and its per-element step
+  forced both tails before testing the first's, where GHC's `go [] _ = []`
+  comes first: `length (zipWith (+) [] ⊥)` raised where GHC prints 0, and
+  `zipWith (+) [1] (2 : ⊥)` raised where GHC prints `[3]`. The entry and
+  the step now force the first list first and touch the second only once
+  the first is a cons; the demand row stops claiming the second list
+  strict. In the same audit (`drop`, `splitAt`, `takeWhile`, `length`,
+  `!!`, `replicate`, `last`, `init`, `zip`, `zip3`, `zipWith3`): `splitAt`
+  was the Report's `(take n xs, drop n xs)`, a lazy pair, where GHC's
+  definition is strict in `n` and, for `n > 0`, in the list to WHNF (`case
+  splitAt ⊥ xs of (_, _) -> 0` raises in GHC); it is now GHC's definition,
+  with the pair's parts as lazy as before (`head (fst (splitAt 3 (1 : ⊥)))`
+  is 1). And the list operand of `xs !! n` was evaluated as a Lua call
+  argument before the index, where GHC's `xs !! n | n < 0 = …` forces the
+  index and its sign check first: `⊥ !! ⊥` raised the list's bottom. The
+  list is now a lazy operand of the index call (a variable travels raw, an
+  expression is suspended), which forces the index, checks the sign, and
+  only then the list. The other primitives already match GHC's forcing
+  order. Found by the 2026-10 fresh-eyes review (L11). (GHC-goldened case
+  `list_primitives_force_like_ghc`: `take` over a parameter tail, `1 : ⊥`
+  and `1 : 2 : ⊥` under `head`, `length`, `sum`, `foldl'` and `show`, a
+  bottom budget, the `take` knot, `zipWith` with either list `[]` against
+  a bottom, `[1]` against `2 : ⊥` under `show`, `length`, `sum`, a fused
+  `take` and a `map`, the `fibs` knot and a knot through `zipWith`, `zip`,
+  `zip3` and `zipWith3` at the same shapes, `drop`, `splitAt` under a pair
+  match and under `fst`/`snd`, `!!` with a bottom index, `takeWhile`,
+  `replicate`, `last` and `init`.)
 - **A fused `take` decides on its budget before anything inside it is
   evaluated** (a spent budget over a bottom source raised). List-pipeline
   fusion emits `sum`/`length`/`foldl'` over `take`/`map`/`filter` chains

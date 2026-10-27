@@ -1570,7 +1570,19 @@ end
 -- each produced cell used to allocate — the FNEW that broke every LuaJIT
 -- trace through a lazy pipeline.
 local function __mll_step_tail(k, xs) return k(__mll_tail(xs)) end
-local function __mll_step_tail2(k, xs, ys) return k(__mll_tail(xs), __mll_tail(ys)) end
+-- The two-list step (zipWith) walks the FIRST spine first, as GHC's
+-- `go [] _ = []; go _ [] = []; go (x:xs) (y:ys) = …` matches: the first
+-- tail is forced, and when it ends the second tail is never touched —
+-- `zipWith f [1] (2 : ⊥)` is `[f 1 2]`. Only then is the second tail
+-- forced, which `go` would do first thing anyway (its first list is a
+-- cons now, so the second is the next thing GHC matches). Both stay
+-- direct __mll_tail reads: the generator runs in place and memoizes into
+-- the cell, no suspension is allocated.
+local function __mll_step_tail2(k, xs, ys)
+    local xt = __mll_tail(xs)
+    if xt == nil then return nil end
+    return k(xt, __mll_tail(ys))
+end
 -- Suspended head application for the lazy generics: `f x` (and `f x y`)
 -- per element, built WITHOUT running or even forcing f — GHC's
 -- `map f (x:xs) = f x : map f xs` runs f only when a head is demanded,
@@ -1631,11 +1643,31 @@ local function take(n, xs)
         -- is forced (`take 2 (1:2:⊥)` is [1, 2], as in the recursion). A
         -- still-lazy cell mid-spine hands the remainder back to the lazy
         -- arm: one frame, then O(1) again.
+        -- "Realized" is decided one cell at a time, by the tail field
+        -- itself: a plain cell or nil is walked, an evaluated thunk is read
+        -- through, and a SUSPENDED tail (an unevaluated thunk — the `rest`
+        -- of `1 : rest`, a knot's own binding, a bottom) ends the walk
+        -- there, exactly like a lazy cell does: the prefix so far is
+        -- returned with a lazy tail that takes the remainder on demand.
+        -- GHC's `take n (x : xs) = x : take (n - 1) xs` forces nothing past
+        -- the cell it returns, so `head (take 2 (1 : ⊥))` is 1 and the knot
+        -- `xs = 1 : ys; ys = take 3 xs` is [1, 1, 1, 1] — forcing the
+        -- suspended tail here raised the bottom and re-entered the knot's
+        -- own thunk (a stack overflow).
         local first = __mll_cons(__mll_head(xs), nil)
         local last = first
         n = n - 1
         while n > 0 do
-            xs = __force(__mll_tail_lazy(xs))
+            local t = xs[2]
+            if getmetatable(t) == __thunk_mt then
+                if not t[2] then
+                    last[2] = __mll_gen2(__mll_take_step, n, xs)
+                    last.__lazy = 1
+                    return first
+                end
+                t = t[1]
+            end
+            xs = t
             if xs == nil then break end
             if xs.__lazy then
                 last[2] = take(n, xs)
@@ -1659,10 +1691,15 @@ local function drop(n, xs)
     return xs
 end
 local function zipWith(f, xs, ys)
-    -- Lazy in f, heads suspended — see map.
+    -- Lazy in f, heads suspended — see map. GHC's `go [] _ = []` comes
+    -- first: the second list is forced only once the first is a cons
+    -- (`zipWith f [] ⊥` is []); the step (__mll_step_tail2) keeps that
+    -- order for the tails.
     local function go(xs, ys)
-        xs = __force(xs); ys = __force(ys)
-        if xs == nil or ys == nil then return nil end
+        xs = __force(xs)
+        if xs == nil then return nil end
+        ys = __force(ys)
+        if ys == nil then return nil end
         return __mll_lazy_consg(__mll_tk3(__mll_ap2, f, xs[1], ys[1]), __mll_gen3(__mll_step_tail2, go, xs, ys))
     end
     return go(xs, ys)

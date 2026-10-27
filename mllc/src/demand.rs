@@ -206,7 +206,10 @@ pub const RUNTIME_PRELUDE_STRICTNESS: &[(&str, &[bool])] = &[
     ("filter", &[false, true]),
     ("take", &[true, false]), // n always; the list NOT when n <= 0
     ("drop", &[true, true]),
-    ("zipWith", &[false, true, true]),
+    // zipWith matches its first list first, as GHC's `go [] _ = []`: the
+    // second list is forced only once the first is a cons (`zipWith f []
+    // ⊥` is []) — conditional, so the row under-claims it.
+    ("zipWith", &[false, true, false]),
     // The boxed-Integer core (runtime_integer.lua). Every body forces every
     // argument on every path before any arithmetic — a limb walk cannot go
     // through a thunk — so call sites may pass raw expressions instead of
