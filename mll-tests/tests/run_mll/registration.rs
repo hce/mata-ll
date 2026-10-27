@@ -453,6 +453,7 @@ mll_test!(where_after_patterns, "where_after_patterns.mll");
 // would force (L7): a column the first clause scrutinizes to the right of a
 // column that can fail is forced inside the clause condition, not at entry.
 mll_test!(first_clause_column_order, "first_clause_column_order.mll");
+mll_test!(pattern_forces_without_tests, "pattern_forces_without_tests.mll");
 // A clause's eta padding is applied by the clause's result alone: a where
 // value whose RHS is a guarded case under padding emits an ordinary match
 // (found while fixing the where-group emission).

@@ -21,6 +21,7 @@ use crate::tir::*;
 use crate::types::Ty;
 use super::CodeGen;
 use super::function::{FnSpillScope, LocalRowsSnapshot, VarsSnapshot};
+use super::pattern::ClauseCond;
 use super::lua::{Block, Expr, FuncBody, Item, Stmt};
 use super::names::{dict_field_name, is_builtin_op, lua_field_index, lua_number_literal, lua_quoted_string, primitive_method_lua_op, sanitize_name};
 use super::util::{count_arrows};
@@ -347,26 +348,26 @@ impl CodeGen {
                     // never a value, whatever a same-named enclosing binder
                     // (a site-forced parameter `x` over `(x : _)`) claimed.
                     let scope = VarsSnapshot::capture(self);
-                    if conditions.is_empty() {
-                        if i > 0 {
-                            let mut bs = Vec::new();
+                    // An irrefutable branch ends the chain; its forces (a
+                    // wildcard-only tuple under a forced `_s`) run first.
+                    let cond = match Self::clause_condition(conditions) {
+                        ClauseCond::Always(forces) => {
+                            let mut bs = forces;
                             for (var, val) in &bindings {
                                 bs.push(Stmt::Local(vec![var.clone()], Some(val.clone())));
                                 self.bind_local_name(var);
                             }
                             bs.push(Stmt::Return(self.tail_ast(branch.plain_body(), false)));
-                            else_b = Some(Block(bs));
-                        } else {
-                            for (var, val) in &bindings {
-                                direct.push(Stmt::Local(vec![var.clone()], Some(val.clone())));
-                                self.bind_local_name(var);
+                            if i > 0 {
+                                else_b = Some(Block(bs));
+                            } else {
+                                direct = bs;
                             }
-                            direct.push(Stmt::Return(self.tail_ast(branch.plain_body(), false)));
+                            scope.restore(self);
+                            break;
                         }
-                        scope.restore(self);
-                        break;
-                    }
-                    let cond = Expr::and_chain(conditions);
+                        ClauseCond::Chain(cond) => cond,
+                    };
                     let mut bs = Vec::new();
                     for (var, val) in &bindings {
                         bs.push(Stmt::Local(vec![var.clone()], Some(val.clone())));

@@ -44,6 +44,54 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A pattern that forces its scrutinee forces it in the clause condition,
+  at its left-to-right position, whether or not it tests or binds
+  anything** (a silent value where GHC raises). Forcing rode on a
+  pattern's tests and on its bindings: a multi-constructor tag, a
+  literal, `Just` and `(:)` push a test that reads the forced scrutinee,
+  and a bound field's path forces the containers it indexes through, but
+  a tuple, a single-constructor record or a LuaDict record pushes no
+  test, and a path nothing reads is never evaluated. A wildcard-only
+  tuple or record under a test, and a tuple whose bindings sat behind a
+  later failing column, were therefore never forced: `g (Just (_, _)) =
+  5; g Nothing = 0` printed 5 for `g (Just ⊥)`, `f2 True _ _ = 1; f2 _
+  (a, b) True = a; f2 _ _ _ = 0` printed 0 for `f2 False ⊥ False`, and `h
+  (P _ _ : _)` on `[⊥]`, `k (_, (_, _))` on `(1, ⊥)` and `case (b, t) of
+  (True, _) -> 1; (_, (_, _)) -> 2` on an undefined `t` all returned
+  where GHC raises. One rule now, in the one condition builder every
+  match emitter consumes (the clause chain, the guarded block and the
+  value-position `case` — hence also a comprehension generator, a lambda
+  pattern and a do-bind pattern): a forcing pattern that tests nothing
+  beneath it contributes its force to the condition as an always-true
+  conjunct — `__force(path)` itself, whose value is the table the pattern
+  destructures — at its position in the chain; a pattern with a test
+  beneath it is forced by that test, and a trailing force of a pattern
+  that binds a variable is left to its binding statement, which runs
+  next. The `and` chain alone therefore reproduces GHC's match order: a
+  column failing to the left still short-circuits the forces to its
+  right, a forcing pattern with no bindings diverges on ⊥, and a tuple
+  nested under a later failing column is forced before that column is
+  tried. The chain-split rebind no longer has to exclude a tuple or
+  record column, so such a column scrutinized only by later clauses is
+  forced once at the split. Newtype patterns (erased before codegen),
+  `let`/`where` pattern bindings and an unforced `case` binder stay
+  lazy, and a column already delivered in WHNF (entry-forced,
+  site-forced, a where-local parameter, a chain-split rebind, a forced
+  `case` scrutinee) gains no second force. The tracker and the program
+  corpus are byte-identical; in the bench corpus only the derived JSON
+  encoder's `((k, v) : [])` clause changes, forcing the head pair before
+  it tests the tail (ratios unchanged); across the case corpus 14 files
+  change by that shape alone, one where-local tuple column is now forced
+  once at the chain split, and one single-constructor existential
+  wildcard is forced before the `Just`/`Nothing` test beside it. Found
+  by the 2026-10 fresh-eyes review (O6).
+  (GHC-goldened case `pattern_forces_without_tests`: the five shapes of
+  the report, wildcard-only tuple, record and newtype columns,
+  tuple-in-Just, tuple-in-cons and record-in-tuple, an unused tuple
+  binding, a tuple column left of a failing column with and without a
+  failing column to its own left, the same in a where-local group, a
+  guarded clause, a value-position case, a comprehension generator, a
+  lambda, a do-bind and a `let`/`where` pattern binding.)
 - **An operand the emitted code reads itself is delivered in WHNF by the
   emitter** (crash, and a silent wrong value, where GHC returns the right
   one). A bind-chain `v <- readSTArray arr i` is spelled inline at its

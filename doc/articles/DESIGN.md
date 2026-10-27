@@ -648,6 +648,20 @@ scrutinizes is. A column to the left that cannot fail — a variable, a
 tuple, a single-constructor record, a newtype — is either matched or
 diverged on, never failed, so the entry force behind it stands.
 
+Inside a clause condition every pattern that forces its scrutinee forces
+it at its own left-to-right position, whether or not it tests or binds
+anything. A tag, literal, `Just` or cons test reads the forced scrutinee;
+a tuple, a single-constructor record or a LuaDict record that tests
+nothing beneath it contributes the forced scrutinee itself as an
+always-true conjunct (its value is the table the pattern destructures),
+so the `and` chain alone reproduces GHC's match order: `g (Just (_, _))`
+diverges on `Just ⊥`, `(_, (_, _))` on `(1, ⊥)`, and a tuple column left
+of a failing column is forced before that column is tried, while a
+column failing to the left still short-circuits every force to its
+right. A trailing force of a pattern that binds a variable is left to
+the binding statement that runs next. Newtype patterns are erased before
+codegen and `let`/`where` pattern bindings are lazy, so neither forces.
+
 ### Concrete variable tracking
 
 The code generator maintains a set of names known to hold non-thunk

@@ -378,6 +378,22 @@ the clause conditions by the match emitter (`pattern.rs`,
 (`later_clause_force_col`). A where-local function group applies the same
 predicate.
 
+The clause condition is built once, by `collect_pattern_conditions`, for
+every match emitter (the clause chain, the guarded block, the
+value-position `case`), and a pattern contributes its force to it whether
+or not it tests anything: a tag, a literal, a `Just` or a cons test reads
+the forced scrutinee, and a tuple, a single-constructor record or a
+LuaDict record that tests nothing beneath it contributes the forced
+scrutinee itself as an always-true conjunct (`Cond::Force`,
+`push_force_cond` — its value is the table the pattern destructures), at
+the pattern's left-to-right position. The `and` chain alone therefore
+reproduces GHC's match order: `(_, _)` under a `Just` diverges on ⊥, and a
+tuple column left of a failing column is forced before that column is
+tried. A trailing force of a pattern that binds a variable is left to the
+binding statement that follows the condition (`clause_condition`), and a
+scrutinee already in WHNF (entry-forced, chain-split rebind, a forced
+`case` scrutinee) is a bare name there and contributes no force.
+
 ---
 
 ## 6. Exhaustiveness & pattern matching

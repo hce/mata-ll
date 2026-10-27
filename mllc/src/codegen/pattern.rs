@@ -14,11 +14,20 @@
 //! Conditions, scrutinee paths and binding values are built as `lua::Expr`
 //! trees (`collect_pattern_conditions`, `field_path*`, `match_scrutinee`);
 //! the clause condition is their `and_chain`. Forcing discipline: a
-//! sub-pattern is forced only when it
-//! inspects its value (tag match, literal, deeper destructuring);
-//! Var/Wildcard bindings stay lazy, and a refutable top-level pattern forces
-//! its scrutinee inside its own clause condition so a matching earlier
-//! clause never forces it.
+//! sub-pattern is forced only when it inspects its value (tag match,
+//! literal, deeper destructuring); Var/Wildcard bindings stay lazy, and a
+//! pattern that forces its scrutinee forces it INSIDE the clause condition,
+//! at the pattern's left-to-right position (`Cond`), so a matching earlier
+//! clause never forces it and a failing column to the left short-circuits
+//! it — whether or not the pattern tests or binds anything: a tuple, a
+//! single-constructor record or a LuaDict record that tests nothing
+//! beneath it contributes the force itself as an always-true conjunct
+//! (`Cond::Force`, see `push_force_cond`); one with a test beneath it is
+//! forced by that test, which reads a path rooted at it, and one whose
+//! force would be the clause's last conjunct is forced by its own
+//! binding statement, which runs next (`clause_condition`). The condition
+//! chain alone therefore reproduces GHC's match order, and the bindings
+//! stay lazy field paths.
 
 use crate::tir::*;
 use super::CodeGen;
@@ -26,7 +35,116 @@ use super::function::ScopeSnapshot;
 use super::lua::{Block, Expr, Stmt};
 use super::names::{lua_field_index, lua_number_literal, lua_quoted_string, sanitize_name};
 
+/// One conjunct of a clause condition, in the pattern's left-to-right
+/// walk order. A `Test` is a comparison the pattern contributes (a tag,
+/// a literal, `~= nil` for a `Just`/cons cell); it reads a path rooted at
+/// the forced scrutinee, so evaluating it forces. A `Force` is the forced
+/// scrutinee expression itself (`__force(path)`), contributed by a pattern
+/// that forces its scrutinee but tests nothing at all — a tuple, a
+/// single-constructor record or a LuaDict record whose sub-patterns
+/// cannot fail (`push_force_cond`). Its value is the table the pattern
+/// destructures (a tuple, a positional record and a LuaDict record are
+/// all Lua tables — never nil or false), so as a conjunct it is always
+/// true: the cheapest shape that forces, since the chain's own `and` is
+/// the only test it adds (a `~= nil` would compare a value that is never
+/// nil, and a `(… or true)` would group for nothing). Keeping the two
+/// apart lets a clause whose conjuncts are forces alone stay structurally
+/// irrefutable, and lets a trailing force be left to the binding that
+/// performs it anyway (`clause_condition`).
+pub(super) enum Cond {
+    Test(Expr),
+    Force {
+        expr: Expr,
+        /// The pattern binds a variable: a binding statement whose path
+        /// is rooted at this scrutinee (`local a = __force(p)[1]`) runs
+        /// right after the condition and forces it first thing.
+        binds: bool,
+    },
+}
+
+impl Cond {
+    fn into_expr(self) -> Expr {
+        match self {
+            Cond::Test(e) | Cond::Force { expr: e, .. } => e,
+        }
+    }
+}
+
+/// A clause's condition, folded from its `Cond` list (`clause_condition`).
+pub(super) enum ClauseCond {
+    /// The clause cannot fail: it tests nothing, so it is the chain's
+    /// irrefutable arm (its `else`, or the whole match), and its forces —
+    /// if any — run as statements, in pattern order, before the bindings.
+    Always(Vec<Stmt>),
+    /// The clause tests something: the `and` chain of its conjuncts, tests
+    /// and forces interleaved in pattern order, so a failing test to the
+    /// left short-circuits every force to its right.
+    Chain(Expr),
+}
+
 impl CodeGen {
+    /// Fold a clause's conjuncts: forces alone make an irrefutable clause
+    /// whose forces run as statements (`__force(path)` is statement
+    /// syntax, the shape `seq` emits); any test makes an `and` chain.
+    ///
+    /// A TRAILING force whose pattern binds a variable is dropped first:
+    /// nothing is tested or forced after it, the clause's binding
+    /// statements run next, and the first binding rooted at that
+    /// scrutinee (`local a = __force(p)[1]`) forces it before anything
+    /// else is observable — the walk collects bindings in the same
+    /// left-to-right order as conjuncts, so several trailing forces are
+    /// performed by their bindings in the order they stood. Keeping the
+    /// conjunct would force the same path twice; dropping a NON-trailing
+    /// one would let the test or force after it run first. A pattern that
+    /// binds nothing (`(_, _)`, `(_, (_, _))`, `P _ _`) keeps its force:
+    /// the conjunct is the only thing that performs it.
+    pub(super) fn clause_condition(mut conds: Vec<Cond>) -> ClauseCond {
+        while matches!(conds.last(), Some(Cond::Force { binds: true, .. })) {
+            conds.pop();
+        }
+        if conds.iter().all(|c| matches!(c, Cond::Force { .. })) {
+            ClauseCond::Always(conds.into_iter().map(|c| Stmt::Expr(c.into_expr())).collect())
+        } else {
+            ClauseCond::Chain(Expr::and_chain(conds.into_iter().map(Cond::into_expr).collect()))
+        }
+    }
+
+    /// The forcing conjunct of a no-test forcing pattern — a tuple, a
+    /// single-constructor record or a LuaDict record — pushed at the
+    /// pattern's position, before its sub-patterns are walked. Contributed
+    /// exactly when both hold:
+    ///
+    ///   - the pattern tests nothing anywhere beneath it
+    ///     (`pattern_cannot_fail`). A pattern that CAN fail has a test
+    ///     beneath it, and every conjunct a sub-pattern contributes reads
+    ///     a path rooted at this scrutinee (`field_path*`), so the first
+    ///     of them — the next conjunct in the chain, nothing stands between
+    ///     — forces this scrutinee at this very position: a second force
+    ///     here would change nothing GHC can observe and cost a call.
+    ///     `(x : _, _)`, `(0, _)` and `(Just a, b)` therefore stay exactly
+    ///     as they were; `(_, _)`, `(a, b)`, `(_, (_, _))` and `P _ _`
+    ///     gain the conjunct (a trailing one of a binding pattern such as
+    ///     `(a, b)` is then left to its binding — `clause_condition`).
+    ///   - the scrutinee expression IS the force (`__force(path)`, built
+    ///     by `match_scrutinee` or `field_path*` because the pattern
+    ///     forces). A bare name here is a scrutinee already in WHNF — an
+    ///     entry-forced or site-forced parameter, a where-local `_wargN`,
+    ///     a chain-split rebind, a forced `case` scrutinee `_s`/`_cg` —
+    ///     and must not be forced a second time.
+    fn push_force_cond(&self, scrutinee: &Expr, pattern: &TPattern, conditions: &mut Vec<Cond>) {
+        if !self.pattern_cannot_fail(pattern) {
+            return;
+        }
+        if let Expr::Call(f, args) = scrutinee
+            && matches!(f.as_ref(), Expr::Name(n) if n == "__force")
+            && args.len() == 1
+        {
+            let mut binds = false;
+            pattern.for_each_var(&mut |_| binds = true);
+            conditions.push(Cond::Force { expr: scrutinee.clone(), binds });
+        }
+    }
+
     /// The match fall-off statement: inside a local function group, the
     /// named Haskell `error` (see `local_fn_fall_off`); otherwise the plain
     /// `error("Non-exhaustive patterns")`.
@@ -202,24 +320,28 @@ impl CodeGen {
                 self.collect_pattern_conditions(&scrut, pat, &mut conditions, &mut bindings);
             }
 
-            if conditions.is_empty() {
-                // Irrefutable clause: for the first clause its body IS the
-                // whole match; after refutable clauses it becomes the chain's
-                // `else` and later clauses are unreachable. Mirroring the
-                // string emitter, the clause scope is NOT restored on this
-                // early exit (the enclosing function restores its own scope).
-                let mut bs = self.clause_intro_stmts(clause, &bindings);
-                bs.extend(self.match_tail_stmts(clause.plain_body(), tails, eta));
-                if i > start {
-                    else_b = Some(Block(bs));
-                } else {
-                    direct = Some(bs);
+            let cond = match Self::clause_condition(conditions) {
+                ClauseCond::Always(forces) => {
+                    // Irrefutable clause (its forces, if any, run first):
+                    // for the first clause its body IS the whole match;
+                    // after refutable clauses it becomes the chain's `else`
+                    // and later clauses are unreachable. Mirroring the
+                    // string emitter, the clause scope is NOT restored on
+                    // this early exit (the enclosing function restores its
+                    // own scope).
+                    let mut bs = forces;
+                    bs.extend(self.clause_intro_stmts(clause, &bindings));
+                    bs.extend(self.match_tail_stmts(clause.plain_body(), tails, eta));
+                    if i > start {
+                        else_b = Some(Block(bs));
+                    } else {
+                        direct = Some(bs);
+                    }
+                    fell_through = false;
+                    break;
                 }
-                fell_through = false;
-                break;
-            }
-
-            let cond = Expr::and_chain(conditions);
+                ClauseCond::Chain(cond) => cond,
+            };
             let mut bs = self.clause_intro_stmts(clause, &bindings);
             bs.extend(self.match_tail_stmts(clause.plain_body(), tails, eta));
             if chain.is_none() {
@@ -273,18 +395,27 @@ impl CodeGen {
     ///     clause must never force it — GHC clause-order laziness), and
     ///     the param is not already WHNF (entry-forced / call-site-cheap);
     ///   - in clause `p`, every column left of k is irrefutable, and
-    ///     column k's pattern contributes at least one test to the clause
-    ///     condition (a single-constructor or bare-newtype pattern
-    ///     contributes none — its force happens in the clause BODY's
-    ///     bindings, which a failing later column skips).
+    ///     column k's pattern forces its scrutinee.
     ///
-    /// Then clause p's condition — the first thing evaluated on every path
-    /// out of the split, its column-k tests leading because the columns
-    /// left of k contribute nothing — forces k before anything else is
-    /// observable, so hoisting that force to the split point reorders no
-    /// evaluation. At most one column qualifies per split: a second one
-    /// would sit right of the first, whose tests refute "every column left
-    /// of k is irrefutable".
+    /// Then clause p forces k before anything else is observable: its
+    /// condition is the first thing evaluated on every path out of the
+    /// split, and column k's conjuncts lead it because the columns left
+    /// of k contribute nothing. The first of them forces the param: a
+    /// column that can fail has a test, and every test reads a path
+    /// rooted at the forced scrutinee; a column that cannot fail (a
+    /// tuple, a single-constructor record) contributes the forced
+    /// scrutinee itself (`Cond::Force`, the conjunct `push_force_cond`
+    /// emits in place of a test) — or, when that conjunct would be the
+    /// clause's last and the column binds a variable, leaves the force
+    /// to its binding statement, the first statement after the condition
+    /// (`clause_condition`). Forcing is the question here, not testing:
+    /// before a no-test column contributed its force to the condition,
+    /// its force happened in the clause BODY's bindings — behind any
+    /// later failing column, and not at all without a binding — so the
+    /// split had to exclude it. Hoisting the force to the split point
+    /// therefore reorders no evaluation. At most one column qualifies per
+    /// split: a second one would sit right of the first, whose conjuncts
+    /// refute "every column left of k is irrefutable".
     fn later_clause_force_col(
         &self,
         params: &[String],
@@ -307,13 +438,6 @@ impl CodeGen {
                 if c.patterns.get(k).is_some_and(Self::pattern_inspects_value) {
                     continue 'col;
                 }
-            }
-            // Column k must contribute a condition (`pattern_cannot_fail`
-            // is the structural answer), and every condition a pattern
-            // contributes reads a path rooted at the (forced) scrutinee —
-            // so the first of them forces the param.
-            if self.pattern_cannot_fail(pat) {
-                continue;
             }
             return Some(k);
         }
@@ -355,7 +479,12 @@ impl CodeGen {
                 let scrut = self.match_scrutinee(&params[pi], pat);
                 self.collect_pattern_conditions(&scrut, pat, &mut conditions, &mut bindings);
             }
-            let mut bs = self.clause_intro_stmts(clause, &bindings);
+            // An irrefutable clause's forces run first, before its bindings.
+            let (mut bs, cond) = match Self::clause_condition(conditions) {
+                ClauseCond::Always(forces) => (forces, None),
+                ClauseCond::Chain(cond) => (Vec::new(), Some(cond)),
+            };
+            bs.extend(self.clause_intro_stmts(clause, &bindings));
             if clause.guards.is_empty() {
                 bs.extend(self.match_tail_stmts(clause.plain_body(), tails, eta));
             } else {
@@ -378,15 +507,14 @@ impl CodeGen {
                     else_b: None,
                 });
             }
-            if conditions.is_empty() {
-                stmts.push(Stmt::Do(Block(bs)));
-            } else {
-                stmts.push(Stmt::If {
-                    cond: Expr::and_chain(conditions),
+            match cond {
+                None => stmts.push(Stmt::Do(Block(bs))),
+                Some(cond) => stmts.push(Stmt::If {
+                    cond,
                     then_b: Block(bs),
                     elseifs: vec![],
                     else_b: None,
-                });
+                }),
             }
             scope.restore(self);
         }
@@ -500,10 +628,14 @@ impl CodeGen {
     /// fail; false for a literal, an enum tag, a multi-constructor ADT, a
     /// LuaDict enum and the builtin `True`/`False`/`Nothing`/`Just`/`[]`/
     /// `(:)` tags. The structural mirror of `collect_pattern_conditions`'
-    /// condition-pushing arms, so the two cannot be asked separately (the
-    /// chain split and the entry-force rule both read this; neither runs
-    /// the emitter to find out, which would also register big-literal
-    /// pool entries out of emission order).
+    /// test-pushing arms, so the two cannot be asked separately (the
+    /// entry-force rule reads this; it does not run the emitter to find
+    /// out, which would also register big-literal pool entries out of
+    /// emission order). "Cannot fail" is not "does not force": a tuple or
+    /// record column forces its scrutinee (`forces_scrutinee`), and when
+    /// it cannot fail it contributes that force to the condition itself,
+    /// as `Cond::Force` (`push_force_cond`) — the emitter's own use of
+    /// this predicate.
     ///
     /// A column of a clause whose pattern cannot fail is tried on every
     /// call that reaches the clause and either diverges there or matches:
@@ -562,8 +694,10 @@ impl CodeGen {
     /// `first_clause_forces_on_every_path`), force it HERE, inside the
     /// clause's condition, so a matching earlier clause — or an earlier
     /// column of this clause that fails — never forces it: the condition is
-    /// an `and` chain in column order. An irrefutable pattern (Var/Wildcard)
-    /// binds lazily and must stay the raw (unforced) param.
+    /// an `and` chain in column order, and a pattern that tests nothing
+    /// contributes the force itself (`push_force_cond`). An irrefutable
+    /// pattern (Var/Wildcard) binds lazily and must stay the raw (unforced)
+    /// param.
     pub(super) fn match_scrutinee(&self, param: &str, pat: &TPattern) -> Expr {
         if !pat.forces_scrutinee() || self.concrete_vars.contains(param) {
             Expr::name(param)
@@ -572,7 +706,15 @@ impl CodeGen {
         }
     }
 
-    pub(super) fn collect_pattern_conditions(&self, scrutinee: &Expr, pattern: &TPattern, conditions: &mut Vec<Expr>, bindings: &mut Vec<(String, Expr)>) {
+    /// The conjuncts (`Cond`, in left-to-right walk order) and lazy
+    /// bindings of matching `pattern` against `scrutinee` — the one
+    /// definition every match emitter (the clause chain, the guarded
+    /// block, the value-position `case`) consumes. `scrutinee` carries the
+    /// force when the pattern forces (see `match_scrutinee`, `field_path`);
+    /// a test reads it, a tuple/record contributes it (`push_force_cond`),
+    /// and a nested forcing sub-pattern does the same for its own field at
+    /// its own position.
+    pub(super) fn collect_pattern_conditions(&self, scrutinee: &Expr, pattern: &TPattern, conditions: &mut Vec<Cond>, bindings: &mut Vec<(String, Expr)>) {
         match pattern {
             TPattern::Var(name, _) => { bindings.push((sanitize_name(name), scrutinee.clone())); }
             // As-pattern: bind the WHOLE scrutinee to the name, then match
@@ -602,29 +744,29 @@ impl CodeGen {
                     // (kept type-directed: the hex spelling reads as a large
                     // POSITIVE double on LuaJIT either way, and the MIN
                     // corner is not worth a second spelling analysis).
-                    TLiteral::Integer(i64::MIN) => conditions.push(Expr::call_named(
+                    TLiteral::Integer(i64::MIN) => conditions.push(Cond::Test(Expr::call_named(
                         "__mll_lit_eq",
                         vec![scrutinee.clone(), Expr::lit("0x8000000000000000")],
-                    )),
+                    ))),
                     TLiteral::Integer(n)
                         if matches!(pat_ty, crate::types::Ty::Con(c) if c == "Int") =>
                     {
-                        conditions.push(Expr::binop(
+                        conditions.push(Cond::Test(Expr::binop(
                             "==",
                             scrutinee.clone(),
                             Expr::lit(n.to_string()),
-                        ));
+                        )));
                     }
-                    TLiteral::Integer(n) => conditions.push(Expr::call_named(
+                    TLiteral::Integer(n) => conditions.push(Cond::Test(Expr::call_named(
                         "__mll_lit_eq",
                         vec![scrutinee.clone(), Expr::lit(n.to_string())],
-                    )),
+                    ))),
                     // Hoisted to a `__mll_biglit[N]` CAF (see big_lit_ref): the
                     // pattern's constant is parsed once, not on every match.
-                    TLiteral::BigInteger(s) => conditions.push(Expr::call_named(
+                    TLiteral::BigInteger(s) => conditions.push(Cond::Test(Expr::call_named(
                         "__mll_lit_eq",
                         vec![scrutinee.clone(), self.big_lit_ref(s)],
-                    )),
+                    ))),
                     _ => {
                         let s = match lit {
                             // Float spelling, matching literal_ast (Lua compares
@@ -639,7 +781,7 @@ impl CodeGen {
                             TLiteral::Unit => "nil".into(),
                             TLiteral::Integer(_) | TLiteral::BigInteger(_) => unreachable!(),
                         };
-                        conditions.push(Expr::binop("==", scrutinee.clone(), Expr::lit(s)));
+                        conditions.push(Cond::Test(Expr::binop("==", scrutinee.clone(), Expr::lit(s))));
                     }
                 }
             }
@@ -653,32 +795,41 @@ impl CodeGen {
                     // LuaDict enum: the value is the constructor's Lua string,
                     // so match by string equality (declaration-order semantics
                     // live in the derived Ord/Enum, not the wire value).
-                    conditions.push(Expr::binop(
+                    conditions.push(Cond::Test(Expr::binop(
                         "==",
                         scrutinee.clone(),
                         Expr::lit(lua_quoted_string(str_tag.as_bytes())),
-                    ));
+                    )));
                 } else if let Some((tag, total, is_enum)) = self.constructor_info(name) {
                     if is_enum {
-                        conditions.push(Expr::binop("==", scrutinee.clone(), Expr::lit(format!("{}", tag))));
+                        conditions.push(Cond::Test(Expr::binop("==", scrutinee.clone(), Expr::lit(format!("{}", tag)))));
                     } else if total > 1 {
-                        conditions.push(Expr::binop(
+                        conditions.push(Cond::Test(Expr::binop(
                             "==",
                             Expr::index(scrutinee.clone(), "[1]"),
                             Expr::lit(format!("{}", tag)),
-                        ));
+                        )));
                         for (i, arg) in args.iter().enumerate() {
                             let path = Self::field_path(scrutinee, i + 2, arg);
                             self.collect_pattern_conditions(&path, arg, conditions, bindings);
                         }
                     } else if let Some(fields) = self.luadict_con_fields.get(name) {
-                        // Single LuaDict constructor: bind each positional
-                        // sub-pattern from its named table key.
+                        // Single LuaDict constructor: no tag to test, so the
+                        // pattern contributes its force when nothing beneath
+                        // it tests; then bind each positional sub-pattern
+                        // from its named table key.
+                        self.push_force_cond(scrutinee, pattern, conditions);
                         for (i, arg) in args.iter().enumerate() {
                             let path = Self::field_path_key(scrutinee, &fields[i], arg);
                             self.collect_pattern_conditions(&path, arg, conditions, bindings);
                         }
                     } else {
+                        // Single constructor: no tag to test, so the pattern
+                        // contributes its force when nothing beneath it
+                        // tests — GHC forces the scrutinee of a constructor
+                        // pattern whether or not a field is bound
+                        // (`h (P _ _ : _)` on `[⊥]` diverges).
+                        self.push_force_cond(scrutinee, pattern, conditions);
                         for (i, arg) in args.iter().enumerate() {
                             let path = Self::field_path(scrutinee, i + 1, arg);
                             self.collect_pattern_conditions(&path, arg, conditions, bindings);
@@ -686,15 +837,15 @@ impl CodeGen {
                     }
                 } else {
                     match name.as_str() {
-                        "True" => conditions.push(Expr::binop("==", scrutinee.clone(), Expr::lit("true"))),
-                        "False" => conditions.push(Expr::binop("==", scrutinee.clone(), Expr::lit("false"))),
-                        "Nothing" | "[]" => conditions.push(Expr::binop("==", scrutinee.clone(), Expr::lit("nil"))),
+                        "True" => conditions.push(Cond::Test(Expr::binop("==", scrutinee.clone(), Expr::lit("true")))),
+                        "False" => conditions.push(Cond::Test(Expr::binop("==", scrutinee.clone(), Expr::lit("false")))),
+                        "Nothing" | "[]" => conditions.push(Cond::Test(Expr::binop("==", scrutinee.clone(), Expr::lit("nil")))),
                         "Just" => {
                             // A Maybe value is either nil (Nothing) or the Just
                             // wrapper, so `~= nil` identifies Just; the payload is
                             // unwrapped from field [1] (which is itself nil for
                             // `Just Nothing` / `Just []`).
-                            conditions.push(Expr::binop("~=", scrutinee.clone(), Expr::lit("nil")));
+                            conditions.push(Cond::Test(Expr::binop("~=", scrutinee.clone(), Expr::lit("nil"))));
                             if let Some(arg) = args.first() {
                                 // The payload may be a thunk (lazy construction),
                                 // so a nested pattern that indexes it (`Just (a,b)`,
@@ -714,7 +865,7 @@ impl CodeGen {
                         }
                         ":" => {
                             // Cons pattern: x:xs
-                            conditions.push(Expr::binop("~=", scrutinee.clone(), Expr::lit("nil")));
+                            conditions.push(Cond::Test(Expr::binop("~=", scrutinee.clone(), Expr::lit("nil"))));
                             if let Some(head_pat) = args.first() {
                                 // The head is stored lazily (a cons head is a
                                 // lazy position — see the head-consumption
@@ -751,13 +902,20 @@ impl CodeGen {
                                 self.collect_pattern_conditions(&tail, tail_pat, conditions, bindings);
                             }
                         }
-                        _ => conditions.push(Expr::binop("==", scrutinee.clone(), Expr::name(name.clone()))),
+                        _ => conditions.push(Cond::Test(Expr::binop("==", scrutinee.clone(), Expr::name(name.clone())))),
                     }
                 }
             }
             TPattern::Paren(inner) => self.collect_pattern_conditions(scrutinee, inner, conditions, bindings),
             TPattern::Tuple(pats) => {
-                // Tuple fields are at [1], [2], etc. (no tag)
+                // Tuple fields are at [1], [2], etc. (no tag): the pattern
+                // contributes its force when nothing beneath it tests, then
+                // descends — a wildcard-only tuple (`(_, _)`, `Just (_, _)`,
+                // `(_, (_, _))`) forces its scrutinee exactly as GHC does,
+                // at its position in the chain, so a column failing to the
+                // right still sees it forced and one failing to the left
+                // still skips it.
+                self.push_force_cond(scrutinee, pattern, conditions);
                 for (i, p) in pats.iter().enumerate() {
                     let path = Self::field_path(scrutinee, i + 1, p);
                     self.collect_pattern_conditions(&path, p, conditions, bindings);
