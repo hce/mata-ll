@@ -44,6 +44,50 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **Every use of a class method emits that class's constraint; Enum,
+  Bounded and the Functor/Applicative/Monad hierarchy are no exception**
+  (`print (fromEnum (toEnum 65))` compiled and crashed with "attempt to
+  call a nil value" where GHC reports an ambiguous type; `next :: a -> a;
+  next x = succ x` and `bump :: m Int -> m Int; bump x = x >>= …` were
+  accepted without the `Enum a` / `Monad m` context GHC requires; `bump
+  (Some x) = show (succ x)` under `data Some = forall a. Show a => Some a`
+  compiled and crashed where GHC cannot deduce `Enum a`; `applyBoth succ`
+  and `applyBoth (\_ -> maxBound)` for a rank-2 `applyBoth` compiled and
+  crashed where GHC finds no instance; `let act = fmap (+ 1) (pure 41)`
+  bound by a later `r <- act` crashed; a let-bound `k x = return x` used
+  at IO and Maybe crashed at the second use; an unused `let y = return 3`
+  was accepted where GHC reports the ambiguous monad). The builtin
+  registrations of these five classes listed no per-method constraint,
+  so a use produced no wanted and the ambiguity check, the missing-
+  context check and the skolem-evidence check never saw it; the leftover-
+  constraint check also skipped every Functor/Applicative/Monad wanted
+  on the stated ground that an unresolved monad variable "is IO by
+  construction", which silenced the rigid `m` of `bump` as well. Now
+  every builtin class method registers its class's constraint on the
+  class variable (`return` with its own `Monad m` scheme), the monad
+  classes go through the same three checks as `Show` or `Num` — what
+  determines a variable is decided once, at the function boundary, by
+  the binding's final type — and the monomorphism restriction counts the
+  monad classes like every other (a class-polymorphic local stays
+  monomorphic, HASKDIFF.md). Three things keep every previously accepted
+  program compiling to the same Lua: an instance method body gets the
+  class method's own constraints as givens (`instance Traversable []
+  where traverse f xs = list_traverse f xs` uses an Applicative method
+  at `f`, as GHC's instance bodies may); a let/where binding keeps
+  monomorphic only the variables its pending constraints still need once
+  reduced through the instances (`Monad (ST s)` needs nothing of `s`, so
+  a where-bound ST helper under `runST` still generalizes over `s`), and
+  a wanted over a variable the group did generalize is replaced by that
+  residual; and an instance registered with an empty context satisfies
+  the constraint at any spelling of its arguments. Defaulting is Haskell
+  2010's: `succ 1` is `succ (1 :: Integer)`, `print maxBound` is
+  ambiguous. `Bool` gained its `Enum` instance (`[False ..]`, `succ
+  False`, `fromEnum True`, `[minBound .. maxBound] :: [Bool]`), with the
+  derived instance's semantics; a method at a type without the instance
+  is now "No instance for 'Enum T'", naming the class rather than the
+  method. Found by the 2026-10 fresh-eyes review (T10). (GHC-goldened
+  case `class_method_constraints`; the rejections are pinned in
+  `compile_errors.rs`.)
 - **A `forall`-quantified type unifies only with an alpha-equivalent
   `forall`; a polymorphic argument reaches a higher-rank parameter only
   through a direct application or `$`, as in GHC** (`map applyBoth [not]`

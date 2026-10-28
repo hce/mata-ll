@@ -480,6 +480,7 @@ mll_test!(rank2, "rank2.mll");
 // parameter (direct application, `$`, a lambda checked against a rank-3
 // parameter); the rejected routes are in compile_errors.rs.
 mll_test!(rank2_argument_routes, "rank2_argument_routes.mll");
+mll_test!(class_method_constraints, "class_method_constraints.mll");
 
 // Stress tests
 mll_test!(stress_large_adt, "stress_large_adt.mll");

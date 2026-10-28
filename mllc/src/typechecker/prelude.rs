@@ -19,14 +19,26 @@ use super::*;
 ///   `forall vars. ty` under the method name. The vars are listed explicitly,
 ///   NOT derived from the type: their order fixes the fresh-variable
 ///   numbering at instantiation and therefore the variable names diagnostics
-///   print. `None` skips the env insert — either another registration owns
-///   the name (Monad's `return` keeps the Applicative `pure` scheme) or it
-///   was registered elsewhere (the arithmetic operators).
+///   print. `None` skips the env insert — the name was registered
+///   elsewhere (the arithmetic operators, Hashable's hidden methods).
 /// - per-method constraints: the entry `method_constraints` gets for the
-///   method name, as (class, constrained variable) pairs. Most methods
-///   constrain the class variable alone; `traverse` also constrains its
-///   applicative (`Applicative f`), which is why this is a list of pairs
-///   rather than a single class name. An empty list registers nothing.
+///   method name, as (class, constrained variable) pairs. ONE RULE for
+///   every builtin class: a use of a method emits the class's own
+///   constraint on the class variable (`succ` wants `Enum a`, `>>=` wants
+///   `Monad m`), exactly as `register_class` synthesizes it for a source
+///   class — that wanted is what the ambiguity check, the missing-context
+///   check and the skolem-evidence check act on. `traverse` also
+///   constrains its applicative (`Applicative f`), which is why this is a
+///   list of pairs rather than a single class name. The variable is named
+///   as the method's ENV SCHEME spells it (the wanted is mapped through
+///   the scheme's instantiation), and the class's own constraint must
+///   spell the class variable exactly as the class declares it, which is
+///   how the monomorphizer tells it from a method's additional ones. Only
+///   a method-less class (`Real`) registers nothing; Functor, Applicative,
+///   Monad, Enum and Bounded used to register nothing too, so `print
+///   (fromEnum (toEnum 65))` and `bump :: m Int -> m Int; bump x = x >>=
+///   …` typechecked and the dispatch found no type (a nil call at run
+///   time) — see the 2026-10 review's T10.
 type BuiltinMethod = (
     &'static str,
     Ty,
@@ -418,8 +430,8 @@ impl Checker {
         // fmap :: (a -> b) -> f a -> f b
         let fmap_ty = Ty::fun(&[Ty::arrow(ta.clone(), tb.clone()), fa.clone()], fb.clone());
         self.register_builtin_class("Functor", "f", &[], vec![
-            ("fmap", fmap_ty.clone(), Some(vec![a.clone(), b.clone(), f.clone()]), vec![]),
-            ("<$>", fmap_ty, Some(vec![a.clone(), b.clone(), f.clone()]), vec![]),
+            ("fmap", fmap_ty.clone(), Some(vec![a.clone(), b.clone(), f.clone()]), vec![("Functor", "f")]),
+            ("<$>", fmap_ty, Some(vec![a.clone(), b.clone(), f.clone()]), vec![("Functor", "f")]),
         ]);
         // `<$>` is a method here (dispatch goes through the instance table)
         // where GHC has `(<$>) = fmap` as a plain function; a user instance
@@ -493,14 +505,11 @@ impl Checker {
             Ty::App(Box::new(tf.clone()), Box::new(Ty::list(tb.clone()))),
         );
         self.register_builtin_class("Applicative", "f", &["Functor"], vec![
-            ("pure", pure_ty.clone(), Some(vec![a.clone(), f.clone()]), vec![]),
-            ("<*>", ap_ty, Some(vec![a.clone(), b.clone(), f.clone()]), vec![]),
-            ("liftA2", lifta2_ty, Some(vec![a.clone(), b.clone(), c.clone(), f.clone()]), vec![]),
-            ("list_traverse", list_traverse_ty, Some(vec![a.clone(), b.clone(), f.clone()]), vec![]),
+            ("pure", pure_ty.clone(), Some(vec![a.clone(), f.clone()]), vec![("Applicative", "f")]),
+            ("<*>", ap_ty, Some(vec![a.clone(), b.clone(), f.clone()]), vec![("Applicative", "f")]),
+            ("liftA2", lifta2_ty, Some(vec![a.clone(), b.clone(), c.clone(), f.clone()]), vec![("Applicative", "f")]),
+            ("list_traverse", list_traverse_ty, Some(vec![a.clone(), b.clone(), f.clone()]), vec![("Applicative", "f")]),
         ]);
-        // `return`'s env entry is the Applicative `pure` scheme; the Monad
-        // method of the same name (below) deliberately adds no second one.
-        self.env_scheme("return", vec![a.clone(), f.clone()], pure_ty);
         // GHC's defaults: a user instance defines `pure` and either `<*>`
         // or `liftA2` (defining neither loops, as under GHC).
         self.register_builtin_default("Applicative", "<*>", "f <*> x = liftA2 id f x");
@@ -534,10 +543,17 @@ impl Checker {
         // return :: a -> m a
         self.register_builtin_class("Monad", "m", &["Applicative"], vec![
             (">>=", Ty::fun(&[ma.clone(), Ty::arrow(ta.clone(), mb.clone())], mb.clone()),
-                Some(vec![a.clone(), b.clone(), m.clone()]), vec![]),
+                Some(vec![a.clone(), b.clone(), m.clone()]), vec![("Monad", "m")]),
             (">>", Ty::fun(&[ma.clone(), mb.clone()], mb.clone()),
-                Some(vec![a.clone(), b.clone(), m.clone()]), vec![]),
-            ("return", Ty::arrow(ta.clone(), ma.clone()), None, vec![]),
+                Some(vec![a.clone(), b.clone(), m.clone()]), vec![("Monad", "m")]),
+            // `return` is the Monad method with its own env scheme over
+            // the Monad variable `m` (it used to borrow `pure`'s scheme,
+            // spelled over `f`): the constraint a use emits must name the
+            // class variable as the class declares it, or the monomorphizer
+            // reads it as a constraint BEYOND the class's own and hands
+            // `return` three extra dictionaries in a dictionary-passing
+            // body (`method_dict_constraints`).
+            ("return", Ty::arrow(ta.clone(), ma.clone()), Some(vec![a.clone(), m.clone()]), vec![("Monad", "m")]),
         ]);
         // GHC's defaults: `>>=` is the one method a user instance must write.
         self.register_builtin_default("Monad", ">>", "m >> k = m >>= \\_ -> k");
@@ -656,14 +672,14 @@ impl Checker {
         let enum_from_to_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::List(Box::new(ta.clone())));
         let enum_from_then_to_ty = Ty::fun(&[ta.clone(), ta.clone(), ta.clone()], Ty::List(Box::new(ta.clone())));
         self.register_builtin_class("Enum", "a", &[], vec![
-            ("succ", succ_ty.clone(), Some(vec![a.clone()]), vec![]),
-            ("pred", succ_ty, Some(vec![a.clone()]), vec![]),
-            ("toEnum", to_enum_ty, Some(vec![a.clone()]), vec![]),
-            ("fromEnum", from_enum_ty, Some(vec![a.clone()]), vec![]),
-            ("enumFrom", enum_from_ty, Some(vec![a.clone()]), vec![]),
-            ("enumFromThen", enum_from_then_ty, Some(vec![a.clone()]), vec![]),
-            ("enumFromTo", enum_from_to_ty, Some(vec![a.clone()]), vec![]),
-            ("enumFromThenTo", enum_from_then_to_ty, Some(vec![a.clone()]), vec![]),
+            ("succ", succ_ty.clone(), Some(vec![a.clone()]), vec![("Enum", "a")]),
+            ("pred", succ_ty, Some(vec![a.clone()]), vec![("Enum", "a")]),
+            ("toEnum", to_enum_ty, Some(vec![a.clone()]), vec![("Enum", "a")]),
+            ("fromEnum", from_enum_ty, Some(vec![a.clone()]), vec![("Enum", "a")]),
+            ("enumFrom", enum_from_ty, Some(vec![a.clone()]), vec![("Enum", "a")]),
+            ("enumFromThen", enum_from_then_ty, Some(vec![a.clone()]), vec![("Enum", "a")]),
+            ("enumFromTo", enum_from_to_ty, Some(vec![a.clone()]), vec![("Enum", "a")]),
+            ("enumFromThenTo", enum_from_then_to_ty, Some(vec![a.clone()]), vec![("Enum", "a")]),
         ]);
 
         // Enum instance for Int
@@ -672,6 +688,17 @@ impl Checker {
             ("toEnum", "toEnum_Int"), ("fromEnum", "fromEnum_Int"),
             ("enumFrom", "enumFrom_Int"), ("enumFromThen", "enumFromThen_Int"),
             ("enumFromTo", "enumFromTo_Int"), ("enumFromThenTo", "enumFromThenTo_Int"),
+        ]);
+        // Enum Bool (GHC parity: `[False ..]`, `succ False`, `fromEnum
+        // True`, `[minBound .. maxBound] :: [Bool]`). Bool is a builtin
+        // type, not a Prelude.mll `data` declaration, so it cannot derive
+        // the instance; the helpers are mata-ll source in lib/Prelude.mll
+        // with the derived instance's semantics and error texts.
+        self.register_builtin_instance("Enum", Ty::Con("Bool".to_string()), &[
+            ("succ", "succ_Bool"), ("pred", "pred_Bool"),
+            ("toEnum", "toEnum_Bool"), ("fromEnum", "fromEnum_Bool"),
+            ("enumFrom", "enumFrom_Bool"), ("enumFromThen", "enumFromThen_Bool"),
+            ("enumFromTo", "enumFromTo_Bool"), ("enumFromThenTo", "enumFromThenTo_Bool"),
         ]);
 
         // HashMap KEY constraint (round-3 Q54): the runtime map is keyed
@@ -696,8 +723,8 @@ impl Checker {
         let hash_key_ty = Ty::arrow(ta.clone(), Ty::Con("String".to_string()));
         let hash_cmp_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::Con("Ordering".to_string()));
         self.register_builtin_class("Hashable", "a", &[], vec![
-            ("__hashKey", hash_key_ty, None, vec![]),
-            ("__hashCompare", hash_cmp_ty, None, vec![]),
+            ("__hashKey", hash_key_ty, None, vec![("Hashable", "a")]),
+            ("__hashCompare", hash_cmp_ty, None, vec![("Hashable", "a")]),
         ]);
         for t in &["Int", "Number", "String", "Bool", "ByteString"] {
             // The scalar encoder, and the type's own `compare` (the base
@@ -720,8 +747,8 @@ impl Checker {
         let min_bound_ty = ta.clone();
         let max_bound_ty = ta.clone();
         self.register_builtin_class("Bounded", "a", &[], vec![
-            ("minBound", min_bound_ty, Some(vec![a.clone()]), vec![]),
-            ("maxBound", max_bound_ty, Some(vec![a.clone()]), vec![]),
+            ("minBound", min_bound_ty, Some(vec![a.clone()]), vec![("Bounded", "a")]),
+            ("maxBound", max_bound_ty, Some(vec![a.clone()]), vec![("Bounded", "a")]),
         ]);
         // Bounded Int / Bounded Bool (GHC parity); runtime constants in
         // runtime.lua (minBound_Int is math.mininteger on 5.3+, the
@@ -734,11 +761,13 @@ impl Checker {
         ]);
 
         // Class constraints carried by the built-in class methods (the
-        // constraint field of each registration below, and of the numeric
-        // classes further down). Each constrains the class variable "a"; a
-        // use whose "a" resolves to a concrete type with no instance (a
-        // function, an IO action, a type without the relevant deriving) is
-        // rejected at the function boundary.
+        // constraint field of each registration above and below, and of
+        // the numeric classes further down). Each constrains the class
+        // variable; a use whose variable resolves to a concrete type with
+        // no instance (a function, an IO action, a type without the
+        // relevant deriving) is rejected at the function boundary, one
+        // nothing determines is an ambiguity, and one that is a rigid
+        // signature variable needs the declared context.
 
         // Built-in Show typeclass: GHC's two methods `show` and `showsPrec`
         // (`showList` is not carried — it exists in base only so that

@@ -7120,3 +7120,147 @@ main = print (f 3 (7 :: Int))
         "polymorphic recursion",
     ]);
 }
+
+// A use of a class method emits that class's constraint for EVERY builtin
+// class. Enum, Bounded, Functor, Applicative and Monad methods used to
+// emit none, so the ambiguity check, the missing-context check and the
+// skolem-evidence check never saw them: `print (fromEnum (toEnum 65))`
+// compiled and crashed with a nil call, `next :: a -> a; next x = succ x`
+// and `bump :: m Int -> m Int; bump x = x >>= …` were accepted without
+// their contexts, an existential whose context lacks Enum could `succ`
+// its hidden value, and `applyBoth succ` reached a rank-2 skolem with no
+// evidence. Each shape below is rejected by GHC 9.14 the same way (the
+// message in the comment); the accepted twins are pinned in
+// class_method_constraints.mll.
+#[test]
+fn enum_method_on_undetermined_type_is_ambiguous() {
+    // GHC: "Ambiguous type variable ‘a0’ arising from a use of ‘fromEnum’
+    // prevents the constraint ‘(Enum a0)’ from being solved" — Enum alone
+    // does not default (Haskell 2010 §4.3.4 needs a numeric class).
+    expect_compile_error(
+        "main :: IO ()\nmain = print (fromEnum (toEnum 65))\n",
+        &[],
+        &["Ambiguous type", "Enum", "GHC rejects this the same way"],
+    );
+    // Control: with a numeric class in the set the variable defaults
+    // (`succ 1` is `succ (1 :: Integer)`), as under GHC.
+    compile("main :: IO ()\nmain = print (succ 1)\n", Path::new("."), &[])
+        .expect("`succ 1` defaults to Integer");
+}
+
+#[test]
+fn bounded_method_on_undetermined_type_is_ambiguous() {
+    // GHC: ambiguous ‘a0’ arising from a use of ‘print’ / ‘show’ (Show and
+    // Bounded, no numeric class — no defaulting).
+    expect_compile_error(
+        "main :: IO ()\nmain = print maxBound\n",
+        &[],
+        &["Ambiguous type", "Bounded"],
+    );
+}
+
+#[test]
+fn enum_method_at_rigid_variable_needs_the_context() {
+    // GHC: "No instance for ‘Enum a’ arising from a use of ‘succ’ …
+    // add (Enum a) to the context".
+    expect_compile_error(
+        "next :: a -> a\nnext x = succ x\n\nmain :: IO ()\nmain = print (next (3 :: Int))\n",
+        &[],
+        &["No instance for 'Enum a'", "the signature does not require 'Enum a'", "(Enum a) =>"],
+    );
+}
+
+#[test]
+fn monad_hierarchy_method_at_rigid_variable_needs_the_context() {
+    // GHC: "No instance for ‘Monad m’ arising from a use of ‘>>=’". The
+    // leftover check used to skip every Functor/Applicative/Monad
+    // constraint on the stated ground that an unresolved monad variable
+    // "is IO by construction" — which also silenced this rigid one.
+    expect_compile_error(
+        "bump :: m Int -> m Int\nbump x = x >>= \\v -> return (v + 1)\n\nmain :: IO ()\nmain = bump (pure 1) >>= print\n",
+        &[],
+        &["No instance for 'Monad m'", "the signature does not require 'Monad m'"],
+    );
+    // GHC: "No instance for ‘Functor f’ arising from a use of ‘fmap’".
+    expect_compile_error(
+        "each :: f Int -> f Int\neach = fmap (+ 1)\n\nmain :: IO ()\nmain = print (each [1])\n",
+        &[],
+        &["No instance for 'Functor f'"],
+    );
+    // GHC: "No instance for ‘Applicative f’ arising from a use of ‘pure’".
+    expect_compile_error(
+        "mk :: a -> f a\nmk = pure\n\nmain :: IO ()\nmain = print (mk 1 :: Maybe Int)\n",
+        &[],
+        &["No instance for 'Applicative f'"],
+    );
+    // Controls: the same definitions with their contexts are accepted and
+    // run (class_method_constraints.mll), and `Monad m` provides the
+    // Applicative and Functor methods through its superclasses.
+    compile(
+        "step :: Monad m => m Int -> m Int\nstep x = fmap (+ 1) x >>= \\v -> pure (v + 1)\n\nmain :: IO ()\nmain = step (pure 1) >>= print\n",
+        Path::new("."), &[],
+    ).expect("Monad m provides fmap and pure");
+}
+
+#[test]
+fn unused_monadic_local_is_ambiguous() {
+    // GHC: "Ambiguous type variable ‘m0’ arising from a use of ‘return’
+    // prevents the constraint ‘(Monad m0)’ from being solved": nothing
+    // ever binds the let's monad, and Monad does not default. There is no
+    // "IO by construction" — a do-block's monad is what its `>>=`
+    // unifies the statements with, and this `let` meets no statement.
+    expect_compile_error(
+        "main :: IO ()\nmain = do\n    let y = return 3\n    print 1\n",
+        &[],
+        &["Ambiguous type", "Monad"],
+    );
+    // Control: the same let bound by a statement is IO.
+    compile("main :: IO ()\nmain = do\n    let y = return 3\n    v <- y\n    print v\n", Path::new("."), &[])
+        .expect("a let the do-block binds is IO");
+}
+
+#[test]
+fn existential_without_enum_in_its_context_cannot_succ_the_hidden_value() {
+    // GHC: "Could not deduce ‘Enum a’ arising from a use of ‘succ’ from the
+    // context: Show a".
+    expect_compile_error(
+        "data Some = forall a. Show a => Some a\n\nbump :: Some -> String\nbump (Some x) = show (succ x)\n\nmain :: IO ()\nmain = putStrLn (bump (Some (3 :: Int)))\n",
+        &[],
+        &["No instance for 'Enum a'", "existential type hidden by constructor 'Some'", "declared context (Show)"],
+    );
+}
+
+#[test]
+fn rank2_argument_demanding_enum_or_bounded_is_not_polymorphic_enough() {
+    // GHC: "No instance for ‘Enum a’ arising from a use of ‘succ’" /
+    // "No instance for ‘Bounded a’ arising from a use of ‘maxBound’".
+    let decl = "applyBoth :: (forall a. a -> a) -> (Int, Bool)\napplyBoth f = (f 1, f True)\n\n";
+    expect_compile_error(
+        &format!("{decl}main :: IO ()\nmain = print (applyBoth succ)\n"),
+        &[],
+        &["No instance for 'Enum a'", "bound by a higher-rank argument type", "not polymorphic enough"],
+    );
+    expect_compile_error(
+        &format!("{decl}main :: IO ()\nmain = print (applyBoth (\\_ -> maxBound))\n"),
+        &[],
+        &["No instance for 'Bounded a'", "bound by a higher-rank argument type"],
+    );
+}
+
+#[test]
+fn class_method_at_a_type_without_the_instance_names_the_class() {
+    // GHC: "No instance for ‘Enum T’ arising from a use of ‘succ’" /
+    // "No instance for ‘Monad W’ arising from a use of ‘>>=’". The
+    // checker's wanted rejects these before monomorphization, which used
+    // to report the METHOD ("No instance for 'succ' on type 'T'").
+    expect_compile_error(
+        "data T = T Int deriving Show\n\nmain :: IO ()\nmain = print (succ (T 1))\n",
+        &[],
+        &["No instance for 'Enum T'"],
+    );
+    expect_compile_error(
+        "data W a = W a\n\nunW :: W a -> a\nunW (W x) = x\n\nmain :: IO ()\nmain = print (unW (W 1 >>= \\x -> W (x + 1)))\n",
+        &[],
+        &["No instance for 'Monad W'"],
+    );
+}

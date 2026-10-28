@@ -168,10 +168,14 @@ is defined as GHC with an implicit `default (Integer, Number)`, matching
 standard GHC's `default (Integer, Double)` (`Number` = GHC's `Double`).
 As in GHC, defaulting applies only when every
 class constraining the variable is *standard* (a numeric class, `Eq`, `Ord`,
-`Show`, `Read`, `Enum`, `Bounded`). A literal also constrained by a user class
-— e.g. `myClassMethod 5` where `5 :: (MyClass a, Num a) => a` — is
-ambiguous and must be annotated (`myClassMethod (5 :: Int)`), exactly as
-GHC requires.
+`Show`, `Read`, `Enum`, `Bounded`) and at least one is numeric. A literal
+also constrained by a user class — e.g. `myClassMethod 5` where `5 ::
+(MyClass a, Num a) => a` — is ambiguous and must be annotated
+(`myClassMethod (5 :: Int)`), exactly as GHC requires. So is a variable
+constrained by standard classes alone with no numeric one among them:
+`print (succ 1)` prints `2` (the literal's `Num` lets `Integer` be chosen),
+but `print maxBound` and `print (fromEnum (toEnum 65))` are ambiguous and
+need an annotation (`maxBound :: Int`), as under GHC.
 
 ## Existential record fields have no selector and no record update
 

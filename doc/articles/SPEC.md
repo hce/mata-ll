@@ -850,6 +850,7 @@ variable.
         -- Instances: Int, Integer, Number, Bool, String
 
     class Enum a where
+        -- Instances: Int, Integer, Bool, Ordering, and derived enums
         succ        :: a -> a
         pred        :: a -> a
         toEnum      :: Int -> a
@@ -903,7 +904,21 @@ gaps locally.
 ## Consequences
 
 - Typeclass method implementations are checked against the method's
-  declared signature, not inferred independently.
+  declared signature, not inferred independently. Inside an instance
+  body the method signature's own context is in scope as well
+  (`traverse`'s `Applicative f`), as in GHC.
+- Every use of a class method emits that class's constraint — `succ`
+  wants `Enum a`, `>>=` wants `Monad m`, exactly as `show` wants `Show
+  a` — and the constraints left over at a definition's boundary are
+  judged by what the definition's final type determines: a variable
+  nothing determines is an "Ambiguous type" error (after Haskell 2010
+  defaulting, so `succ 1` is `succ (1 :: Integer)` while `maxBound`
+  alone is ambiguous), a signature variable the context does not
+  constrain is "No instance for 'Monad m'" with the context to add, and
+  an existential or higher-rank variable without evidence is rejected
+  as not polymorphic enough. The monad hierarchy is no exception: a
+  do-block's monad is whatever its `>>=` unifies the statements with
+  (IO in `main`, Maybe in a `Just` chain), never a default.
 - FFI declarations always have full signatures, giving the
   bidirectional checker a rich starting point.
 - Error messages can always point to the nearest enclosing signature

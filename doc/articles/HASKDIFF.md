@@ -239,6 +239,15 @@ functions. Bind at the top level (with a signature) when you need
 class-polymorphic reuse; parametric locals without class constraints
 (`let g y = [y]`) generalize fine.
 
+The monad hierarchy counts like every other class: `let k x = return x`
+is pinned to the first monad it is used at, so a second use at another
+monad is a type error (GHC generalizes `k` to `Monad m => a -> m a`).
+What pins a variable is a constraint that still *needs* it once reduced
+through the instances: `Monad m` on a bare `m` pins `m`; the `Monad (ST
+s)` a where-bound helper's do-block emits needs nothing of `s`, so the
+helper generalizes over `s` exactly as GHC's does and serves under
+`runST`.
+
 ## Import renaming requires `qualified`
 
 mata-ll supports `import Module`, `import Module (foo, bar)`,
@@ -884,7 +893,7 @@ types have no selector and no record update.
 polymorphic helper used at two types works (`go y = [y]` at `Int` and
 `String`), and the definition-vs-use type errors are reported at the
 use, as GHC's are. What does NOT generalize, in `where` and `let`
-alike, is a variable carrying an unresolved CLASS constraint — a local
+alike, is a variable an unresolved CLASS constraint still needs — a local
 binding is one Lua closure, and a class-polymorphic local would need
 the per-use specialization monomorphization performs only for
 top-level functions (generalizing it typechecks and then miscompiles;

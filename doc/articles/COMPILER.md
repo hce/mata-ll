@@ -168,7 +168,27 @@ Order matters because later passes depend on earlier registrations:
   — warns/errors on non-exhaustive pattern matches (see §6 for the algorithm
   family).
 - **Typeclass handling** (`typechecker/solve.rs`) — resolves which instance
-  satisfies each constraint; this feeds monomorphization.
+  satisfies each constraint; this feeds monomorphization. Every class
+  method carries its class's constraint on the class variable
+  (`method_constraints`: `register_builtin_class` in `prelude.rs` lists
+  it per builtin method, `register_class` synthesizes it for a source
+  class), and `emit_use_constraints` turns each use into a *wanted* at
+  the instantiated type. At the end of `check_function`,
+  `discharge_wanted_constraints` (`infer.rs`) judges the leftovers in one
+  place: a wanted with no instance is "No instance"; one mentioning a
+  variable the binding's FINAL type does not determine (the `determined`
+  set — the only place that decision is made, after every clause's
+  unification) is "Ambiguous type", after `compute_numeric_defaults` has
+  applied Haskell 2010 defaulting; one on a signature variable the
+  declared context (or, for an instance method, the class method's own
+  constraints — `instance_method_givens`) does not provide is the
+  missing-context rejection. The monad hierarchy takes exactly these
+  paths. A let/where group keeps monomorphic the variables its pending
+  wanteds still need once reduced through the instances
+  (`constraint_bound_vars`: `Monad (ST s)` needs nothing of `s`) and
+  replaces a wanted over a variable it generalized by that residual
+  (`reduce_wanted_over`), so no decided constraint reaches the boundary
+  as an undetermined one.
 - **Deriving** (`typechecker/derive.rs`) — auto-generates `Show`/`Eq`/etc.
   A derived instance is registered like a written one: with GHC's derived
   context (`derived_context` — the class at each type parameter that

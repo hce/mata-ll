@@ -598,6 +598,41 @@ enumFromThenToHelper_Int x step m =
     then if x > m then [] else x : enumFromThenToHelper_Int (x + step) step m
     else if x < m then [] else x : enumFromThenToHelper_Int (x + step) step m
 
+-- Enum instance for Bool: the semantics (and error texts) a derived
+-- instance has — Bool is a builtin type, so it cannot carry a deriving
+-- clause. The stepped ranges walk Int indices, like a derived instance.
+succ_Bool :: Bool -> Bool
+succ_Bool False = True
+succ_Bool True = error "succ: already at maxBound for Bool"
+
+pred_Bool :: Bool -> Bool
+pred_Bool True = False
+pred_Bool False = error "pred: already at minBound for Bool"
+
+toEnum_Bool :: Int -> Bool
+toEnum_Bool 0 = False
+toEnum_Bool 1 = True
+toEnum_Bool _ = error "toEnum: index out of range for Bool"
+
+fromEnum_Bool :: Bool -> Int
+fromEnum_Bool False = 0
+fromEnum_Bool True = 1
+
+enumFrom_Bool :: Bool -> [Bool]
+enumFrom_Bool a = enumFromTo_Bool a True
+
+enumFromTo_Bool :: Bool -> Bool -> [Bool]
+enumFromTo_Bool False True = [False, True]
+enumFromTo_Bool a b = if a == b then [a] else []
+
+enumFromThen_Bool :: Bool -> Bool -> [Bool]
+enumFromThen_Bool a b =
+    enumFromThenTo_Bool a b (if fromEnum_Bool b >= fromEnum_Bool a then True else False)
+
+enumFromThenTo_Bool :: Bool -> Bool -> Bool -> [Bool]
+enumFromThenTo_Bool a b c =
+    map toEnum_Bool (enumFromThenTo_Int (fromEnum_Bool a) (fromEnum_Bool b) (fromEnum_Bool c))
+
 -- Enum instance for Integer (arbitrary precision). Mirrors Enum Int; the
 -- arithmetic and comparisons dispatch to the Integer runtime helpers, and the
 -- Int<->Integer conversions go through toInteger / fromInteger.

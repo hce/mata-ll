@@ -431,7 +431,7 @@ handleEnd mi sw st noLoop playedPositions
         Just newPos -> doOrders mi sw st newPos noLoop (newPos:playedPositions)
   | otherwise = return ()
 
-doOrders :: ModInfo -> (ByteString -> m ()) -> [Int]
+doOrders :: Monad m => ModInfo -> (ByteString -> m ()) -> [Int]
     -> Int -> Bool -> [Int] -> m ()
 doOrders mi sw st idx noLoop playedPositions
   | idx >= mi.miOrdNum = return ()

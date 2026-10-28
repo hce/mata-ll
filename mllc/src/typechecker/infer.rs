@@ -706,8 +706,18 @@ impl Checker {
         // refined variable is concrete by the time the body is checked and is
         // never skolemized. See `skolemize_sig_body_vars` / `check_clause`.
         let declared_context = self.fn_contexts.get(name).cloned().unwrap_or_default();
+        // What the BODY may assume: the declared context and, for an
+        // instance method, the class method's own constraints
+        // (`instance_method_givens`). The latter are evidence for the body
+        // alone — they join the skolem givens and `declared_cvars` below,
+        // never `at_use`/`at_dict` (a caller sees the instance, not these).
+        let method_givens = self.instance_method_givens.get(name).cloned().unwrap_or_default();
+        let body_context = FnContext {
+            declared: declared_context.declared.iter().chain(method_givens.iter()).cloned().collect(),
+            ..FnContext::default()
+        };
         let (sig_skolems, demote) =
-            self.skolemize_sig_body_vars(&fresh_ty, &declared_context, &renames);
+            self.skolemize_sig_body_vars(&fresh_ty, &body_context, &renames);
 
         // Re-express this function's declared constraints over the freshened
         // signature variables (the `at_use` epoch), so a caller can match each
@@ -750,6 +760,14 @@ impl Checker {
             .collect();
         if !at_use.is_empty() && let Some(cx) = self.fn_contexts.get_mut(name) {
             cx.at_use = at_use;
+        }
+        for (cls, arg) in &method_givens {
+            if let Ty::Var(sv) = arg {
+                let fresh_name = renames.get(&sv.name).unwrap_or(&sv.name);
+                if let Some(tv) = name_to_var.get(fresh_name) {
+                    declared_cvars.push((cls.clone(), tv.clone()));
+                }
+            }
         }
 
         // Add self for recursion
@@ -982,6 +1000,16 @@ impl Checker {
     /// This function's own signature-quantified variables (a leftover
     /// constraint over one of these must be discharged by the declared
     /// context) versus variables determined by a local binder.
+    ///
+    /// `determined` is decided HERE and only here: it is the free variables
+    /// of the binding's final type, after every clause's unification. By
+    /// then a variable a use fixes has been substituted away (it is not
+    /// free in the wanted), a variable the caller fixes is free in the
+    /// type, and anything else is free in a wanted alone — nothing later
+    /// (no caller, no monomorphization) will ever bind it. That holds for
+    /// every class, the monad hierarchy included: IO is not a default for
+    /// an undetermined monad variable, it is what do-notation's `>>=`
+    /// unifies the variable with when the statements are IO actions.
     fn discharge_wanted_constraints(
         &mut self,
         name: &str,
@@ -1024,14 +1052,18 @@ impl Checker {
                     diag.notes.extend(ctx_note);
                     diag.notes.extend(fail_note);
                 }
-            } else if is_structural_monad_class(&class) {
-                // The monad-hierarchy classes are resolved structurally for IO
-                // (mata-ll does not dictionary-pass them, and `has_instance`
-                // reports no instance for IO on them), so an unresolved monad
-                // variable from do-notation is IO by construction — neither a
-                // value-level ambiguity nor a missing-context error.
             } else if rty.free_vars().iter().any(|v| !determined.contains(v)) {
                 // A variable nothing determines: no instance can ever be chosen.
+                // The monad-hierarchy classes take this path like every
+                // other class. They used to be skipped here on the ground
+                // that an unresolved monad variable "is IO by construction":
+                // that was true of nothing — a do-block's `>>=` binds its
+                // monad to the statements' types, `when`/`mapM_` bind
+                // theirs through their arguments, and a let-bound `return
+                // 3` nobody uses is exactly the ambiguity GHC reports —
+                // while the skip also silenced the missing-context branch
+                // below, so `bump :: m Int -> m Int; bump x = x >>= …`
+                // typechecked with no `Monad m` in its signature (T10).
                 self.push_error_span(
                     DiagnosticKind::AmbiguousType { class, ty: rty },
                     format!("definition of '{}'", name),
@@ -1364,18 +1396,18 @@ impl Checker {
                 local_env.insert(ld.name.clone(), old_scheme.apply_subst(&subst));
             }
         }
-        let is_constrained = |checker: &Self, v: &TyVar| {
-            checker.wanted.iter().rev()
-                .any(|(_, cty)| cty.apply_subst(&subst).free_vars().contains(v))
-        };
+        let constraint_bound = self.constraint_bound_vars(&subst);
         let mut where_schemes: Vec<Scheme> = Vec::with_capacity(clause.where_binds.len());
+        let mut quantified: HashSet<TyVar> = HashSet::new();
         for reg_ty in &where_reg_tys {
             let bind_ty = reg_ty.apply_subst(&subst);
             let genv = local_env.applied(&subst);
             let mut scheme = self.generalize(&genv, &bind_ty);
-            scheme.vars.retain(|v| !is_constrained(self, v));
+            scheme.vars.retain(|v| !constraint_bound.contains(v));
+            quantified.extend(scheme.vars.iter().cloned());
             where_schemes.push(scheme);
         }
+        self.reduce_wanted_over(&quantified, &subst);
         for (ld, scheme) in clause.where_binds.iter().zip(where_schemes) {
             local_env.insert(ld.name.clone(), scheme);
         }
@@ -1763,19 +1795,17 @@ impl Checker {
         // brings `let` into line with mata-ll's already-monomorphic `where`
         // bindings, and matches GHC's monomorphism restriction.
         //
-        // Whether a candidate variable is constraint-bound is checked lazily
-        // per candidate, scanning the wanted constraints newest-first — a
-        // do-`let`'s pending constraint (its literal's `Num`) is the one just
-        // emitted, so the common case stops after a step or two instead of
-        // materializing every wanted constraint's variables each time.
-        let is_constrained = |checker: &Self, v: &TyVar| {
-            checker.wanted.iter().rev()
-                .any(|(_, cty)| cty.apply_subst(&subst).free_vars().contains(v))
-        };
+        // The constraint-bound variables are the RESIDUAL ones — what the
+        // wanteds still need once reduced through the instances (see
+        // `constraint_bound_vars`): `Monad (ST s)` from a do-block's `>>=`
+        // pins nothing, `Num a` from a literal pins `a`. Computed once per
+        // group over every pending wanted.
+        let constraint_bound = self.constraint_bound_vars(&subst);
         // Generalize ALL binds against the outer environment BEFORE inserting
         // any of the new schemes: a sibling's scheme is not part of the outer
         // environment and must not influence what a binding may quantify.
         let mut schemes: Vec<Scheme> = Vec::with_capacity(names.len());
+        let mut quantified: HashSet<TyVar> = HashSet::new();
         for fresh in &fresh_tys {
             let bind_ty = fresh.apply_subst(&subst);
             let mut scheme = self.generalize(&env, &bind_ty);
@@ -1790,9 +1820,11 @@ impl Checker {
             // method resolves for one instantiation and crashes on the
             // other — confirmed by repro during round-3 Q37). Bind at the
             // top level for class-polymorphic reuse.
-            scheme.vars.retain(|v| !is_constrained(self, v));
+            scheme.vars.retain(|v| !constraint_bound.contains(v));
+            quantified.extend(scheme.vars.iter().cloned());
             schemes.push(scheme);
         }
+        self.reduce_wanted_over(&quantified, &subst);
         for (name, scheme) in names.iter().zip(schemes) {
             env.insert(name.clone(), scheme);
         }

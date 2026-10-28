@@ -223,6 +223,18 @@ impl Checker {
     /// would refuse valid programs.
     fn instance_context_demands<'a>(&self, inst: &'a InstanceInfo, ty: &Ty) -> Entailment<'a> {
         let Some(ctx) = &inst.context else { return Entailment::Deferred };
+        // An EMPTY context demands nothing of any argument, however the
+        // use spells them: the builtin `Monad ST` / `Either` / `LuaIO`
+        // instances are registered at the bare constructor, and a use
+        // binds the class variable to the partial application `ST s`,
+        // whose spine is one longer than the head's — the positional match
+        // below would defer that. Deferral is "satisfiable" too, but it
+        // is also "undecided", which keeps `s` tied to the constraint in
+        // a let/where group (`constraint_bound_vars`) and pinned a where-
+        // bound ST helper to the rank-2 skolem under `runST`.
+        if ctx.is_empty() {
+            return Entailment::Demands { via: Some(inst), subs: vec![] };
+        }
         match Self::match_instance_args(&inst.target_type, ty) {
             Some(binds) => Entailment::Demands {
                 via: Some(inst),
@@ -367,6 +379,87 @@ impl Checker {
                 }
             }
             Entailment::Satisfied | Entailment::Failed => {}
+        }
+    }
+
+    /// The type variables the pending wanted constraints keep MONOMORPHIC in
+    /// a let/where group (the monomorphism restriction): those a constraint
+    /// still needs something of once reduced through the instances —
+    /// `Show [a]` needs `Show a`, so `a`; `Monad m` on a bare `m` needs `m`;
+    /// `Monad (ST s)` needs nothing of `s` (the instance has an empty
+    /// context), so `s` is free to generalize — exactly the variables GHC's
+    /// residual constraints mention. Reading the wanted's free variables
+    /// instead (as this used to) pinned `s` the moment `>>=` emitted its
+    /// `Monad (ST s)`, and a where-bound ST helper used under `runST`
+    /// then met the rank-2 skolem with ONE monomorphic type. A shape whose
+    /// instance cannot be decided here (a variable-headed application, a
+    /// stuck family) keeps every variable it mentions, as before. Once the
+    /// group is generalized, `reduce_wanted_over` replaces each wanted that
+    /// mentions a quantified variable by its residual, so no decided
+    /// constraint reaches the function boundary as an undetermined one.
+    pub(super) fn constraint_bound_vars(&self, subst: &Subst) -> HashSet<TyVar> {
+        let mut out = HashSet::new();
+        for (class, cty) in &self.wanted {
+            let rty = cty.apply_subst(subst);
+            if rty.free_vars().is_empty() { continue; }
+            self.collect_constraint_bound_vars(class, &rty, &mut out);
+        }
+        out
+    }
+
+    fn collect_constraint_bound_vars(&self, class: &str, ty: &Ty, out: &mut HashSet<TyVar>) {
+        match self.entail_step(class, ty) {
+            Entailment::Deferred => out.extend(ty.free_vars()),
+            Entailment::Demands { subs, .. } => {
+                for (c, t) in &subs {
+                    self.collect_constraint_bound_vars(c, t, out);
+                }
+            }
+            Entailment::Satisfied | Entailment::Failed => {}
+        }
+    }
+
+    /// A let/where group has just been generalized over `quantified`: a
+    /// pending wanted that mentions one of those variables is replaced by
+    /// what it still demands once reduced through the instances (its
+    /// residual: nothing for `Monad (ST s)`, `C a` for a `C (T s a)` whose
+    /// instance context asks only `C a`). The quantified variable itself
+    /// carries no residual constraint — `constraint_bound_vars` kept every
+    /// variable that does monomorphic — so the wanted is decided as far as
+    /// that variable goes, and leaving it in place would reach the function
+    /// boundary as a constraint on a variable nothing determines (an
+    /// "ambiguous" `s` the where-bound helper quantified). A wanted that
+    /// mentions no quantified variable is left exactly as it is.
+    pub(super) fn reduce_wanted_over(&mut self, quantified: &HashSet<TyVar>, subst: &Subst) {
+        if quantified.is_empty() { return; }
+        let wanted = std::mem::take(&mut self.wanted);
+        for (class, cty) in wanted {
+            let rty = cty.apply_subst(subst);
+            if !rty.free_vars().iter().any(|v| quantified.contains(v)) {
+                self.wanted.push((class, cty));
+                continue;
+            }
+            self.residual_wanted(&class, &rty);
+        }
+    }
+
+    /// Push the residual of `class ty` onto `wanted`: the constraint itself
+    /// where it cannot be decided here (a variable, an undecided shape) or
+    /// never holds (the boundary reports it), its demands' residuals where
+    /// an instance reduces it, nothing where it is satisfied outright.
+    fn residual_wanted(&mut self, class: &str, ty: &Ty) {
+        let step = match self.entail_step(class, ty) {
+            Entailment::Deferred | Entailment::Failed => None,
+            Entailment::Satisfied => Some(Vec::new()),
+            Entailment::Demands { subs, .. } => Some(subs),
+        };
+        match step {
+            None => self.wanted.push((class.to_string(), ty.clone())),
+            Some(subs) => {
+                for (c, t) in subs {
+                    self.residual_wanted(&c, &t);
+                }
+            }
         }
     }
 
@@ -878,6 +971,19 @@ impl Checker {
             Some((c.class_name.clone(), fresh.clone()))
         }).collect();
 
+        // The class method's own constraints beyond the class's (`traverse`'s
+        // `Applicative f`), over the method type's variable names — what a
+        // method body may assume of the method's own variables, exactly as
+        // GHC puts the method signature's context in scope in an instance
+        // body. The class's own constraint is the instance itself (its
+        // context above says what the instance's variables provide).
+        let method_givens = |checker: &Self, method: &str| -> Vec<(String, Ty)> {
+            checker.method_constraints.get(method).map(|cs| cs.iter()
+                .filter(|c| !(c.class_name == class_name && c.type_var == class_info.type_var))
+                .map(|c| (c.class_name.clone(), Ty::Var(TyVar { name: c.type_var.clone(), id: u32::MAX })))
+                .collect()).unwrap_or_default()
+        };
+
         for method_def in methods {
             // Find the class method's type
             let class_method_ty = class_info.methods.iter()
@@ -907,10 +1013,15 @@ impl Checker {
             instance_info.method_fns.insert(method_def.name.clone(), mangled_name.clone());
 
             // Type-check the instance method against the specialized type,
-            // with the instance's declared context in scope for its body.
+            // with the instance's declared context and the method's own
+            // constraints in scope for its body.
             if !ctx_fresh.is_empty() {
                 self.fn_contexts.insert(mangled_name.clone(),
                     FnContext { declared: ctx_fresh.clone(), ..FnContext::default() });
+            }
+            let givens = method_givens(self, &method_def.name);
+            if !givens.is_empty() {
+                self.instance_method_givens.insert(mangled_name.clone(), givens);
             }
             if let Some(tfun) = self.check_function(&mangled_name, &method_def.clauses, &method_ty) {
                 result_fns.push(tfun);
@@ -931,10 +1042,15 @@ impl Checker {
                 instance_info.method_fns.insert(method_name.clone(), mangled_name.clone());
 
                 // A default body is checked at this instance's type, so it
-                // gets the same declared context as an explicit method body.
+                // gets the same declared context and method givens as an
+                // explicit method body.
                 if !ctx_fresh.is_empty() {
                     self.fn_contexts.insert(mangled_name.clone(),
                         FnContext { declared: ctx_fresh.clone(), ..FnContext::default() });
+                }
+                let givens = method_givens(self, method_name);
+                if !givens.is_empty() {
+                    self.instance_method_givens.insert(mangled_name.clone(), givens);
                 }
                 if let Some(tfun) = self.check_function(&mangled_name, default_clauses, &specialized_ty) {
                     result_fns.push(tfun);
