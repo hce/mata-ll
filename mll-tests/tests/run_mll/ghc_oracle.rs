@@ -502,6 +502,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_prefix_minus, "cases", "prefix_minus.mll"),
         (ghc_oracle_promoted_nat_kind, "cases", "promoted_nat_kind.mll"),
         (ghc_oracle_rank2, "cases", "rank2.mll"),
+        (ghc_oracle_rank2_argument_routes, "cases", "rank2_argument_routes.mll"),
         (ghc_oracle_read_typeclass, "cases", "read_typeclass.mll"),
         (ghc_oracle_record_brace_next_line, "cases", "record_brace_next_line.mll"),
         (ghc_oracle_record_update, "cases", "record_update.mll"),

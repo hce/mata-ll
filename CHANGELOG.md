@@ -44,6 +44,32 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A `forall`-quantified type unifies only with an alpha-equivalent
+  `forall`; a polymorphic argument reaches a higher-rank parameter only
+  through a direct application or `$`, as in GHC** (`map applyBoth [not]`
+  for `applyBoth :: (forall a. a -> a) -> (Int, Bool)` compiled and crashed
+  at run time with "attempt to perform arithmetic on a boolean value";
+  `viaCompose = applyBoth . id`, `map applyBoth [id]`, `flip applyBoth`,
+  `uncurry ($) (applyBoth, id)` and `runST . pure` compiled where GHC
+  rejects them; `(\f -> applyBoth f) id` and a do-bound `f <- pure id;
+  applyBoth f` compiled where GHC reports that the rigid `a` would escape
+  its scope). The unifier stripped the quantifier and unified the body, so
+  the bound variable bound like a flexible one wherever a rank-2 function
+  type met an arrow through another function's type variable; rigidity was
+  enforced only when the argument was applied directly. Now a `Forall`
+  against anything but an alpha-equivalent `Forall` — a monotype or a
+  flexible variable alike — is an error that says which routes are legal;
+  `f $ x` is typed exactly like `f x` (its own rule, as GHC's), a lambda
+  met by a rank-3 parameter type (`nest :: ((forall a. a -> a) -> Int) ->
+  Int`, `nest (\f -> (f 3, f True))`) is checked against it so its binder
+  gets the polymorphic type, the parameter's skolem may not escape into
+  the type of any binding in scope, a variable whose type is itself
+  quantified is instantiated at its occurrence, and `forall a b. T` parses
+  (it is `forall a. forall b. T`). Every accepted program compiles to the
+  same Lua as before. Found by the 2026-10 fresh-eyes review (T9).
+  (GHC-goldened case `rank2_argument_routes`; the rejected routes are
+  pinned in compile_errors.rs.)
+
 - **An integer literal pattern matches exactly when GHC's definition
   matches, at every type, on every host** (`direct (M 3)` with `direct 0
   = "zero"` at a user `Num` type printed `other`; `f minBound` with `f

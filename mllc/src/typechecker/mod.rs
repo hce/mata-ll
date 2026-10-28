@@ -898,7 +898,19 @@ impl Checker {
         for id in &scheme.mult_vars {
             mults.insert(*id, self.fresh_mult());
         }
-        (scheme.ty.apply_subst(&Subst::from_parts(map.clone(), mults)), map)
+        let mut ty = scheme.ty.apply_subst(&Subst::from_parts(map.clone(), mults));
+        // A scheme whose type is itself quantified (`k :: forall s. Int ->
+        // LuaIO s Int` read without freshening, a foreign declaration's
+        // `forall s.`) is a sigma type, and an occurrence instantiates it:
+        // each leading binder becomes a fresh flexible variable, exactly
+        // like the scheme's own. The unifier never strips a quantifier
+        // (types.rs), so this is the only way a leading `forall` on a
+        // variable's type is ever used.
+        while let Ty::Forall(v, inner) = ty {
+            let fresh = self.fresh_var("_i");
+            ty = inner.apply_subst(&Subst::singleton(v, fresh));
+        }
+        (ty, map)
     }
 
 

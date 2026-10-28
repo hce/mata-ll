@@ -476,6 +476,10 @@ mll_test!(eta_where_value, "eta_where_value.mll");
 mll_test!(partial_application_rows, "partial_application_rows.mll");
 mll_test!(seq_action_value, "seq_action_value.mll");
 mll_test!(rank2, "rank2.mll");
+// The routes by which a polymorphic argument may reach a higher-rank
+// parameter (direct application, `$`, a lambda checked against a rank-3
+// parameter); the rejected routes are in compile_errors.rs.
+mll_test!(rank2_argument_routes, "rank2_argument_routes.mll");
 
 // Stress tests
 mll_test!(stress_large_adt, "stress_large_adt.mll");

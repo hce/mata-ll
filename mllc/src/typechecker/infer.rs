@@ -2339,88 +2339,11 @@ impl Checker {
                 }
             }
             Expr::App(func, arg) => {
-                let (tf, func_ty, s1) = self.infer_expr(func, env)?;
-                let env2 = env.applied(&s1);
-                let (ta, arg_ty, s2) = self.infer_expr(arg, &env2)?;
-                let ret_ty = self.fresh_var("_r");
-                let func_ty = func_ty.apply_subst(&s2);
-                // The expected arrow at an application carries a FLEXIBLE
-                // multiplicity: it adopts the applied function's own (so a
-                // `%1` function can be applied like any other), and the
-                // linear-usage pass later reads the resolved multiplicity to
-                // decide how the application charges the argument (usage.rs).
-                let app_mult = self.fresh_mult();
-
-                // Rank-2: if the function expects a forall-quantified argument,
-                // skolemize the quantified variable and check the argument against it
-                let s3 = if let Ty::Arrow(ref param_ty, ref func_ret, _) = func_ty {
-                    if let Ty::Forall(..) = **param_ty {
-                        // Collect all forall-bound variables (handles forall a b. T)
-                        let mut skolems = vec![];
-                        let mut current: &Ty = param_ty;
-                        let mut vars = vec![];
-                        while let Ty::Forall(v, inner) = current {
-                            vars.push(v.clone());
-                            current = inner;
-                        }
-                        // Create skolems for each bound variable, substitute into body
-                        let mut skolem_body = current.clone();
-                        for var in &vars {
-                            let sk_id = self.next_var;
-                            self.next_var += 1;
-                            skolems.push((var.name.clone(), sk_id));
-                            let sk = Ty::Skolem(var.name.clone(), sk_id);
-                            skolem_body = skolem_body.apply_subst(
-                                &Subst::singleton(var.clone(), sk),
-                            );
-                            // Register the skolem with NO givens so a residual
-                            // class constraint on it (e.g. `Num a` from a
-                            // `\x -> x + 1` argument) is rejected as
-                            // unsatisfiable instead of silently deferred. An
-                            // UNREGISTERED skolem is treated as "defer to the
-                            // caller" (solve.rs `has_instance`), which is wrong
-                            // here: the argument is sealed as `forall a. …`, so
-                            // there is no enclosing context to ever discharge
-                            // the constraint — the value simply is not
-                            // polymorphic enough. `Ty::Forall` carries no
-                            // context, so a constrained higher-rank quantifier
-                            // (`forall a. Num a => a -> a`) cannot pass givens
-                            // here; that context is dropped upstream in
-                            // `ast_type_to_ty`.
-                            self.existential_skolems.insert(sk_id, ExSkolemInfo {
-                                var: var.name.clone(),
-                                con: "a higher-rank argument".to_string(),
-                                givens: vec![],
-                                origin: SkolemOrigin::Rank2Arg,
-                            });
-                        }
-                        // Directly check the argument against the skolemized param type
-                        let s_arg = self.unify(&arg_ty, &skolem_body)?;
-                        // Connect return type
-                        let s_ret = self.unify(&ret_ty, &func_ret.apply_subst(&s_arg))?;
-                        let combined = s_arg.compose(&s_ret);
-                        // Escape check: skolems must not appear in the return type
-                        let final_ret = ret_ty.apply_subst(&combined);
-                        for (sk_name, sk_id) in &skolems {
-                            if final_ret.contains_skolem(sk_name, *sk_id) {
-                                return Err(DiagnosticKind::Other(format!(
-                                    "Rigid type variable '{}' escapes its scope", sk_name
-                                )));
-                            }
-                        }
-                        combined
-                    } else {
-                        self.unify(&func_ty, &Ty::arrow_m(arg_ty, ret_ty.clone(), app_mult))?
-                    }
-                } else {
-                    self.unify(&func_ty, &Ty::arrow_m(arg_ty, ret_ty.clone(), app_mult))?
-                };
-
-                let final_ty = ret_ty.apply_subst(&s3);
+                let (tf, ta, final_ty, subst) = self.infer_app(func, arg, env, None)?;
                 Ok((
                     TExpr::new(TExprKind::App(Box::new(tf), Box::new(ta)), final_ty.clone()),
                     final_ty,
-                    s1.compose(&s2).compose(&s3),
+                    subst,
                 ))
             }
             Expr::InfixApp { op, lhs, rhs } => {
@@ -2428,6 +2351,28 @@ impl Checker {
                 // to avoid stack overflow on deeply nested expressions.
                 if (op == ">>=" || op == ">>") && self.is_bind_chain(rhs) {
                     return self.infer_bind_chain(expr, env);
+                }
+
+                // `f $ x` is typed exactly like `f x`, as GHC types it: the
+                // one route besides direct application by which an argument
+                // reaches a higher-rank parameter (`runST $ do …`,
+                // `applyBoth $ id`). Typed as an application of `$`'s own
+                // type `(a -> b) -> a -> b`, the parameter's `forall` would
+                // have to instantiate `a`, which the unifier refuses. The
+                // arrow is `$`'s own (`Many`): a `%1` function is no
+                // argument for `$`, in GHC either. The TIR keeps the
+                // InfixApp node codegen expects. Only the Prelude's `$`
+                // (recognized by its scheme; a program cannot redefine the
+                // name at the top level, and a local binder of it is
+                // respelled by import resolution) is typed this way.
+                if op == "$" && env.lookup(op).is_some_and(is_prelude_dollar) {
+                    let (tf, ta, ty, subst) = self.infer_app(lhs, rhs, env, Some(Mult::Many))?;
+                    return Ok((
+                        TExpr::new(TExprKind::InfixApp {
+                            op: op.clone(), lhs: Box::new(tf), rhs: Box::new(ta),
+                        }, ty.clone()),
+                        ty, subst,
+                    ));
                 }
 
                 // Desugar to App(App(op, lhs), rhs) for type inference
@@ -3187,6 +3132,256 @@ impl Checker {
         Ok((tb, body_subst.compose(&s)))
     }
 
+    /// One application `func arg`: the typing shared by `Expr::App` and by
+    /// the Prelude's `f $ x`, which GHC types exactly like `f x` (the
+    /// InfixApp arm routes it here). `mult` is the multiplicity of the
+    /// arrow the application expects: `None` mints a flexible one that
+    /// adopts the applied function's own (so a `%1` function applies like
+    /// any other, and the linear-usage pass reads the resolved arrow),
+    /// `Some(Mult::Many)` is `$`'s own arrow — a `%1` function is not an
+    /// argument for `$`, in GHC either. Returns the typed function, the
+    /// typed argument, the result type and the substitution.
+    ///
+    /// This is the one place a polymorphic argument is accepted. When the
+    /// function's parameter type is `forall a. …`, the quantifier is
+    /// skolemized and the argument checked against the rigid body; the
+    /// unifier itself never instantiates a `Forall` (types.rs), so a rank-2
+    /// function reaching its parameter any other way — through `map`, `.`,
+    /// `flip`, a list, a variable — is rejected there, as GHC rejects it.
+    /// Two escape checks keep the skolem inside the argument: it may not
+    /// occur in the result type, and it may not occur in the type of any
+    /// binding of the environment — a lambda-bound or do-bound `f` has ONE
+    /// monomorphic type, and `applyBoth f` would fix it at the rigid `a`
+    /// (GHC: "type variable 'a' would escape its scope").
+    ///
+    /// A lambda argument whose expected type has a `forall`-typed parameter
+    /// of its own (rank 3: `nest :: ((forall a. a -> a) -> Int) -> Int`,
+    /// `nest (\f -> f 3)`) is CHECKED against that type instead of inferred,
+    /// so its binder gets the polymorphic type; inferred, `f` would be a
+    /// monomorphic variable that no `forall` could ever match.
+    fn infer_app(
+        &mut self, func: &Expr, arg: &Expr, env: &TypeEnv, mult: Option<Mult>,
+    ) -> Result<(TExpr, TExpr, Ty, Subst), DiagnosticKind> {
+        let (tf, func_ty, s1) = self.infer_expr(func, env)?;
+        let env2 = env.applied(&s1);
+        let ret_ty = self.fresh_var("_r");
+
+        // Rank 3: a lambda argument against a known parameter type whose
+        // own parameters include a quantified type.
+        let check_lambda = is_lambda_expr(arg) && match &func_ty {
+            Ty::Arrow(p, _, _) => {
+                let mut body: &Ty = p;
+                while let Ty::Forall(_, inner) = body { body = inner; }
+                arrow_has_forall_param(body)
+            }
+            _ => false,
+        };
+        if check_lambda {
+            let Ty::Arrow(param_ty, func_ret, _) = &func_ty else { unreachable!() };
+            let (expected, skolems) = self.skolemize_rank2_param(param_ty);
+            let (ta, s2) = self.check_expr_typed(arg, &expected, &env2)?;
+            let s_ret = self.unify(&ret_ty, &func_ret.apply_subst(&s2))?;
+            let combined = s2.compose(&s_ret);
+            self.check_rank2_escape(&skolems, &ret_ty, &combined, &env2)?;
+            let final_ty = ret_ty.apply_subst(&combined);
+            return Ok((tf, ta, final_ty, s1.compose(&combined)));
+        }
+
+        let (ta, arg_ty, s2) = self.infer_expr(arg, &env2)?;
+        let func_ty = func_ty.apply_subst(&s2);
+        // The expected arrow at an application carries a FLEXIBLE
+        // multiplicity unless the caller fixed it: it adopts the applied
+        // function's own (so a `%1` function can be applied like any
+        // other), and the linear-usage pass later reads the resolved
+        // multiplicity to decide how the application charges the argument
+        // (usage.rs).
+        let app_mult = match mult {
+            Some(m) => m,
+            None => self.fresh_mult(),
+        };
+
+        // Rank-2: if the function expects a forall-quantified argument,
+        // skolemize the quantified variable and check the argument against it
+        let s3 = if let Ty::Arrow(ref param_ty, ref func_ret, _) = func_ty {
+            if let Ty::Forall(..) = **param_ty {
+                let (skolem_body, skolems) = self.skolemize_rank2_param(param_ty);
+                // Directly check the argument against the skolemized param type
+                let s_arg = self.unify(&arg_ty, &skolem_body)?;
+                // Connect return type
+                let s_ret = self.unify(&ret_ty, &func_ret.apply_subst(&s_arg))?;
+                let combined = s_arg.compose(&s_ret);
+                let env3 = env2.applied(&s2);
+                self.check_rank2_escape(&skolems, &ret_ty, &combined, &env3)?;
+                combined
+            } else {
+                self.unify(&func_ty, &Ty::arrow_m(arg_ty, ret_ty.clone(), app_mult))?
+            }
+        } else {
+            self.unify(&func_ty, &Ty::arrow_m(arg_ty, ret_ty.clone(), app_mult))?
+        };
+
+        let final_ty = ret_ty.apply_subst(&s3);
+        Ok((tf, ta, final_ty, s1.compose(&s2).compose(&s3)))
+    }
+
+    /// Skolemize a higher-rank parameter type: every leading quantifier
+    /// (`forall a. forall b. T`, as the parser nests `forall a b. T`) is
+    /// replaced by a fresh rigid skolem in the body. Returns the rigid body
+    /// and the skolems minted, for the escape checks.
+    fn skolemize_rank2_param(&mut self, param_ty: &Ty) -> (Ty, Vec<(String, u32)>) {
+        let mut skolems = vec![];
+        let mut current: &Ty = param_ty;
+        let mut vars = vec![];
+        while let Ty::Forall(v, inner) = current {
+            vars.push(v.clone());
+            current = inner;
+        }
+        let mut skolem_body = current.clone();
+        for var in &vars {
+            let sk_id = self.next_var;
+            self.next_var += 1;
+            skolems.push((var.name.clone(), sk_id));
+            let sk = Ty::Skolem(var.name.clone(), sk_id);
+            skolem_body = skolem_body.apply_subst(
+                &Subst::singleton(var.clone(), sk),
+            );
+            // Register the skolem with NO givens so a residual
+            // class constraint on it (e.g. `Num a` from a
+            // `\x -> x + 1` argument) is rejected as
+            // unsatisfiable instead of silently deferred. An
+            // UNREGISTERED skolem is treated as "defer to the
+            // caller" (solve.rs `has_instance`), which is wrong
+            // here: the argument is sealed as `forall a. …`, so
+            // there is no enclosing context to ever discharge
+            // the constraint — the value simply is not
+            // polymorphic enough. `Ty::Forall` carries no
+            // context, so a constrained higher-rank quantifier
+            // (`forall a. Num a => a -> a`) cannot pass givens
+            // here; that context is dropped upstream in
+            // `ast_type_to_ty`.
+            self.existential_skolems.insert(sk_id, ExSkolemInfo {
+                var: var.name.clone(),
+                con: "a higher-rank argument".to_string(),
+                givens: vec![],
+                origin: SkolemOrigin::Rank2Arg,
+            });
+        }
+        (skolem_body, skolems)
+    }
+
+    /// The escape checks of a higher-rank application (see `infer_app`):
+    /// none of the parameter's skolems may occur in the application's
+    /// result type, nor in the type of a binding of the environment the
+    /// argument was checked in — `env` is that environment, `combined`
+    /// the substitution the application produced, so a binding escaped
+    /// exactly when a variable free in `env` was bound to a type that
+    /// mentions a skolem.
+    fn check_rank2_escape(
+        &mut self, skolems: &[(String, u32)], ret_ty: &Ty, combined: &Subst, env: &TypeEnv,
+    ) -> Result<(), DiagnosticKind> {
+        let final_ret = ret_ty.apply_subst(combined);
+        for (sk_name, sk_id) in skolems {
+            if final_ret.contains_skolem(sk_name, *sk_id) {
+                return Err(DiagnosticKind::Other(format!(
+                    "Rigid type variable '{}' escapes its scope", sk_name
+                )));
+            }
+        }
+        for v in combined.ty_domain() {
+            if !env.is_free_var(v) {
+                continue;
+            }
+            let Some(img) = combined.lookup(v) else { continue };
+            let img = img.apply_subst(combined);
+            for (sk_name, sk_id) in skolems {
+                if !img.contains_skolem(sk_name, *sk_id) {
+                    continue;
+                }
+                let mut binders: Vec<String> = env.iter()
+                    .filter(|(_, sch)| sch.free_vars().contains(v))
+                    .map(|(n, _)| if n == "__sec" {
+                        // The parameter of the lambda an operator section
+                        // lowers to (modules.rs `section`): `(applyBoth $)`
+                        // is `\__sec -> applyBoth $ __sec`.
+                        "the missing operand of the operator section".to_string()
+                    } else {
+                        format!("'{}'", n)
+                    })
+                    .collect();
+                binders.sort();
+                binders.dedup();
+                let binder = if binders.is_empty() {
+                    "a binding in scope".to_string()
+                } else {
+                    binders.join(", ")
+                };
+                self.error_notes.push(format!(
+                    "GHC rejects this the same way (\"type variable '{}' would escape its scope\"): \
+                     a lambda parameter, a do-bound or a let-bound variable without a signature \
+                     has one monomorphic type, so it can never be the polymorphic value a \
+                     'forall {}. …' parameter demands. Pass the polymorphic value itself (`id`, \
+                     a top-level function, or a local binding whose definition is polymorphic), \
+                     directly or with '$'",
+                    sk_name, sk_name));
+                return Err(DiagnosticKind::Other(format!(
+                    "Rigid type variable '{}' of a higher-rank parameter type would escape into \
+                     the type of {}: this application would fix the type of {} at the \
+                     parameter's rigid '{}', but {} has ONE monomorphic type and the \
+                     parameter wants a value that works at EVERY '{}'",
+                    sk_name, binder, binder, sk_name, binder, sk_name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check a lambda against a KNOWN function type (see `infer_app`):
+    /// each binder is bound at the corresponding parameter type — a
+    /// quantified one as a polymorphic scheme, exactly as a function
+    /// clause's pattern binds under a rank-2 signature — and the body is
+    /// checked against what remains. More binders than the expected type
+    /// has arrows: the remainder is an ordinary arrow the lambda invents,
+    /// unified in.
+    fn check_lambda(
+        &mut self, params: &[String], body: &Expr, expected: &Ty, env: &TypeEnv,
+    ) -> Result<(TExpr, Subst), DiagnosticKind> {
+        let mut local_env = env.clone();
+        let mut param_info: Vec<(String, Ty, Mult)> = Vec::new();
+        let mut rest = expected.clone();
+        let mut subst = Subst::empty();
+        for param in params {
+            let (param_ty, mult, next) = match rest.apply_subst(&subst) {
+                Ty::Arrow(p, r, m) => (*p, m, *r),
+                other => {
+                    let param_ty = self.fresh_var("_l");
+                    let ret = self.fresh_var("_lr");
+                    let mult = self.fresh_mult();
+                    let u = self.unify(&other, &Ty::arrow_m(param_ty.clone(), ret.clone(), mult))?;
+                    subst = subst.compose(&u);
+                    (param_ty, mult, ret)
+                }
+            };
+            if param != "_" {
+                local_env.insert(param.clone(), Self::forall_to_scheme(&param_ty));
+            }
+            param_info.push((param.clone(), param_ty, mult));
+            rest = next;
+        }
+        let body_env = local_env.applied(&subst);
+        let (tbody, s2) = self.check_expr_typed(body, &rest.apply_subst(&subst), &body_env)?;
+        let subst = subst.compose(&s2);
+        let func_ty = param_info.iter().rev().fold(tbody.ty.clone(), |acc, (_, pt, m)| {
+            Ty::arrow_m(pt.apply_subst(&subst), acc, subst.resolve_mult(*m))
+        });
+        let typed_params: Vec<(String, Ty)> = param_info.iter()
+            .map(|(n, t, _)| (n.clone(), t.apply_subst(&subst)))
+            .collect();
+        Ok((
+            TExpr::new(TExprKind::Lambda { params: typed_params, body: Box::new(tbody) }, func_ty),
+            subst,
+        ))
+    }
+
     pub(super) fn check_expr_typed(&mut self, expr: &Expr, expected: &Ty, env: &TypeEnv) -> Result<(TExpr, Subst), DiagnosticKind> {
         if self.expr_depth >= crate::MAX_NESTING_DEPTH {
             return Err(Self::expr_too_deep());
@@ -3246,6 +3441,13 @@ impl Checker {
             Expr::Case { scrutinee, branches } => {
                 let (te, _, s) = self.check_case(scrutinee, branches, Some(expected), env)?;
                 Ok((te, s))
+            }
+            // A lambda against a function type with a quantified parameter
+            // (rank 3): its binder must get the polymorphic type, which only
+            // checking can give it (`check_lambda`). Every other lambda is
+            // inferred as before.
+            Expr::Lambda { params, body } if arrow_has_forall_param(expected) => {
+                self.check_lambda(params, body, expected, env)
             }
             // A tuple against a tuple type of its arity: each component is
             // checked against its component type (`(ev e, case e of …)`
@@ -3615,4 +3817,41 @@ fn monad_fail_note(class: &str) -> Option<String> {
          single-constructor pattern of such — asks for nothing"
             .to_string()
     })
+}
+
+/// Is `e` a lambda, under any `Spanned`/`Paren` wrappers? (`infer_app`
+/// decides whether an argument is checked against a rank-3 parameter type.)
+fn is_lambda_expr(e: &Expr) -> bool {
+    match e {
+        Expr::Spanned(_, inner) | Expr::Paren(inner) => is_lambda_expr(inner),
+        Expr::Lambda { .. } => true,
+        _ => false,
+    }
+}
+
+/// Does the arrow chain of `t` have a `forall`-typed parameter — is it a
+/// rank-2 function type? (`(forall a. a -> a) -> Int`: yes; `Int -> Int`
+/// and `forall a. a -> a` itself: no.)
+fn arrow_has_forall_param(t: &Ty) -> bool {
+    let mut cur = t;
+    while let Ty::Arrow(p, r, _) = cur {
+        if matches!(**p, Ty::Forall(..)) {
+            return true;
+        }
+        cur = r;
+    }
+    false
+}
+
+/// Is this the scheme of the Prelude's `$` — `forall a b. (a -> b) -> a
+/// -> b` over two distinct quantified variables? A program's own operator
+/// of that type can only apply its function to its argument (or diverge),
+/// so typing its uses like an application is sound for it as well.
+fn is_prelude_dollar(scheme: &Scheme) -> bool {
+    let Ty::Arrow(f, rest, _) = &scheme.ty else { return false };
+    let (Ty::Arrow(a1, b1, _), Ty::Arrow(a2, b2, _)) = (f.as_ref(), rest.as_ref()) else { return false };
+    scheme.vars.len() == 2
+        && a1 == a2 && b1 == b2 && a1 != b1
+        && matches!(a1.as_ref(), Ty::Var(v) if scheme.vars.contains(v))
+        && matches!(b1.as_ref(), Ty::Var(v) if scheme.vars.contains(v))
 }

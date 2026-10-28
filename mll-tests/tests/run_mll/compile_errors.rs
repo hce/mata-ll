@@ -220,6 +220,100 @@ fn constrained_rank2_argument_is_honestly_unsupported() {
         .expect("unconstrained rank-2 arguments must stay legal");
 }
 
+// A `forall` type unifies only with an alpha-equivalent `forall`; against
+// anything else — a monotype or a flexible unification variable — it is
+// an error. The unifier used to strip the quantifier and unify the body,
+// so a rank-2 function reaching its parameter through another function's
+// type variable (`map`, `.`, `flip`, `const`, a list, a tuple) had the
+// quantifier instantiated at one type: `map applyBoth [not]` compiled and
+// crashed at run time on `f 1`, `map applyBoth [id]` compiled where GHC
+// rejects it. Direct application and `$` are the legal routes (pinned in
+// rank2_argument_routes.mll); every shape here is rejected by GHC too
+// (9.14, no ImpredicativeTypes: "Couldn't match type: forall a. a -> a
+// with: a0 -> a0").
+#[test]
+fn rank2_argument_through_another_function_is_rejected() {
+    let decl = "applyBoth :: (forall a. a -> a) -> (Int, Bool)\napplyBoth f = (f 1, f True)\n\n";
+    let needles: &[&str] = &[
+        "Cannot match the polymorphic type 'forall a. a -> a' with the type variable",
+        "wants a value that works at EVERY type 'a'",
+        "only an argument applied to that parameter directly (or with '$') is checked for that",
+        "Apply the function directly, or with '$'",
+        "note:",
+        "GHC rejects this the same way",
+    ];
+    for body in [
+        // the review's repro: `map` instantiates the quantifier at Bool -> Bool
+        "main :: IO ()\nmain = print (map applyBoth [not])\n",
+        "main :: IO ()\nmain = print (map applyBoth [id])\n",
+        // a side of `.`, either side
+        "viaCompose :: (Int -> Int) -> (Int, Bool)\nviaCompose = applyBoth . id\n\nmain :: IO ()\nmain = print (viaCompose (+ 1))\n",
+        "main :: IO ()\nmain = print ((id . applyBoth) id)\n",
+        // `flip`, `const`, a tuple through `uncurry ($)`
+        "main :: IO ()\nmain = print (fst (flip applyBoth 1 id))\n",
+        "main :: IO ()\nmain = print (uncurry ($) (applyBoth, id))\n",
+        // a let alias is fine on its own (routes case); through `map` it is not
+        "main :: IO ()\nmain = let g = applyBoth in print (map g [id])\n",
+        // a rank-3 parameter met through a composition
+        "nest :: ((forall a. a -> a) -> Int) -> Int\nnest g = g id + 1\n\nmain :: IO ()\nmain = print (nest (fst . applyBoth))\n",
+    ] {
+        let source = format!("{decl}{body}");
+        expect_compile_error(&source, &[], needles);
+    }
+    // runST through a composition: the same rule on the Prelude's own
+    // rank-2 function (`runST $ do …` and `runST (do …)` stay legal).
+    expect_compile_error(
+        "viaC :: Int -> Int\nviaC = runST . pure\n\nmain :: IO ()\nmain = print (viaC 3)\n",
+        &[],
+        &[
+            "Cannot match the polymorphic type 'forall s. ST s a' with the type variable",
+            "Apply the function directly, or with '$'",
+        ],
+    );
+    // Controls: the direct-application checks are unchanged — a monomorphic
+    // argument is a rigid mismatch, with or without `$`.
+    for body in [
+        "main :: IO ()\nmain = print (applyBoth not)\n",
+        "main :: IO ()\nmain = print (applyBoth $ not)\n",
+        "main :: IO ()\nmain = let g = applyBoth in print (g not)\n",
+        "data T = T (forall a. a -> a)\n\nmain :: IO ()\nmain = case T not of T f -> print (f True)\n",
+    ] {
+        let source = format!("{decl}{body}");
+        expect_compile_error(&source, &[], &[
+            "Cannot match 'Bool' with 'a': a rigid type variable",
+        ]);
+    }
+}
+
+// A lambda-bound, do-bound or group-bound variable has ONE monomorphic
+// type; applying a rank-2 function to it would fix that type at the
+// parameter's rigid skolem — the skolem escaping into the environment.
+// The App rule checked escape into the result type only, so `(\f ->
+// applyBoth f) id` compiled (GHC: "type variable 'a' would escape its
+// scope"). The environment is checked now.
+#[test]
+fn rank2_skolem_escaping_into_a_monomorphic_binder_is_rejected() {
+    let decl = "applyBoth :: (forall a. a -> a) -> (Int, Bool)\napplyBoth f = (f 1, f True)\n\n";
+    for (body, binder) in [
+        ("main :: IO ()\nmain = print ((\\f -> applyBoth f) id)\n", "'f'"),
+        ("main :: IO ()\nmain = print ((\\g -> applyBoth (\\y -> g y)) id)\n", "'g'"),
+        ("main :: IO ()\nmain = do\n    f <- pure id\n    print (applyBoth f)\n", "'f'"),
+        // the lambda an operator section lowers to: `(applyBoth $)` is
+        // `\__sec -> applyBoth $ __sec` (GHC accepts the section through
+        // Quick Look, which mata-ll does not have; see HASKDIFF)
+        ("main :: IO ()\nmain = print ((applyBoth $) id)\n", "the missing operand of the operator section"),
+    ] {
+        let source = format!("{decl}{body}");
+        expect_compile_error(&source, &[], &[
+            "Rigid type variable 'a' of a higher-rank parameter type would escape into the type of ",
+            binder,
+            "has ONE monomorphic type",
+            "note:",
+            "would escape its scope",
+        ]);
+    }
+}
+
 // A record field declared by TWO types silently overwrote the first
 // type's accessor and record_fields entry (last-writer-wins): its
 // record construction then failed with "Unknown field" and its

@@ -130,6 +130,21 @@ implementations), `kind.rs` (kind inference/checking), and `usage.rs`
   the environment when a binding is *defined* (let-generalization).
 - **Unification** — solves `Ty ~ Ty` into the `Subst`, with the **occurs
   check** to reject infinite types. (Search `unify` in `typechecker/mod.rs`.)
+  A `Ty::Forall` (a higher-rank parameter's type) unifies only with an
+  alpha-equivalent `Forall` — both binders renamed to one fresh rigid
+  constant, bodies unified, the constant captured by nothing — and with
+  nothing else, a flexible variable included (`unify_inner` in
+  `types.rs`; that is GHC's no-impredicative-instantiation rule). The
+  only place a polymorphic ARGUMENT is accepted is the App rule
+  (`infer_app` in `infer.rs`): the parameter's quantifier is skolemized,
+  the argument checked against the rigid body, and the skolem may escape
+  neither into the result type nor into the type of any binding of the
+  environment. `f $ x` is typed by the same rule as `f x`; a lambda met
+  by a rank-3 parameter type is checked against it (`check_lambda`), so
+  its binder is bound at the quantified type as a scheme, exactly as a
+  function clause's pattern is under a rank-2 signature; and a scheme
+  whose type is itself quantified is instantiated at the occurrence
+  (`instantiate_with_map`).
 
 The mental model: inference walks expressions producing types and accumulating
 a `Subst`; `instantiate` opens schemes at use sites, `generalize` closes them

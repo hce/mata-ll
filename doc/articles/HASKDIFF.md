@@ -915,6 +915,32 @@ accepted at one type and failing at a second. Drop the context (the
 binding is then inferred at the one type it is used at) or bind at the
 top level.
 
+## Higher-rank arguments: direct application and `$`, no Quick Look
+
+A higher-rank parameter (`applyBoth :: (forall a. a -> a) -> (Int,
+Bool)`) is supplied exactly as GHC without `ImpredicativeTypes` allows:
+by a direct application or by `$`, which is typed like a direct
+application. The quantifier is never instantiated through a type
+variable, so `map applyBoth xs`, `applyBoth . id`, `flip applyBoth` and
+`runST . pure` are rejected, as GHC rejects them, and a lambda-bound or
+do-bound variable cannot be passed on (`(\f -> applyBoth f) id`: GHC's
+"type variable 'a' would escape its scope"). A rank-3 parameter is met
+by a lambda, whose binder gets the polymorphic type, or by a function
+with the signature.
+
+Two deviations, both on contrived shapes. GHC switches Quick Look on
+for `$` and for operator sections even without `ImpredicativeTypes`, so
+`(applyBoth $) id`, `($ id) applyBoth` and `(. applyBoth) id id` are
+accepted there; mata-ll has no Quick Look, lowers a section to a lambda
+(`\x -> applyBoth $ x`), and rejects the three (the first as an escape
+of the rigid variable into the section's operand, the other two as a
+polytype mismatch) — write the application out. In the other direction,
+GHC refuses to bind a unification variable to a type that merely
+CONTAINS a `forall` (`id applyBoth id`, `seq applyBoth 1`: "Cannot
+instantiate unification variable with a type involving polytypes");
+mata-ll binds it, which is sound — the quantifier is still checked when
+the function is finally applied — and lets those two through.
+
 ## GADT matches need their result type where they are checked
 
 A GADT constructor pattern refines the scrutinee's index for its branch

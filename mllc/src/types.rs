@@ -1441,6 +1441,8 @@ pub fn unify_refining(t1: &Ty, t2: &Ty, fams: &TyFamilies) -> Result<(Subst, Sko
             // variables are an internal device and must not be shown.
             DiagnosticKind::Mismatch(a, b) => DiagnosticKind::Mismatch(a.apply_subst(&back), b.apply_subst(&back)),
             DiagnosticKind::RigidMismatch(a, b) => DiagnosticKind::RigidMismatch(a.apply_subst(&back), b.apply_subst(&back)),
+            DiagnosticKind::PolytypeMismatch { poly, other } =>
+                DiagnosticKind::PolytypeMismatch { poly: poly.apply_subst(&back), other: other.apply_subst(&back) },
             DiagnosticKind::OccursCheck(v, t) => {
                 let v = match back.map.get(&v) {
                     Some(Ty::Skolem(n, i)) => TyVar { name: n.clone(), id: *i },
@@ -1539,6 +1541,54 @@ fn unify_inner(t1: &Ty, t2: &Ty, fams: &TyFamilies) -> Result<Subst, DiagnosticK
             } else {
                 Ok(Subst::singleton(w.clone(), Ty::Var(v.clone())))
             }
+        }
+
+        // A quantified type unifies only with a quantified type of the same
+        // shape: same number of binders (nested `Forall`s recurse here one
+        // binder at a time; a binder-count mismatch ends in the arm below),
+        // bodies equal up to renaming of the bound variables, and the
+        // bound variable captured by nothing. Both binders are renamed to
+        // ONE fresh rigid constant and the bodies unified under it; a
+        // binding whose image mentions the constant would carry the bound
+        // variable out of its quantifier (`forall a. a -> b0` against
+        // `forall a. a -> a` must not bind `b0 := a`), so it is rejected.
+        // The constant itself never leaves this arm: on success no image
+        // mentions it, on failure the error names the two quantified types.
+        // This is the ONLY way a `Forall` unifies. Checking an argument
+        // against a higher-rank parameter is not unification — the App
+        // rule in infer.rs skolemizes the parameter's quantifier and checks
+        // the argument against the rigid body — so a `Forall` reaching this
+        // function means two signatures spell the same polymorphic demand
+        // (`h :: (forall a. a -> a) -> Int; h = applyBoth`), never that a
+        // polymorphic argument is being supplied.
+        (Ty::Forall(v1, b1), Ty::Forall(v2, b2)) => {
+            let constant = fresh_forall_constant(&v1.name);
+            let s = unify_tf(
+                &b1.apply_subst(&Subst::singleton(v1.clone(), constant.clone())),
+                &b2.apply_subst(&Subst::singleton(v2.clone(), constant.clone())),
+                fams,
+            ).map_err(|_| DiagnosticKind::Mismatch(t1.clone(), t2.clone()))?;
+            let Ty::Skolem(cname, cid) = &constant else { unreachable!() };
+            if s.map.values().any(|img| img.contains_skolem(cname, *cid)) {
+                return Err(DiagnosticKind::Mismatch(t1.clone(), t2.clone()));
+            }
+            Ok(s)
+        }
+
+        // A quantified type against anything else — a monotype, a rigid
+        // skolem, or a flexible unification variable — is an error, and the
+        // flexible-variable case is the important one: binding `a0 := forall
+        // a. a -> a` is impredicative instantiation, which GHC (without
+        // ImpredicativeTypes) refuses too. Allowing it is how a rank-2
+        // function passed through `map`, `.`, `flip`, a list or a
+        // lambda-bound variable used to reach its parameter with the
+        // quantifier instantiated at one type: `map applyBoth [not]`
+        // typechecked, and `f True` inside `applyBoth` then crashed on
+        // `f 1`. The error says which route is legal (direct application or
+        // `$`, both of which go through the App rule's skolemization).
+        (Ty::Forall(..), other) | (other, Ty::Forall(..)) => {
+            let poly = if matches!(t1, Ty::Forall(..)) { t1 } else { t2 };
+            Err(DiagnosticKind::PolytypeMismatch { poly: poly.clone(), other: other.clone() })
         }
 
         (Ty::Var(v), t) | (t, Ty::Var(v)) => {
@@ -1660,16 +1710,6 @@ fn unify_inner(t1: &Ty, t2: &Ty, fams: &TyFamilies) -> Result<Subst, DiagnosticK
             Ok(s1.compose(&s2))
         }
 
-        // Forall: strip the quantifier and unify the body. The bound variable
-        // is a user-written variable (id = u32::MAX) and unifies like any
-        // other variable here — this arm does no skolemization. Rigidity is
-        // enforced where a rank-2 argument is CHECKED: infer.rs skolemizes the
-        // parameter's Forall before checking the argument against it, so an
-        // escaping variable is caught there, not by unification.
-        (Ty::Forall(_v, inner), t) | (t, Ty::Forall(_v, inner)) => {
-            unify_tf(inner, t, fams)
-        }
-
         // Skolem: rigid type constant, only unifies with itself
         (Ty::Skolem(a, i), Ty::Skolem(b, j)) if a == b && i == j => Ok(Subst::empty()),
         (Ty::Skolem(..), _t) | (_t, Ty::Skolem(..)) => {
@@ -1678,6 +1718,19 @@ fn unify_inner(t1: &Ty, t2: &Ty, fams: &TyFamilies) -> Result<Subst, DiagnosticK
 
         _ => Err(DiagnosticKind::Mismatch(t1.clone(), t2.clone())),
     }
+}
+
+/// The rigid constant both binders of two quantified types are renamed to
+/// while their bodies are unified (see the `Forall`/`Forall` arm of
+/// `unify_inner`). Ids count down from the top of the range, far above
+/// anything the checker's own counter (`Checker::next_var`, which also
+/// numbers its skolems) reaches, so the constant can never coincide with a
+/// signature, existential or higher-rank skolem of the program; `u32::MAX`
+/// itself is left alone (it marks user-written type variables).
+fn fresh_forall_constant(name: &str) -> Ty {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(u32::MAX - 1);
+    Ty::Skolem(name.to_string(), NEXT.fetch_sub(1, Ordering::Relaxed))
 }
 
 /// One structured compiler diagnostic, shared by the parser, the typechecker
@@ -1850,6 +1903,15 @@ pub enum DiagnosticKind {
     /// where a `%1` one is required would let it use an argument twice (or
     /// drop it) that the `%1` type promises is consumed exactly once.
     MultiplicityMismatch(Ty, Ty),
+    /// A quantified type (`forall a. a -> a`, the type of a higher-rank
+    /// parameter) met a type that is not a quantified type of the same
+    /// shape: a monotype, or a flexible unification variable. The
+    /// quantifier is a parameter's demand for a value that works at EVERY
+    /// `a`; equating it with one specific type, or binding a variable to
+    /// it (which some other use would then fix at one type), would let a
+    /// value of one type pass where every type was promised. `poly` is
+    /// the quantified side, `other` the side it met.
+    PolytypeMismatch { poly: Ty, other: Ty },
     OccursCheck(TyVar, Ty),
     UnboundVariable(String),
     UnboundConstructor(String),
@@ -2051,6 +2113,13 @@ impl Diagnostic {
                 if matches!(class.as_str(), "Show" | "Eq" | "Ord") =>
                 Some("functions and IO actions have no Show, Eq or Ord instance — there is no \
                       way to render or compare them."),
+            DiagnosticKind::PolytypeMismatch { .. } =>
+                Some("GHC rejects this the same way: without ImpredicativeTypes a \
+                      'forall' type is never instantiated through a type variable, \
+                      and `f $ x` is the one special case (typed exactly like `f x`). \
+                      mata-ll also has no Quick Look, so an operator section such as \
+                      `($ x) f` or `(. f) g`, which GHC lets through, needs the same \
+                      rewrite to a direct application."),
             DiagnosticKind::MultiplicityMismatch(..) =>
                 Some("to pass a '%1' function where an ordinary one is expected, \
                       wrap it in a lambda: '\\x -> f x' makes no single-use promise. \
@@ -2121,6 +2190,19 @@ impl Diagnostic {
                 let s = pretty_var_subst(&[a, b]);
                 write!(f, "Cannot match '{}' with '{}': a rigid type variable stands for one specific type that is not visible here, so it cannot be assumed to be any particular type",
                     a.apply_subst(&s), b.apply_subst(&s))?
+            }
+            DiagnosticKind::PolytypeMismatch { poly, other } => {
+                let s = pretty_var_subst(&[poly, other]);
+                let var = match poly {
+                    Ty::Forall(v, _) => v.name.clone(),
+                    _ => "a".to_string(),
+                };
+                let met = match other {
+                    Ty::Var(_) => format!("the type variable '{}'", other.apply_subst(&s)),
+                    _ => format!("'{}'", other.apply_subst(&s)),
+                };
+                write!(f, "Cannot match the polymorphic type '{}' with {}: a parameter of type 'forall {}. …' wants a value that works at EVERY type '{}', and only an argument applied to that parameter directly (or with '$') is checked for that; reaching the parameter through another function — 'map', '.', 'flip', 'const', a list, a lambda-bound or do-bound variable — would fix '{}' at one type on the way. Apply the function directly, or with '$'",
+                    poly.apply_subst(&s), met, var, var, var)?
             }
             DiagnosticKind::MultiplicityMismatch(a, b) => {
                 let s = pretty_var_subst(&[a, b]);

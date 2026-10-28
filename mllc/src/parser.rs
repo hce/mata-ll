@@ -2599,13 +2599,18 @@ impl Parser {
         if let Token::Ident(ref name) = self.peek().clone()
             && name == "forall" {
                 self.advance();
-                let var = self.expect_ident()?;
+                // `forall a b. T` is `forall a. forall b. T`: the binders
+                // nest, one `Forall` node each, innermost last.
+                let mut vars = vec![self.expect_ident()?];
+                while let Token::Ident(_) = self.peek() {
+                    vars.push(self.expect_ident()?);
+                }
                 self.expect(&Token::Operator(".".to_string()))?;
-                let inner = self.parse_type()?;
-                return Ok(Type::Forall {
-                    var,
-                    inner: Box::new(inner),
-                });
+                let mut ty = self.parse_type()?;
+                for var in vars.into_iter().rev() {
+                    ty = Type::Forall { var, inner: Box::new(ty) };
+                }
+                return Ok(ty);
             }
 
         // Check for constraints: `Show a => ...`

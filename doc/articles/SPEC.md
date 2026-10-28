@@ -600,6 +600,20 @@ function arguments more generally also work — a parameter of type
 body — though the scope-tag pattern above is the case the language is
 designed around.
 
+A polymorphic argument reaches such a parameter in exactly two ways, as
+in GHC: a direct application (`applyBoth id`, `runST (do …)`) or `$`
+(`applyBoth $ id`, `runST $ do …`). There the parameter's quantifier is
+made rigid and the argument is checked against it, so `applyBoth not` is
+rejected. Any other route — `map applyBoth xs`, `applyBoth . id`, `flip
+applyBoth`, a list of rank-2 functions, a lambda- or do-bound variable
+passed on (`\f -> applyBoth f`) — would have to fix the quantified
+variable at one type on the way and is rejected (the error says so); a
+`forall` type unifies only with another `forall` type of the same shape.
+A parameter of rank 3 (`nest :: ((forall a. a -> a) -> Int) -> Int`)
+takes a function with that signature, or a lambda, whose binder then has
+the polymorphic type (`nest (\f -> f 3)`). `forall a b. T` binds two
+variables, as `forall a. forall b. T` does.
+
 ## Statically known FFI calls
 
 The scope mechanism does NOT apply to statically known FFI calls.
