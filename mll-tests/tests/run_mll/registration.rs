@@ -226,6 +226,12 @@ mll_test!(dictform_method_named_binders, "dictform_method_named_binders.mll");
 // the declared context, so `==` under `Ord a` (and `show` under a class
 // with a Show superclass, fmap/pure under Monad) reads a dictionary.
 mll_test!(dict_superclass_closure, "dict_superclass_closure.mll");
+// T14: an instance declaration's superclass requirement is decided by
+// instance resolution under the instance's context, so `instance Eq a =>
+// Container [a]` (a structural superclass instance), a context-carrying
+// or derived witness and `Ord a` providing `Eq a` are accepted and run
+// as GHC, specialized and through dictionaries alike.
+mll_test!(superclass_structural, "superclass_structural.mll");
 // T2: a derived instance of a parameterized type records GHC's derived
 // context and has a dictionary form, so it stays correct past the
 // specialization limit and inside dictionary-passing bodies; a phantom

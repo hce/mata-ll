@@ -44,6 +44,48 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **An instance declaration's superclass requirement is decided by
+  instance resolution under the instance's context, as GHC decides it**
+  (`class Eq a => Container a` with `instance Eq a => Container [a]` or
+  `instance Eq a => Container (Maybe a)`, and `class Show a => Pretty a`
+  with `instance (Show a, Show b) => Pretty (a, b)` or `instance Show a =>
+  Pretty [a]`, were rejected with "No instance of superclass 'Eq' for
+  type '[a]'" where GHC compiles and runs them; conversely `instance Eq a
+  => Container (Pairs a b)` over a `deriving (Eq)` type with two
+  parameters, and `instance Pretty (Tree a)` with only a context-carrying
+  `instance Show a => Show (Tree a)` in scope, were accepted where GHC
+  reports "Could not deduce (Eq b)" / "No instance for (Show a) arising
+  from the superclasses of an instance declaration"). The check was a
+  registry lookup keyed by the instance's bare head: the Eq, Ord, Show
+  and Hashable instances of lists, tuples and Maybe are structural —
+  synthesized by the monomorphizer, never registered — so every instance
+  over one of those heads of a class with a superclass was refused, and a
+  bare head cannot tell a context that provides the superclass from one
+  that does not. Now the check is Haskell 2010 §4.3.2: each superclass
+  constraint at the instance head must be entailed by the instance's
+  context together with the instances in scope (`entailed_under_givens`,
+  the same instance-resolution rules a use site resolves by, with the one
+  difference that a demand reaching a type variable is met only by the
+  context or a superclass of a context class — `Ord a` provides `Eq a`,
+  `Show a` does not — because an instance declaration has no enclosing
+  context to discharge it later). Structural, builtin, written and
+  derived witnesses, with or without contexts, nested to any depth, go
+  through the one rule, and the witness may be declared after the
+  instance that needs it. A rejection names the missing constraint and
+  the fix: "instance 'Container [a]' needs 'Eq [a]' for its superclass
+  'Eq', which needs 'Eq a', and the instance has no context: add 'Eq a'
+  to the instance context"; a concrete head with no instance at all reads
+  "… needs 'Eq T' for its superclass 'Eq', and there is no instance 'Eq
+  T'". The accepted programs run as GHC: the superclass dictionary of a
+  structural head is composed from the context's dictionaries, so a
+  superclass method called through the subclass constraint (`x == y &&
+  size x == size y` under `Container a`) is right at `[Int]`, `Maybe
+  Bool` and `(Int, Bool)` whether specialized, past the specialization
+  limit or at an existential type, and a HashMap keyed by a `Hashable k
+  => Keyed k` instance's structural key encodes it as the key's own
+  instance does. Found by the 2026-10 fresh-eyes review (T14).
+  (GHC-goldened case `superclass_structural`; the rejections are pinned
+  in `compile_errors.rs`.)
 - **Every use of a class method emits that class's constraint; Enum,
   Bounded and the Functor/Applicative/Monad hierarchy are no exception**
   (`print (fromEnum (toEnum 65))` compiled and crashed with "attempt to

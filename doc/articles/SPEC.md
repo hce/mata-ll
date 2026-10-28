@@ -1351,7 +1351,26 @@ the same reason.
         show (Leaf x)     = "Leaf " <> show x
         show (Branch l r) = "Branch (" <> show l <> ") (" <> show r <> ")"
 
-Superclass constraints on instances? Yes.
+Superclass constraints on instances? Yes, with Haskell 2010's rule
+(§4.3.2): for `instance cx => C (T u1 … uk)`, every superclass
+constraint `S (T u1 … uk)` must be entailed by the context `cx`
+together with the instances in scope — the same instance resolution a
+use site goes through, with the context as the givens. So under
+`class Eq a => Container a`, `instance Eq a => Container [a]` is
+accepted (the list's `Eq` needs `Eq a`, which the context provides),
+`instance Ord a => Container [a]` is accepted (`Ord a` provides its
+superclass `Eq a`), and `instance Container [a]`, `instance Show a =>
+Container [a]` and `instance Eq a => Container (Pairs a b)` over a
+`deriving (Eq)` type with two parameters are rejected, naming the
+missing constraint: "instance 'Container [a]' needs 'Eq [a]' for its
+superclass 'Eq', which needs 'Eq a', and the instance has no context:
+add 'Eq a' to the instance context". The witness can be a builtin
+instance (`Eq Int`), a structural one (the `Eq`/`Ord`/`Show`/
+`Hashable` of lists, tuples and `Maybe`), a written one with a context
+(`instance Show a => Show (Tree a)` for `instance Show a => Pretty
+(Tree a)`) or a derived one, and may be declared anywhere in the
+module — every instance head is registered before any instance is
+checked, so declaration order does not matter.
 
 Orphan instance rules? Disallowed.
 

@@ -7264,3 +7264,233 @@ fn class_method_at_a_type_without_the_instance_names_the_class() {
         &["No instance for 'Monad W'"],
     );
 }
+
+// T14: an instance declaration's superclass requirement is decided by
+// instance resolution under the instance's context (Haskell 2010 §4.3.2),
+// exactly as a use site decides it — not by a registry lookup keyed by the
+// bare head. A demand that bottoms out at one of the head's type variables
+// is met only by the context (or a superclass of a context class); the
+// message names the missing constraint and the fix. GHC: "No instance for
+// (Eq a) arising from the superclasses of an instance declaration".
+#[test]
+fn superclass_instance_over_structural_head_needs_its_context() {
+    // t14c: a bare `instance Container [a]` — `Eq [a]` needs `Eq a`, which
+    // nothing provides; GHC rejects it, and so must mata-ll, although the
+    // same instance WITH `Eq a =>` is accepted (superclass_structural).
+    let source = r#"
+class Eq a => Container a where
+    size :: a -> Int
+
+instance Container [a] where
+    size xs = length xs
+
+main :: IO ()
+main = print (size [1, 2, 3 :: Int])
+"#;
+    expect_compile_error(source, &[], &[
+        "instance 'Container [a]' needs 'Eq [a]' for its superclass 'Eq'",
+        "which needs 'Eq a'",
+        "the instance has no context",
+        "add 'Eq a' to the instance context",
+    ]);
+    // The same over a Maybe head.
+    let source = r#"
+class Eq a => Container a where
+    size :: a -> Int
+
+instance Container (Maybe a) where
+    size Nothing = 0
+    size (Just _) = 1
+
+main :: IO ()
+main = print (size (Just True))
+"#;
+    expect_compile_error(source, &[], &[
+        "instance 'Container (Maybe a)' needs 'Eq (Maybe a)' for its superclass 'Eq'",
+        "which needs 'Eq a'",
+        "add 'Eq a' to the instance context",
+    ]);
+}
+
+#[test]
+fn superclass_instance_with_wrong_context_is_rejected() {
+    // `Show a` does not give `Eq a` (GHC: "Could not deduce (Eq a) from
+    // the context: Show a").
+    let source = r#"
+class Eq a => Container a where
+    size :: a -> Int
+
+instance Show a => Container [a] where
+    size xs = length xs
+
+main :: IO ()
+main = print (size [1, 2, 3 :: Int])
+"#;
+    expect_compile_error(source, &[], &[
+        "instance 'Container [a]' needs 'Eq [a]' for its superclass 'Eq'",
+        "which needs 'Eq a'",
+        "the instance context '(Show a)' does not provide it",
+        "add 'Eq a' to the instance context",
+    ]);
+    // `Eq a` does not give `Ord a` either — the superclass edge runs one
+    // way: a context class provides its superclasses, not its subclasses.
+    let source = r#"
+class Ord a => Ranked a where
+    rank :: a -> Int
+
+instance Eq a => Ranked [a] where
+    rank xs = length xs
+
+main :: IO ()
+main = print (rank [1 :: Int])
+"#;
+    expect_compile_error(source, &[], &[
+        "instance 'Ranked [a]' needs 'Ord [a]' for its superclass 'Ord'",
+        "which needs 'Ord a'",
+        "the instance context '(Eq a)' does not provide it",
+        "add 'Ord a' to the instance context",
+    ]);
+}
+
+#[test]
+fn superclass_instance_missing_nested_context_is_rejected() {
+    // The witness is a DERIVED instance with a derived context: `Eq (Pairs
+    // a b)` needs `Eq a` and `Eq b`; the declared context gives only `Eq
+    // a`. GHC: "Could not deduce (Eq b)". This used to be accepted —
+    // the old check saw a registered `Eq Pairs` and asked nothing more.
+    let source = r#"
+class Eq a => Container a where
+    size :: a -> Int
+
+newtype Pairs a b = Pairs [(a, Maybe b)] deriving (Eq, Show)
+
+instance Eq a => Container (Pairs a b) where
+    size (Pairs ps) = length ps
+
+main :: IO ()
+main = print (size (Pairs [(1 :: Int, Just "a")]))
+"#;
+    expect_compile_error(source, &[], &[
+        "instance 'Container (Pairs a b)' needs 'Eq (Pairs a b)' for its superclass 'Eq'",
+        "which needs 'Eq b'",
+        "the instance context '(Eq a)' does not provide it",
+        "add 'Eq b' to the instance context",
+    ]);
+    // A written witness with a context, and no context on the dependent
+    // instance: `Show (Tree a)` needs `Show a`. GHC: "No instance for
+    // (Show a) arising from the superclasses of an instance declaration".
+    // Also used to be accepted.
+    let source = r#"
+data Tree a = Leaf | Node (Tree a) a (Tree a)
+
+instance Show a => Show (Tree a) where
+    show Leaf = "."
+    show (Node l x r) = "(" <> show l <> " " <> show x <> " " <> show r <> ")"
+
+class Show a => Pretty a where
+    pretty :: a -> String
+
+instance Pretty (Tree a) where
+    pretty _ = "tree"
+
+main :: IO ()
+main = putStrLn (pretty (Node Leaf (1 :: Int) Leaf))
+"#;
+    expect_compile_error(source, &[], &[
+        "instance 'Pretty (Tree a)' needs 'Show (Tree a)' for its superclass 'Show'",
+        "which needs 'Show a'",
+        "the instance has no context",
+        "add 'Show a' to the instance context",
+    ]);
+}
+
+#[test]
+fn superclass_instance_at_type_without_the_superclass_instance_is_rejected() {
+    // t14d: a concrete head with no `Eq T` at all — the demand fails at
+    // the head itself, not at a variable. GHC: "No instance for (Eq T)".
+    let source = r#"
+data T = T Int
+
+class Eq a => Container a where
+    size :: a -> Int
+
+instance Container T where
+    size (T n) = n
+
+main :: IO ()
+main = print (size (T 3))
+"#;
+    let msg = expect_compile_error(source, &[], &[
+        "instance 'Container T' needs 'Eq T' for its superclass 'Eq'",
+        "and there is no instance 'Eq T'",
+    ]);
+    assert!(!msg.contains("add '"), "a missing concrete instance is not a context problem: {}", msg);
+    // Hashable's structural shapes go through the same entailment: a
+    // `Hashable k =>` class over a list head needs `Hashable a` from the
+    // context.
+    let source = r#"
+class Hashable k => Keyed k where
+    label :: k -> String
+
+instance Keyed [a] where
+    label _ = "list"
+
+main :: IO ()
+main = putStrLn (label [1 :: Int])
+"#;
+    expect_compile_error(source, &[], &[
+        "instance 'Keyed [a]' needs 'Hashable [a]' for its superclass 'Hashable'",
+        "which needs 'Hashable a'",
+        "add 'Hashable a' to the instance context",
+    ]);
+}
+
+// Accept-side controls for the superclass check: the Hashable shapes with
+// their contexts (no GHC twin — Hashable is mata-ll's HashMap key class),
+// and the witness instance of a user-defined superclass declared AFTER the
+// instance that depends on it (every instance head is registered before
+// any instance is checked, so declaration order does not matter, as in
+// GHC; superclass_structural runs the same program).
+#[test]
+fn superclass_instance_accepted_with_context_and_in_any_order() {
+    let source = r#"
+class Hashable k => Keyed k where
+    label :: k -> String
+
+instance (Hashable a, Hashable b) => Keyed (a, b) where
+    label _ = "pair"
+
+instance Hashable a => Keyed [a] where
+    label _ = "list"
+
+instance Keyed Int where
+    label _ = "int"
+
+class Shape a where
+    area :: a -> Int
+
+class Shape a => Solid a where
+    volume :: a -> Int
+
+instance Shape a => Solid [a] where
+    volume xs = sum (map area xs) * 2
+
+instance Shape a => Shape [a] where
+    area xs = sum (map area xs)
+
+instance Shape Int where
+    area n = n * n
+
+store :: Keyed k => k -> HashMap k String -> HashMap k String
+store k m = hmInsert k (label k) m
+
+main :: IO ()
+main = do
+    print (hmLookup (1 :: Int, "a") (store (1, "a") hmEmpty))
+    print (hmLookup [1, 2 :: Int] (store [1, 2] hmEmpty))
+    print (hmLookup (3 :: Int) (store 3 hmEmpty))
+    print (volume [1, 2, 3 :: Int])
+"#;
+    assert!(compile(source, Path::new("."), &[]).is_ok(),
+        "a structural superclass instance with its context, and a witness declared later, must be accepted");
+}

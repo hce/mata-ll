@@ -159,6 +159,14 @@ Order matters because later passes depend on earlier registrations:
 4. **Pass 4a** — `deriving` clauses (must run before 4b so derived instances
    exist when explicit instances are checked).
 5. **Pass 4b** — explicit instance declarations (+ orphan detection).
+   Every instance head is registered first (`preregister_instance`, over
+   all instance decls), then each instance is checked
+   (`check_instance`): head shape, duplicates, orphans, and the
+   superclass requirement — H2010 §4.3.2, each superclass constraint at
+   the instance head entailed by the instance's context together with
+   the instances in scope (`entailed_under_givens`), so a witness
+   declared later in the module, a derived one (pass 4a) or a structural
+   one (never registered — mono synthesizes it) all count.
 6. **Pass 5** — synthesize FFI functions from sigs that have no body.
 7. **Pass 6** — collect exports + check function definitions (the actual
    inference over bodies).
@@ -188,7 +196,17 @@ Order matters because later passes depend on earlier registrations:
   (`constraint_bound_vars`: `Monad (ST s)` needs nothing of `s`) and
   replaces a wanted over a variable it generalized by that residual
   (`reduce_wanted_over`), so no decided constraint reaches the boundary
-  as an undetermined one.
+  as an undetermined one. Instance resolution itself is one recursion,
+  `entail_step`: what satisfying `class ty` at this node reduces to
+  (satisfied, failed, deferred, or demands on the arguments — through a
+  registered instance's context, or the structural rule for Eq/Ord/
+  Show/Hashable over lists, tuples and Maybe). `has_instance` (a use
+  site: a deferred variable is satisfiable, the enclosing context
+  discharges it), `entailed_under_givens` (an instance declaration's
+  superclass check: a deferred variable is satisfied only by the
+  instance's context or a superclass of a context class, since nothing
+  discharges it later), `collect_required_var_constraints` and
+  `context_failure_note` are all thin walks over it.
 - **Deriving** (`typechecker/derive.rs`) — auto-generates `Show`/`Eq`/etc.
   A derived instance is registered like a written one: with GHC's derived
   context (`derived_context` — the class at each type parameter that

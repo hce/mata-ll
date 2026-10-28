@@ -262,6 +262,47 @@ impl Checker {
         }
     }
 
+    /// Is `class ty` entailed by the instances in scope together with
+    /// `givens` — (class, type variable) pairs, an instance declaration's
+    /// context? The precise twin of `has_instance`: the same `entail_step`
+    /// recursion, but a demand that bottoms out at a type VARIABLE is
+    /// satisfied only when a given names that variable with a class that
+    /// provides the demanded one (`class_satisfies`: `Ord a` gives `Eq a`).
+    /// `has_instance` treats such a leaf as satisfiable because at a use
+    /// site the enclosing definition's context discharges it later; an
+    /// instance declaration has no later — its context IS the whole
+    /// evidence (H2010 §4.3.2), so `instance Container [a]` without `Eq a`
+    /// is refused here exactly as GHC refuses it. The other deferred nodes
+    /// (a stuck family, an unknown head) keep `has_instance`'s conservative
+    /// answer. Err carries the first unmet demand: `(class, Var)` for a
+    /// variable the givens do not cover, `(class, ty)` for a type that has
+    /// no instance at all.
+    pub(super) fn entailed_under_givens(
+        &self,
+        givens: &[(String, String)],
+        class: &str,
+        ty: &Ty,
+    ) -> Result<(), (String, Ty)> {
+        match self.entail_step(class, ty) {
+            Entailment::Satisfied => Ok(()),
+            Entailment::Failed => Err((class.to_string(), ty.clone())),
+            Entailment::Deferred => match ty {
+                Ty::Var(v) => {
+                    let provided = givens.iter()
+                        .any(|(g, gv)| *gv == v.name && self.class_satisfies(g, class));
+                    if provided { Ok(()) } else { Err((class.to_string(), ty.clone())) }
+                }
+                _ => Ok(()),
+            },
+            Entailment::Demands { subs, .. } => {
+                for (c, t) in &subs {
+                    self.entailed_under_givens(givens, c, t)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// When `class ty` has no instance BECAUSE a registered instance's
     /// declared context is unsatisfied, explain which context constraint
     /// failed — recursing when the failure is itself context-shaped, so
@@ -912,24 +953,73 @@ impl Checker {
             return vec![];
         }
 
-        // Check superclass constraints
-        for superclass in &class_info.superclasses {
-            let key = (superclass.clone(), target_head.clone());
-            if !self.instances.contains_key(&key) {
-                self.push_error_ctx(
-                    DiagnosticKind::Other(format!(
-                        "No instance of superclass '{}' for type '{}' (required by '{}')",
-                        superclass, ty_str, class_name
-                    )),
-                    format!("instance {} {}", class_name, ty_str),
-                );
-            }
-        }
-
         // Validate and convert the declared context (reporting any ill-formed
         // entry); the well-formed part is registered on the instance so a use
-        // site knows what to demand of the concrete type arguments.
+        // site knows what to demand of the concrete type arguments. Converted
+        // BEFORE the superclass check below, which reads it as the givens.
         let ctx = self.convert_instance_context(class_name, &target_ty, context, true);
+
+        // Superclass check, Haskell 2010 §4.3.2: for `instance cx => C (T u1
+        // … uk)`, every superclass constraint `S (T u1 … uk)` must be
+        // entailed by `cx` together with the instances in scope. That is
+        // instance resolution under the instance's context as the givens —
+        // `entailed_under_givens`, the same `entail_step` rules a use site
+        // resolves by — so a structural superclass instance (`Eq [a]` from
+        // `Eq a`), a registered one with a context (`Show (Tree a)` from
+        // `Show a`), a builtin one (`Eq Int`) and a context class that is a
+        // superclass of the needed one (`Ord a` gives `Eq a`) all count. A
+        // registry lookup keyed by the bare head (what this used to be)
+        // refused every list, tuple and Maybe head — those instances are
+        // synthesized by mono and have no entry — and could not tell
+        // `instance Eq a => Container [a]` from the context-free spelling
+        // GHC rejects. Every instance head is registered (`preregister_instance`,
+        // pass 4a's derives, the prelude) before any instance is checked, so
+        // a witness declared later in the module is found (T14).
+        let givens: Vec<(String, String)> = ctx.iter()
+            .map(|c| (c.class_name.clone(), c.type_var.clone()))
+            .collect();
+        let paren = crate::types::paren_ty;
+        for superclass in &class_info.superclasses {
+            let Err((need_class, need_ty)) =
+                self.entailed_under_givens(&givens, superclass, &target_ty)
+            else {
+                continue;
+            };
+            let head = format!(
+                "instance '{} {}' needs '{} {}' for its superclass '{}'",
+                class_name, paren(&target_ty), superclass, paren(&target_ty), superclass
+            );
+            let needed = format!("{} {}", need_class, paren(&need_ty));
+            let msg = if let Ty::Var(_) = need_ty {
+                // The demand bottomed out at one of the head's type
+                // variables: only the instance context can provide it.
+                let unprovided = if ctx.is_empty() {
+                    "and the instance has no context".to_string()
+                } else {
+                    format!(
+                        "and the instance context '({})' does not provide it",
+                        ctx.iter()
+                            .map(|c| format!("{} {}", c.class_name, c.type_var))
+                            .collect::<Vec<_>>().join(", ")
+                    )
+                };
+                format!(
+                    "{}, which needs '{}', {}: add '{}' to the instance context",
+                    head, needed, unprovided, needed
+                )
+            } else if need_class == *superclass && need_ty == target_ty {
+                format!("{}, and there is no instance '{}'", head, needed)
+            } else {
+                format!(
+                    "{}, which needs '{}', and there is no instance '{}'",
+                    head, needed, needed
+                )
+            };
+            self.push_error_ctx(
+                DiagnosticKind::Other(msg),
+                format!("instance {} {}", class_name, ty_str),
+            );
+        }
 
         let mut instance_info = InstanceInfo {
             class_name: class_name.to_string(),

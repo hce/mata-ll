@@ -340,6 +340,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_dict_two_constraints_one_class, "cases", "dict_two_constraints_one_class.mll"),
         (ghc_oracle_dictform_method_named_binders, "cases", "dictform_method_named_binders.mll"),
         (ghc_oracle_dict_superclass_closure, "cases", "dict_superclass_closure.mll"),
+        (ghc_oracle_superclass_structural, "cases", "superclass_structural.mll"),
         (ghc_oracle_derived_dictform, "cases", "derived_dictform.mll"),
         (ghc_oracle_dict_dispatch_forms, "cases", "dict_dispatch_forms.mll"),
         (ghc_oracle_opfunc_dollar_compose, "cases", "opfunc_dollar_compose.mll"),
