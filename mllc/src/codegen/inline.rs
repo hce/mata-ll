@@ -18,6 +18,37 @@ use super::CodeGen;
 use super::util::count_arrows;
 
 impl CodeGen {
+    /// `let bs in body` with every binding inlined into `body`, for a
+    /// `body` that is EVALUATED AT MOST ONCE per evaluation of the let —
+    /// a lambda the caller applies exactly once (the strict IORef modify
+    /// splice beta-reduces `modifyIORef' r f`'s function at its one
+    /// application). Each binding is a value binding occurring exactly
+    /// once in `body` and not under a lambda (`count_name_occurrences`
+    /// counts a lambda's occurrences double), referenced by no sibling
+    /// binding, and substitutable without capture: evaluated in place, its
+    /// right-hand side runs exactly when and as often as the binding's
+    /// one use would have forced it, so nothing is shared less than the
+    /// let shared. This is the shape the section desugaring makes
+    /// (`modules.rs` `Rename::section`: `let __op = e in \__sec -> … __op
+    /// …`), undone where the section is applied once and spliced. `None`
+    /// when any binding fails the test.
+    pub(super) fn inline_single_use_let(binds: &[TLocalDef], body: &TExpr) -> Option<TExpr> {
+        let mut subst = std::collections::HashMap::new();
+        for b in binds {
+            if !b.patterns.is_empty()
+                || super::util::count_name_occurrences(body, &b.name) != 1
+                || binds.iter().any(|o| super::util::expr_references_name(&o.body, &b.name))
+            {
+                return None;
+            }
+            subst.insert(b.name.clone(), &b.body);
+        }
+        if Self::subst_would_capture(body, &subst) {
+            return None;
+        }
+        Some(Self::subst_texpr(body, &subst))
+    }
+
     /// Would substituting `subst` into `body` CAPTURE a variable?
     /// `subst_texpr` is shadow-aware (a binder hides same-named entries of
     /// the map in its scope) but performs no alpha-renaming, so an argument

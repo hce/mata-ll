@@ -72,6 +72,29 @@ thunk as a tail call. User code written that way overflows on a long
 list; walk the list with a self tail call (`go (x:xs) = if p x then
 True else go xs`) instead, as the Prelude does.
 
+## A point-free definition of function type evaluates its operands per call
+
+Every mata-ll function is one Lua function with one parameter per arrow
+of its declared type (the N-ary convention, see DESIGN.md), so a
+definition with fewer patterns than arrows is padded to its arity and
+its body applied to the padding: `inc = add (slow 10)` is emitted as
+`inc _eta0 = add (slow 10) _eta0`, the saturated call, and
+`lookupIn = flip Map.lookup table where table = build …` as
+`lookupIn _eta0 = …`, with the where group inside the padded function.
+GHC keeps such a definition at its syntactic arity — its arity analysis
+never eta-expands past an expression that is work, exactly so that the
+work is not duplicated — so `inc` is a constant applicative form whose
+`slow 10` is evaluated once ever, and `fx 3` in `fx x = add (slow x);
+map (fx 3) xs` is one partial application whose `slow 3` is shared
+across the elements. mata-ll evaluates the operand (and the where group)
+at every call of the padded function. Results are the same; the cost
+differs by the number of calls. The deviation is known and queued; the
+sections and explicit partial applications inside a body share their
+operands as GHC's do (`filter (< maximum xs) xs` computes `maximum xs`
+once), and an explicit parameter removes it: `inc x = add (slow 10) x`
+is the same per-call cost in both, and a let-bound partial application
+(`let f = add (slow 10) in map f xs`) is shared in both.
+
 ## Strings and ByteStrings
 
 Haskell has:

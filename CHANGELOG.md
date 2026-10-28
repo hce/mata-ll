@@ -44,6 +44,37 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A section or partial application evaluates a captured operand once,
+  however often it is applied** (`filter (< maximum xs) xs` computed
+  `maximum xs` per element: 5 s for 3000 elements where GHC takes
+  milliseconds). GHC desugars `(op e)` as `let y = e in \x -> x op y` and
+  `(e op)` as `(op) e`, and a partial application `f e` binds `e` once;
+  mata-ll spelled a section's operand inside its lambda, emitted an
+  argument the callee is strict in inside a partial application's closure
+  body (only a lazily passed argument's suspension was hoisted out), and
+  emitted a composition's sides inside the composition's closure — so
+  `add (slow n)`, `(slow n `div`)`, `(`div` slow n)`, `subtract (sum xs)`
+  and `add (slow n) . (* 2)` re-ran the operand per application. A section
+  over an operand that is work (anything but a literal, a variable, a
+  constructor or native operator over such) is now its lambda under a
+  `let` binding the operand, GHC's own desugaring, and every closure
+  built around a captured argument — a partial application, a `$` whose
+  result is still a function, a composition's side — binds an argument
+  that is work once, at closure-build time, as a memoizing suspension the
+  body reads (`__force` at a strict position, raw at a lazy one). Nothing
+  is evaluated earlier than before: a section or partial application over
+  a bottom operand is a function value until it is applied, and the
+  operand is forced the first time an application reads it; a composition
+  stays lazy in both sides. Fusion, the inliner and the strict IORef
+  modify splice see through the section's `let` (the splice inlines the
+  operand at its one use, so `modifyIORef' r (+ f x)` keeps its flat
+  form). A point-free definition over a partial application (`inc = add
+  (slow 10)`), which the N-ary convention pads to its arity, is emitted
+  as the saturated call `add (slow 10) _eta0` it denotes instead of a
+  closure built and applied per call; such a definition still evaluates
+  its operand per call, as the padding dictates (documented in
+  HASKDIFF.md). Found by the 2026-10 fresh-eyes review (O7). (GHC-goldened
+  case `section_operand_shared`.)
 - **The runtime list primitives force exactly what GHC's definitions
   force, in GHC's order** (`take` and `zipWith` raised bottoms GHC never
   touches; a knot through `take` overflowed the stack). `take`'s

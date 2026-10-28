@@ -588,7 +588,9 @@ apart is done entirely in `modules.rs`, before the merge
   by that placeholder, so no grouping is chosen for a name that denotes
   nothing. `fixity.rs` holds the grouping itself (Haskell 2010 §10.6,
   including prefix minus and the section-operand rule) and its
-  diagnostics; they surface as `CompileError::Parse` for the entry
+  diagnostics; a section is rewritten to its lambda here, with an
+  operand that is work let-bound around the lambda so it is evaluated
+  once however often the section is applied (`Rename::section`); they surface as `CompileError::Parse` for the entry
   module and as an import error naming the module otherwise. The Prelude
   source and the checker's builtin default-method snippets are not
   modules `resolve_module` sees; `modules::group_baseline` runs the same

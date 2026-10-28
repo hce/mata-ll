@@ -388,6 +388,15 @@ impl CodeGen {
     /// native scalar types, or a lambda judged by `forces_param`.
     fn fn_value_strictness(&self, e: &TExpr, arity: usize) -> Option<Vec<bool>> {
         let e = strip_parens(e);
+        // A section over an operand that is work is the lambda under a
+        // `let` binding that operand (`(< maximum xs)` is
+        // `let __op = maximum xs in \__sec -> __sec < __op`, GHC's own
+        // desugaring — see `modules.rs` `Rename::section`): the function
+        // value is the lambda, as strict as the lambda is; the binding is
+        // a name of its own, never one of the lambda's parameters.
+        if let TExprKind::Let { body, .. } = &e.kind {
+            return self.fn_value_strictness(body, arity);
+        }
         if let TExprKind::Lambda { params, body } = &e.kind {
             if params.len() != arity {
                 return None;

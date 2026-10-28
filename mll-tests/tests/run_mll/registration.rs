@@ -254,6 +254,7 @@ mll_test!(poly_recursion, "poly_recursion.mll");
 mll_test!(poly_recursion_user_class, "poly_recursion_user_class.mll");
 mll_test!(non_strict, "non_strict.mll");
 mll_test!(compose_non_strict, "compose_non_strict.mll");
+mll_test!(section_operand_shared, "section_operand_shared.mll");
 mll_test!(list_element_laziness, "list_element_laziness.mll");
 mll_test!(tuple_field_laziness, "tuple_field_laziness.mll");
 mll_test!(case_in_do_let, "case_in_do_let.mll");

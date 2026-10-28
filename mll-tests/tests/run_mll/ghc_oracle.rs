@@ -173,6 +173,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_case_pure_bottom, "cases", "case_pure_bottom.mll"),
         (ghc_oracle_clause_local_scope, "cases", "clause_local_scope.mll"),
         (ghc_oracle_compose_non_strict, "cases", "compose_non_strict.mll"),
+        (ghc_oracle_section_operand_shared, "cases", "section_operand_shared.mll"),
         (ghc_oracle_curried_lambda_arity, "cases", "curried_lambda_arity.mll"),
         (ghc_oracle_over_application_arity, "cases", "over_application_arity.mll"),
         (ghc_oracle_fuzz_backend_regressions, "cases", "fuzz_backend_regressions.mll"),

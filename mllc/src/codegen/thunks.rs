@@ -778,6 +778,29 @@ impl CodeGen {
         e
     }
 
+    /// Does `arg_ast(expr, false)` suspend `expr` in a fresh memoizing
+    /// thunk — the laziness branch's last arm below, reached by an argument
+    /// that is neither cheap to force nor a total construction (a tuple, a
+    /// saturated constructor or action-builder application) nor a bare
+    /// reference? That is the set of arguments whose evaluation is WORK:
+    /// the partial-application emitters bind such a captured argument once,
+    /// at closure-build time, whatever the callee's strictness in it
+    /// (`captured_arg_ast`), so the two must agree on the set — this
+    /// predicate IS the branch structure of `arg_ast_inner`, which
+    /// consults it.
+    pub(super) fn arg_suspends(&self, expr: &TExpr) -> bool {
+        if self.is_cheap_to_force(expr) {
+            return false;
+        }
+        let mut stripped = expr;
+        while let TExprKind::Paren(inner) = &stripped.kind {
+            stripped = inner.as_ref();
+        }
+        !matches!(&stripped.kind, TExprKind::Tuple(_) | TExprKind::Var(_) | TExprKind::Con(_))
+            && !Self::is_saturated_con_app(stripped)
+            && !self.is_builder_call(stripped)
+    }
+
     fn arg_ast_inner(&mut self, expr: &TExpr, strict: bool) -> Expr {
         // Eagerness weight wins: the callee forces it anyway, or it is provably
         // total (cannot be ⊥). Evaluate in place — no thunk.
@@ -861,6 +884,7 @@ impl CodeGen {
         if matches!(&stripped.kind, TExprKind::Var(_) | TExprKind::Con(_)) {
             self.lazy_ref_ast(stripped)
         } else {
+            debug_assert!(self.arg_suspends(expr), "arg_suspends mirrors arg_ast_inner");
             Expr::thunk(self.expr_ast(expr))
         }
     }

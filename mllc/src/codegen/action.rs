@@ -668,6 +668,26 @@ impl CodeGen {
         while let TExprKind::Paren(inner) = &f.kind {
             f = inner.as_ref();
         }
+        // A section over an operand that is work is its lambda under a
+        // `let` binding the operand (`modifyIORef' r (+ f x)`, see
+        // `modules.rs` `Rename::section`). The function is applied exactly
+        // once here, so the binding is inlined into the lambda body
+        // (`inline_single_use_let`): the operand is evaluated where the
+        // body's one use of it would have forced it — the spliced form
+        // of the operand spelled inside the lambda.
+        let inlined;
+        if let TExprKind::Let { binds, body } = &f.kind
+            && let TExprKind::Lambda { params, body: lambda_body } = &body.kind
+        {
+            inlined = TExpr::new(
+                TExprKind::Lambda {
+                    params: params.clone(),
+                    body: Box::new(Self::inline_single_use_let(binds, lambda_body)?),
+                },
+                body.ty.clone(),
+            );
+            f = &inlined;
+        }
         let TExprKind::Lambda { params, body } = &f.kind else { return None };
         if params.len() != 1 {
             return None;

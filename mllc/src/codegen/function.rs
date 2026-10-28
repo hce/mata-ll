@@ -890,7 +890,50 @@ impl CodeGen {
     /// `function … end`), and it would hide the immediate application from
     /// the beta-reduction peephole. Every other shape keeps the force: the
     /// callee must be a function value, not a thunk.
+    ///
+    /// A body that is a partial application — an application spine headed
+    /// by a name, constructor or operator with exactly the padding's
+    /// arrows outstanding (`inc = add (slow 10)`) — applied to the padding
+    /// IS the saturated call `add (slow 10) _eta0`, and is emitted as that
+    /// call: the ordinary application arm with the padding parameters as
+    /// its last arguments. Built as a closure and applied, the partial
+    /// application's captured arguments would be bound per call
+    /// (`captured_arg_ast` hoists them at closure-build time, which here is
+    /// every call) and the closure allocated per call. The saturated form
+    /// evaluates each argument exactly as a direct call would — a strict
+    /// one in place, a lazy one suspended — and none before the call.
     pub(super) fn eta_call_ast(&mut self, body: &TExpr, eta_params: &[String]) -> Expr {
+        if let Some(saturated) = Self::saturate_partial_body(body, eta_params) {
+            // The padding parameters enter the call as the typed-IR
+            // variables `__eta<i>` — a compiler name is its own Lua
+            // spelling — each registered for this emission as a local read
+            // through the parameter `_eta<i>` the function declares (the
+            // spill-slot map is exactly "the expression a local is read
+            // through"). Their reads are forced where a lazily passed
+            // argument would be: a caller delivers the padding like any
+            // argument, possibly a thunk.
+            let saved: Vec<(String, bool, Option<String>)> = eta_params
+                .iter()
+                .map(|p| {
+                    let v = Self::eta_var_name(p);
+                    let was_local = self.local_vars.contains(&v);
+                    let slot = self.var_slots.insert(v.clone(), p.clone());
+                    self.local_vars.insert(v.clone());
+                    (v, was_local, slot)
+                })
+                .collect();
+            let e = self.expr_ast(&saturated);
+            for (v, was_local, slot) in saved {
+                if !was_local {
+                    self.local_vars.remove(&v);
+                }
+                match slot {
+                    Some(prev) => { self.var_slots.insert(v, prev); }
+                    None => { self.var_slots.remove(&v); }
+                }
+            }
+            return e;
+        }
         let arity = self.known_callee_arity(body);
         let body_e = self.callee_ast(body);
         let callee = match body_e {
@@ -906,6 +949,46 @@ impl CodeGen {
         let eta_args: Vec<Expr> = eta_params.iter().map(|p| Expr::name(p.clone())).collect();
         let eta_args = self.adapt_runtime_args(body, eta_args, &Self::arrow_params(&body.ty));
         Self::split_call_ast(callee, eta_args, arity)
+    }
+
+    /// The typed-IR variable a padding parameter is read as in a
+    /// saturated body (`_eta0` → `__eta0`; see `eta_call_ast`).
+    fn eta_var_name(eta_param: &str) -> String {
+        format!("_{eta_param}")
+    }
+
+    /// The saturated application `body eta_params…` when `body` is a
+    /// partial application whose outstanding arrows are exactly the
+    /// padding (see `eta_call_ast`); `None` for any other body shape, which
+    /// is applied as a function value. Each padding parameter is typed by
+    /// the arrow it saturates, so the application arm's rows, arity split
+    /// and callback adaptation see the call as written.
+    fn saturate_partial_body(body: &TExpr, eta_params: &[String]) -> Option<TExpr> {
+        let mut head = body;
+        loop {
+            match &head.kind {
+                TExprKind::App(f, _) => head = f.as_ref(),
+                TExprKind::Paren(inner) => head = inner.as_ref(),
+                _ => break,
+            }
+        }
+        if !matches!(&head.kind, TExprKind::Var(_) | TExprKind::Con(_) | TExprKind::OpFunc(_))
+            || !matches!(&body.kind, TExprKind::App(..))
+            || count_arrows(&body.ty) != eta_params.len()
+        {
+            return None;
+        }
+        let mut saturated = body.clone();
+        for name in eta_params {
+            let Ty::Arrow(param_ty, result_ty, _) = &saturated.ty else { return None };
+            let arg = TExpr::new(TExprKind::Var(Self::eta_var_name(name)), (**param_ty).clone());
+            let result_ty = (**result_ty).clone();
+            saturated = TExpr::new(
+                TExprKind::App(Box::new(saturated), Box::new(arg)),
+                result_ty,
+            );
+        }
+        Some(saturated)
     }
 
     /// The two Lua functions of a performer / action-builder pair (see

@@ -1397,35 +1397,18 @@ impl CodeGen {
                 .collect();
             let callee = self.callee_ast(f);
             let mut cargs = Vec::new();
-            // Thunked captured arguments are HOISTED out of the closure:
-            // left inline, every invocation allocated a FRESH thunk, each
-            // memoizing separately — the argument's computation re-ran per
-            // call where GHC's partial application shares one thunk forced
-            // once. Hoisting a thunk only moves an allocation to closure
-            // build time (effect-free). Eager captured arguments stay
-            // inline deliberately: hoisting would EVALUATE them at build
-            // time, raising a ⊥ the callee only forces when the closure is
-            // actually invoked.
+            // Every captured argument whose evaluation is work is bound
+            // ONCE, at closure-build time, as a memoizing thunk the body
+            // reads (captured_arg_ast) — GHC's partial application shares
+            // one thunk forced at most once, whatever the callee's
+            // strictness in the position.
             let mut hoisted: Vec<Stmt> = Vec::new();
             for (i, a) in args.iter().enumerate() {
                 let is_strict = callee_strict.as_ref()
                     .is_some_and(|v| v.get(i).copied().unwrap_or(false));
                 let site_forced = callee_conv.as_ref().is_some_and(|r| matches!(
                     r.get(i), Some(super::analysis::ParamConv::SiteForced)));
-                let arg_e = if site_forced {
-                    self.site_forced_arg_ast(a)
-                } else {
-                    self.arg_ast(a, is_strict)
-                };
-                let arg_e = if matches!(&arg_e, Expr::Call(h, _)
-                    if matches!(h.as_ref(), Expr::Name(n) if n == "__thunk"))
-                {
-                    let cname = format!("_pc{}", i);
-                    hoisted.push(Stmt::Local(vec![cname.clone()], Some(arg_e)));
-                    Expr::name(cname)
-                } else {
-                    arg_e
-                };
+                let arg_e = self.captured_arg_ast(a, is_strict, site_forced, i, &mut hoisted);
                 cargs.push(arg_e);
             }
             for p in &extra_params {
@@ -1444,18 +1427,7 @@ impl CodeGen {
                     Self::split_call_ast(callee, cargs, arity),
                 )])),
             );
-            if hoisted.is_empty() {
-                Expr::paren(closure)
-            } else {
-                // The hoisted thunks live in a wrapper IIFE — its own Lua
-                // function scope, so they never count toward the enclosing
-                // function's local budget.
-                hoisted.push(Stmt::Return(closure));
-                Expr::call(
-                    Expr::paren(Expr::Func(vec![], FuncBody::Block(Block(hoisted)))),
-                    vec![],
-                )
-            }
+            Self::closure_over_captures(hoisted, closure)
         } else {
             // Full application
             // Wrap function literals in parens so Lua allows calling them
@@ -1476,6 +1448,125 @@ impl CodeGen {
             let tys: Vec<&Ty> = args.iter().map(|a| &a.ty).collect();
             let cargs = self.adapt_runtime_args(f, cargs, &tys);
             Self::split_call_ast(callee, cargs, arity)
+        }
+    }
+
+    /// The emission of an argument a closure built NOW captures and passes
+    /// to its callee at every later call — a partial application's applied
+    /// argument, the applied operand of a `$` whose result is still a
+    /// function, a composition's side. The rule, in this one place: a
+    /// captured argument whose evaluation is work (`arg_suspends`) is bound
+    /// ONCE, at closure-build time, as a memoizing thunk pushed to
+    /// `hoisted` (bound as `_pc<idx>` in the wrapper scope
+    /// `closure_over_captures` builds), and the closure body reads it
+    /// through `__force` at a strict or site-forced position and passes it
+    /// raw at a lazy one. GHC's partial application is exactly that: one
+    /// shared thunk per argument, forced at most once; left inline, the
+    /// body re-ran `maximum xs` in `filter (< maximum xs) xs` per element.
+    /// No evaluation moves earlier: the thunk is built, not forced, so a
+    /// partial application of a strict callee to a bottom argument is a
+    /// function value until it is called.
+    ///
+    /// An argument the emitter evaluates in place at every call site anyway
+    /// (cheap to force: a literal, a concrete variable, a native operator
+    /// over such — `arg_ast`'s eager branch) or passes as a bare reference
+    /// is emitted inside the body exactly as a full application would: it
+    /// costs no work to re-read, and a variable's own thunk already
+    /// memoizes for it. A suspension some other emission arm produces for
+    /// such an argument is hoisted too (hoisting a thunk is effect-free).
+    pub(super) fn captured_arg_ast(
+        &mut self,
+        a: &TExpr,
+        is_strict: bool,
+        site_forced: bool,
+        idx: usize,
+        hoisted: &mut Vec<Stmt>,
+    ) -> Expr {
+        let is_thunk = |e: &Expr| matches!(e, Expr::Call(h, _)
+            if matches!(h.as_ref(), Expr::Name(n) if n == "__thunk"));
+        if self.arg_suspends(a) {
+            let thunk = self.arg_ast(a, false);
+            debug_assert!(is_thunk(&thunk), "arg_suspends mirrors arg_ast");
+            let cname = format!("_pc{idx}");
+            hoisted.push(Stmt::Local(vec![cname.clone()], Some(thunk)));
+            return if is_strict || site_forced {
+                Expr::force(Expr::name(cname))
+            } else {
+                Expr::name(cname)
+            };
+        }
+        let arg_e = if site_forced {
+            self.site_forced_arg_ast(a)
+        } else {
+            self.arg_ast(a, is_strict)
+        };
+        if is_thunk(&arg_e) {
+            let cname = format!("_pc{idx}");
+            hoisted.push(Stmt::Local(vec![cname.clone()], Some(arg_e)));
+            Expr::name(cname)
+        } else {
+            arg_e
+        }
+    }
+
+    /// A closure over the captures `captured_arg_ast` hoisted: the bare
+    /// closure when there are none, else a wrapper IIFE binding them — its
+    /// own Lua function scope, so they never count toward the enclosing
+    /// function's local budget — that returns the closure.
+    pub(super) fn closure_over_captures(mut hoisted: Vec<Stmt>, closure: Expr) -> Expr {
+        if hoisted.is_empty() {
+            Expr::paren(closure)
+        } else {
+            hoisted.push(Stmt::Return(closure));
+            Expr::call(
+                Expr::paren(Expr::Func(vec![], FuncBody::Block(Block(hoisted)))),
+                vec![],
+            )
+        }
+    }
+
+    /// Is this function VALUE free to rebuild — does emitting it inside a
+    /// closure body, once per call, evaluate nothing? A name, an operator
+    /// or constructor, a method read off a dictionary, a lambda, a
+    /// parenthesized such; a partial application of such none of whose
+    /// arguments is work (`arg_suspends`); a composition of such. Anything
+    /// else — a call that yields a function,
+    /// a `case` or `if` choosing one, a let-bound section operand, a
+    /// partial application over an argument that is work — is bound once
+    /// at closure-build time as a suspension instead (compose_infix_ast):
+    /// rebuilt per call, the partial application would allocate fresh
+    /// captures every time and its operand would be computed per call.
+    fn fn_value_rebuilds_free(&self, e: &TExpr) -> bool {
+        let mut e = e;
+        while let TExprKind::Paren(inner) = &e.kind {
+            e = inner.as_ref();
+        }
+        let free_head = |h: &TExpr| matches!(&h.kind, TExprKind::Var(_) | TExprKind::Con(_)
+            | TExprKind::OpFunc(_) | TExprKind::DictAccess { .. } | TExprKind::DictMethod { .. });
+        match &e.kind {
+            TExprKind::Lambda { .. } => true,
+            _ if free_head(e) => true,
+            TExprKind::InfixApp { op, lhs, rhs } if op == "." => {
+                self.fn_value_rebuilds_free(lhs) && self.fn_value_rebuilds_free(rhs)
+            }
+            TExprKind::App(..) => {
+                let mut head = e;
+                let mut args: Vec<&TExpr> = Vec::new();
+                loop {
+                    match &head.kind {
+                        TExprKind::App(f, a) => {
+                            args.push(a.as_ref());
+                            head = f.as_ref();
+                        }
+                        TExprKind::Paren(inner) => head = inner.as_ref(),
+                        _ => break,
+                    }
+                }
+                free_head(head)
+                    && count_arrows(&e.ty) > 0
+                    && args.iter().all(|a| !self.arg_suspends(a))
+            }
+            _ => false,
         }
     }
 
@@ -1618,12 +1709,15 @@ impl CodeGen {
         };
         let arity = self.known_callee_arity(lhs);
         let callee = self.callee_ast(lhs);
-        let arg = self.arg_ast(rhs, rhs_strict);
         // A bare runtime head (`map $ f`, `modifyIORef $ r`) receives x and
         // the closure's parameters in its own positions, adapted where they
         // are runtime callbacks (adapt_runtime_args). A partially applied
         // head is a closure that adapts its own parameters already.
         if remaining > 0 {
+            // A partial application: x is a captured argument, shared
+            // across the closure's calls (captured_arg_ast).
+            let mut hoisted: Vec<Stmt> = Vec::new();
+            let arg = self.captured_arg_ast(rhs, rhs_strict, false, 0, &mut hoisted);
             let extra: Vec<String> =
                 (0..remaining).map(|i| format!("_pa{}", i)).collect();
             let mut cargs = vec![arg];
@@ -1634,13 +1728,15 @@ impl CodeGen {
                 .chain(Self::arrow_params(&expr.ty))
                 .collect();
             let cargs = self.adapt_runtime_args(lhs, cargs, &tys);
-            Expr::paren(Expr::Func(
+            let closure = Expr::Func(
                 extra,
                 FuncBody::Inline(vec![Stmt::Return(
                     Self::split_call_ast(callee, cargs, arity),
                 )]),
-            ))
+            );
+            Self::closure_over_captures(hoisted, closure)
         } else {
+            let arg = self.arg_ast(rhs, rhs_strict);
             let cargs = self.adapt_runtime_args(lhs, vec![arg], &[&rhs.ty]);
             Self::split_call_ast(callee, cargs, arity)
         }
@@ -1731,16 +1827,35 @@ impl CodeGen {
         let suspend = !f_strict && g_extras == 0;
         let f_arity = self.known_callee_arity(lhs);
         let g_arity = self.known_callee_arity(rhs);
-        let f_callee = self.callee_ast(lhs);
+        // Each side is a captured function value: one that is free to
+        // rebuild is emitted inside the composition's closure as before,
+        // any other is bound once, at build time, as a suspension the body
+        // forces per call (captured_arg_ast's rule; `(.)` is lazy in both
+        // sides, so neither is evaluated before the composition is applied
+        // — `(head fs . g) \`seq\` ()` never reads `fs`).
+        let mut hoisted: Vec<Stmt> = Vec::new();
+        let f_callee = if self.fn_value_rebuilds_free(lhs) {
+            self.callee_ast(lhs)
+        } else {
+            self.captured_arg_ast(lhs, true, false, 0, &mut hoisted)
+        };
         let inner = if g_extras == 0 {
-            let g_callee = self.callee_ast(rhs);
+            let g_callee = if self.fn_value_rebuilds_free(rhs) {
+                self.callee_ast(rhs)
+            } else {
+                self.captured_arg_ast(rhs, true, false, 1, &mut hoisted)
+            };
             let gargs = self.adapt_runtime_args(
                 rhs, vec![Expr::name("_x")], &Self::arrow_params(&rhs.ty));
             Self::split_call_ast(g_callee, gargs, g_arity)
         } else {
             let pb_params: Vec<String> =
                 (0..g_extras).map(|i| format!("_pb{}", i)).collect();
-            let g_callee = self.callee_ast(rhs);
+            let g_callee = if self.fn_value_rebuilds_free(rhs) {
+                self.callee_ast(rhs)
+            } else {
+                self.captured_arg_ast(rhs, true, false, 1, &mut hoisted)
+            };
             let mut gargs = vec![Expr::name("_x")];
             for p in &pb_params {
                 gargs.push(Expr::name(p.clone()));
@@ -1771,12 +1886,13 @@ impl CodeGen {
             .chain(outer.into_iter().skip(1))
             .collect();
         let fargs = self.adapt_runtime_args(lhs, fargs, &ftys);
-        Expr::paren(Expr::Func(
+        let closure = Expr::Func(
             outer_params,
             FuncBody::Inline(vec![Stmt::Return(
                 Self::split_call_ast(f_callee, fargs, f_arity),
             )]),
-        ))
+        );
+        Self::closure_over_captures(hoisted, closure)
     }
 
     /// The operator-table dispatch of the InfixApp arm — every operator

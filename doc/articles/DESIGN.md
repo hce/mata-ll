@@ -537,6 +537,36 @@ call. Partial application generates a closure:
     →  local function add(a, b) return a + b end
        local function inc(a) return add(1, a) end
 
+A closure captures its applied arguments the way GHC's partial
+application does: an argument that is work — not a literal, a variable,
+a constructor or native operator over such (`arg_suspends`) — is bound
+once, when the closure is built, as a memoizing suspension, and the
+body reads it through `__force` where the callee is strict in it and
+passes it raw where it is lazy (`captured_arg_ast`, the one place the
+rule lives). `map (add (slow n)) xs` computes `slow n` once:
+
+    (function()
+        local _pc0 = __thunk(function() return slow(n) end)
+        return function(_pa0) return add(__force(_pc0), _pa0) end
+    end)()
+
+The same rule serves a `$` whose result is still a function and a
+composition's sides: a side that is free to rebuild (a name, an
+operator, a lambda, a partial application over work-free arguments) is
+emitted inside the composition's closure, any other is bound once as a
+suspension the closure forces per call — so `(.)` stays lazy in both
+sides. Nothing is evaluated before the closure is applied: a partial
+application of a strict callee to a bottom is a function value until
+it is called. Sections take the same path through their desugaring: an
+operator section over an operand that is work is its lambda under a
+`let` binding the operand (`(< maximum xs)` is `let __op = maximum xs
+in \__sec -> __sec < __op`, GHC's own desugaring, in `modules.rs`); a
+section over a literal or variable stays the bare lambda every emitter
+and analysis reads. A point-free definition over a partial application
+(`inc = add (slow 10)`) is padded to its arity and emitted as the
+saturated call `add (slow 10) _eta0`, which evaluates the operand per
+call (the deviation is documented in HASKDIFF.md).
+
 ### Pattern matching
 
 Pattern matching compiles to nested if/elseif chains. Constructor

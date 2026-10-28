@@ -1041,6 +1041,7 @@ impl ModuleLoader {
         // spelling, binding every reference in the scope built above.
         let alias_names: HashSet<String> = alias_table.keys().cloned().collect();
         let chain_errors = std::cell::RefCell::new(Vec::new());
+        let section_operands = std::cell::Cell::new(0);
         let rename = Rename {
             vals: &tables.val, tys: &tables.ty, cons: &tables.con,
             con_fields: &self.con_fields, class_methods: &self.class_methods,
@@ -1048,6 +1049,7 @@ impl ModuleLoader {
             aliases: &alias_names, placeholders: &placeholders,
             fixities: &self.fixities, errors: &chain_errors,
             claimed: &self.prelude.claimed,
+            section_operands: &section_operands,
         };
         let mut own_decls: Vec<Decl> = Vec::new();
         for decl in &module.decls {
@@ -1574,6 +1576,7 @@ pub fn group_baseline(
     let aliases = HashSet::new();
     let placeholders = Placeholders::new(0);
     let errors = std::cell::RefCell::new(Vec::new());
+    let section_operands = std::cell::Cell::new(0);
     let rename = Rename {
         vals: &vals, tys: &tys, cons: &cons,
         con_fields: &con_fields, class_methods: &class_methods, fields: &fields,
@@ -1581,6 +1584,7 @@ pub fn group_baseline(
         aliases: &aliases, placeholders: &placeholders,
         fixities: fixity::prelude(), errors: &errors,
         claimed,
+        section_operands: &section_operands,
     };
     let grouped: Vec<Decl> = decls.iter().map(|d| rename.decl(d)).collect();
     debug_assert!(placeholders.into_made().is_empty(), "baseline names are all in scope");
@@ -1805,6 +1809,49 @@ struct Rename<'a> {
     errors: &'a std::cell::RefCell<Vec<Diagnostic>>,
     /// The spellings no local binder keeps (`PreludeScope::claimed`).
     claimed: &'a HashSet<String>,
+    /// Sections desugared so far whose operand is let-bound (see
+    /// `section`): the counter behind their `__opN` binder names.
+    section_operands: &'a std::cell::Cell<usize>,
+}
+
+/// Does evaluating this (resolved) expression run no user code — a
+/// literal, a variable, an operator or lambda value, a constructor applied
+/// to such, a native operator over such? Such an operand costs nothing to
+/// re-evaluate, so a section over it keeps the operand inside its lambda
+/// (see `Rename::section`); every other operand is a call, a `case`, a
+/// `let`, a range or a comprehension — work the section must share. The
+/// operator list is the codegen's `is_builtin_op` family minus `$`, which
+/// IS application (`f $ x` calls `f`; the constructor spelling `Just $ e`
+/// is construction) — the same line the codegen's cheapness predicate
+/// (`CodeGen::is_cheap_with`) draws.
+fn operand_is_call_free(e: &Expr) -> bool {
+    fn con_headed(e: &Expr) -> bool {
+        match e {
+            Expr::Con(_) => true,
+            Expr::App(f, _) => con_headed(f),
+            Expr::Paren(i) | Expr::Spanned(_, i) => con_headed(i),
+            _ => false,
+        }
+    }
+    match e {
+        Expr::Var(_) | Expr::Con(_) | Expr::Lit(_) | Expr::OpFunc(_) | Expr::Lambda { .. } => true,
+        Expr::Paren(i) | Expr::Negate(i) | Expr::Spanned(_, i) | Expr::Ascription(i, _) => {
+            operand_is_call_free(i)
+        }
+        Expr::Tuple(es) => es.iter().all(operand_is_call_free),
+        Expr::App(f, a) => con_headed(f) && operand_is_call_free(f) && operand_is_call_free(a),
+        Expr::RecordCon { fields, .. } => fields.iter().all(|(_, e)| operand_is_call_free(e)),
+        Expr::InfixApp { op, lhs, rhs } => {
+            let native = matches!(op.as_str(), "+" | "-" | "*" | "/" | "==" | "/=" | "<" | ">"
+                | "<=" | ">=" | "++" | "<>" | "&&" | "||" | ":" | "." | "div" | "mod" | "quot" | "rem");
+            (native || (op == "$" && con_headed(lhs)))
+                && operand_is_call_free(lhs) && operand_is_call_free(rhs)
+        }
+        Expr::If { cond, then_branch, else_branch } => {
+            operand_is_call_free(cond) && operand_is_call_free(then_branch) && operand_is_call_free(else_branch)
+        }
+        _ => false,
+    }
 }
 
 impl Rename<'_> {
@@ -2306,6 +2353,21 @@ impl Rename<'_> {
 
     /// Check a section's operand against the section operator's fixity and
     /// rewrite the section to the lambda it stands for.
+    ///
+    /// The operand is evaluated at most ONCE, however often the section is
+    /// applied: GHC desugars `(op e)` as `let y = e in \x -> x op y` and
+    /// `(e op)` as `(op) e`, so `filter (< maximum xs) xs` computes
+    /// `maximum xs` once, not per element. An operand that performs no
+    /// work when evaluated (`operand_is_call_free`: a literal, a variable,
+    /// a constructor over such, a native operator over such) is spelled
+    /// inside the lambda, where every emitter and analysis already reads a
+    /// section's shape; any other operand is let-bound around the lambda,
+    /// exactly GHC's desugaring, and the let is lazy like any other — a
+    /// section over a bottom operand is still a function value, and the
+    /// operand is forced the first time an application reads it. The
+    /// binder lives in the compiler's reserved `__` namespace. Partial
+    /// applications share their captured arguments the same way, in
+    /// codegen (`CodeGen::captured_arg_ast`).
     fn section(&self, op: &ChainOp, side: SectionSide, operand: &Expr, bound: &HashSet<String>) -> Expr {
         let op = match self.operator(op, bound) {
             Ok(op) => op,
@@ -2326,14 +2388,31 @@ impl Rename<'_> {
             return self.chain_error(*diag);
         }
         let x = Box::new(Expr::Var("__sec".into()));
-        let operand = Box::new(operand);
-        let (lhs, rhs) = match side {
-            SectionSide::Left => (operand, x),
-            SectionSide::Right => (x, operand),
+        let shared = if operand_is_call_free(&operand) {
+            None
+        } else {
+            let n = self.section_operands.get();
+            self.section_operands.set(n + 1);
+            Some(format!("__op{n}"))
         };
-        Expr::Lambda {
+        let captured = Box::new(match &shared {
+            Some(name) => Expr::Var(name.clone()),
+            None => operand.clone(),
+        });
+        let (lhs, rhs) = match side {
+            SectionSide::Left => (captured, x),
+            SectionSide::Right => (x, captured),
+        };
+        let lambda = Expr::Lambda {
             params: vec!["__sec".into()],
             body: Box::new(Expr::InfixApp { op: op.name, lhs, rhs }),
+        };
+        match shared {
+            Some(name) => Expr::Let {
+                binds: vec![LocalDef { name, patterns: Vec::new(), body: operand, sig: None }],
+                body: Box::new(lambda),
+            },
+            None => lambda,
         }
     }
 
