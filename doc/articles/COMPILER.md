@@ -177,21 +177,28 @@ Order matters because later passes depend on earlier registrations:
   family).
 - **Typeclass handling** (`typechecker/solve.rs`) — resolves which instance
   satisfies each constraint; this feeds monomorphization. Every class
-  method carries its class's constraint on the class variable
-  (`method_constraints`: `register_builtin_class` in `prelude.rs` lists
-  it per builtin method, `register_class` synthesizes it for a source
-  class), and `emit_use_constraints` turns each use into a *wanted* at
-  the instantiated type. At the end of `check_function`,
+  method carries its class's constraint on the class variable and the
+  method signature's own context (`method_constraints`:
+  `register_builtin_class` in `prelude.rs` lists both per builtin
+  method — `traverse`'s `Traversable t` and `Applicative f` —
+  `register_class` synthesizes the class's and keeps the source
+  signature's through `class_method_own_context`, which rejects at the
+  declaration what the list cannot hold: a constraint on the class
+  variable, a compound argument, an unknown class, a variable the type
+  does not mention), and `emit_use_constraints` turns each use into a
+  *wanted* at the instantiated type. At the end of `check_function`,
   `discharge_wanted_constraints` (`infer.rs`) judges the leftovers in one
   place: a wanted with no instance is "No instance"; one mentioning a
   variable the binding's FINAL type does not determine (the `determined`
   set — the only place that decision is made, after every clause's
   unification) is "Ambiguous type", after `compute_numeric_defaults` has
   applied Haskell 2010 defaulting; one on a signature variable the
-  declared context (or, for an instance method, the class method's own
-  constraints — `instance_method_givens`) does not provide is the
-  missing-context rejection. The monad hierarchy takes exactly these
-  paths. A let/where group keeps monomorphic the variables its pending
+  declared context does not provide is the missing-context rejection
+  (an instance method's declared context is the instance's context
+  followed by the class method's own constraints — `check_instance`
+  declares both under the method's minted name, so the body's givens
+  and the dictionary convention come from one list). The monad
+  hierarchy takes exactly these paths. A let/where group keeps monomorphic the variables its pending
   wanteds still need once reduced through the instances
   (`constraint_bound_vars`: `Monad (ST s)` needs nothing of `s`) and
   replaces a wanted over a variable it generalized by that residual
@@ -308,9 +315,15 @@ constant folding (§7) can then recognize them.
   effort (the retained generic copy). The container shapes' Eq, Ord,
   Show and Hashable dictionaries are synthesized per shape
   (`structural_dict`), and a method with constraints of its own
-  (`method_dict_constraints`: `traverse`'s `Applicative f`) has
-  dictionary parameters for them in its dictionary form, applied at
-  every dictionary-routed use (`dict_method_use`). A HashMap `hm*`
+  (`method_dict_constraints`: `traverse`'s `Applicative f`, a source
+  class's `describeWith :: Show b => …`) has dictionary parameters for
+  them in its dictionary form, after the instance context's, applied at
+  every dictionary-routed use (`dict_method_use`); a ground type whose
+  head instance has a context and such a method is composed rather than
+  tabled (`head_method_needs_context`), and the method's function at
+  the instance carries the same constraints in `fn_constraints`, so
+  past the specialization cap it is rewritten dictionary-passing like
+  any constrained function. A HashMap `hm*`
   operation takes the same decision through `hm_op_use`: at a concrete
   structural key type it becomes a wrapper threading the generated key
   encoder (`structural_key_enc`, Hashable's `__hashKey` at that type)

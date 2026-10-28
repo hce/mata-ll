@@ -644,13 +644,37 @@ impl Checker {
             // "determined" and never reported as ambiguous — the same reason
             // `show x` resolves silently while `show (read s)` does not.
             let mentions_class_var = ty.free_vars().iter().any(|v| v.name == type_var);
+            let mut constraints: Vec<TyConstraint> = Vec::new();
             if mentions_class_var {
+                constraints.push(TyConstraint {
+                    class_name: name.to_string(),
+                    type_var: type_var.to_string(),
+                });
+            }
+            // The method's OWN context (`describeWith :: Show b => a -> b
+            // -> String`) is part of the method's type, exactly as
+            // `traverse`'s `Applicative f` is part of traverse's: each
+            // (class, variable) pair joins the class's constraint in
+            // `method_constraints`, and the three consumers of that list
+            // carry it from there — a use emits it as a wanted at the
+            // instantiated type (`emit_use_constraints`), an instance or
+            // default body receives it as a given on the method's own
+            // variables (`method_context` in check_instance), and the
+            // monomorphizer's dictionary convention gives it a dictionary
+            // parameter (`method_dict_constraints`). `ast_type_to_ty` above
+            // strips the context from the scheme, which is right: the
+            // scheme is the method's TYPE, this list its CONTEXT, as for
+            // every builtin method. Only the Haskell 2010 form `C tyvar`
+            // over one of the method's own variables can travel this way;
+            // the other shapes are rejected here, at the declaration, with
+            // the reason, rather than silently dropped (the old behaviour:
+            // the context vanished and every body using it was refused
+            // with a misleading "the signature does not require").
+            constraints.extend(self.class_method_own_context(name, type_var, method, &ty));
+            if !constraints.is_empty() {
                 self.method_constraints
                     .entry(method.name.clone())
-                    .or_insert_with(|| vec![TyConstraint {
-                        class_name: name.to_string(),
-                        type_var: type_var.to_string(),
-                    }]);
+                    .or_insert(constraints);
             }
 
             // Store default implementation if present
@@ -666,6 +690,117 @@ impl Checker {
             methods: method_types,
             default_methods,
         });
+    }
+
+    /// The constraints a class method's own signature context adds to the
+    /// class's (see `register_class`), as `method_constraints` entries,
+    /// after the shapes the machinery cannot carry are rejected at the
+    /// declaration: a class that is not in scope; a compound constraint
+    /// argument (`Show (f a)`), which no name-keyed consumer could match;
+    /// a constraint on the class variable itself, which Haskell 2010
+    /// (§4.1.3) forbids and GHC admits only through
+    /// ConstrainedClassMethods — an instance body would need that class's
+    /// evidence at the INSTANCE type, which neither the givens (bare
+    /// variables) nor the dictionary convention carries; and a constraint
+    /// on a variable the method's type does not mention, which GHC rejects
+    /// as ambiguous (no use could ever determine it, so no use could ever
+    /// discharge it). `ty` is the converted method type (context stripped).
+    fn class_method_own_context(
+        &mut self,
+        class_name: &str,
+        type_var: &str,
+        method: &ClassMethod,
+        ty: &Ty,
+    ) -> Vec<TyConstraint> {
+        let mut sig = &method.ty;
+        while let Type::Forall { inner, .. } | Type::Paren(inner) = sig {
+            sig = inner;
+        }
+        let Type::Constrained { constraints, .. } = sig else {
+            return Vec::new();
+        };
+        let ctx = format!("the signature of method '{}' in class '{}'", method.name, class_name);
+        let method_vars: HashSet<String> = ty.free_vars().into_iter().map(|v| v.name).collect();
+        let mut own: Vec<TyConstraint> = Vec::new();
+        for c in constraints {
+            let mut arg = &c.type_arg;
+            while let Type::Paren(inner) = arg {
+                arg = inner;
+            }
+            let shown_arg = super::kind::show_ast_type(arg);
+            let spelled = match arg {
+                Type::App(..) | Type::Arrow(..) => format!("{} ({})", c.class_name, shown_arg),
+                _ => format!("{} {}", c.class_name, shown_arg),
+            };
+            // Known: a builtin or previously registered class, or any class
+            // this module declares (registered by the kind pass, pass 1b,
+            // whatever its position in the file).
+            if !self.classes.contains_key(&c.class_name)
+                && !self.class_kinds.contains_key(&c.class_name)
+            {
+                let kind = self.unknown_class(&c.class_name);
+                self.push_error_ctx_note(kind, ctx,
+                    format!(
+                        "the context of a class method names the classes a use of the \
+                         method must provide and an instance body may assume, so '{}' \
+                         must be a class that is in scope here",
+                        c.class_name));
+                return Vec::new();
+            }
+            let Type::Var(v) = arg else {
+                self.push_error_ctx_note(
+                    DiagnosticKind::Other(format!(
+                        "Constraint '{}' in the signature of method '{}' must apply the class \
+                         to a plain type variable (the Haskell 2010 form 'C a')",
+                        spelled, method.name)),
+                    ctx,
+                    "a class method's context travels with the method as (class, type \
+                     variable) pairs: a use site checks each pair at the type it \
+                     instantiates the variable to, and an instance body assumes it of \
+                     that variable. A compound argument names no single variable, so \
+                     mata-ll cannot carry it. GHC accepts it; move the constraint to the \
+                     functions that use the method, or constrain the variable itself.");
+                return Vec::new();
+            };
+            if v == type_var {
+                self.push_error_ctx_note(
+                    DiagnosticKind::Other(format!(
+                        "Constraint '{}' in the signature of method '{}' constrains the class \
+                         variable '{}' of class '{}'",
+                        spelled, method.name, type_var, class_name)),
+                    ctx,
+                    format!(
+                        "Haskell 2010 (§4.1.3) does not allow a method's context to constrain \
+                         the class variable, and mata-ll does not carry one: an instance body \
+                         would need '{}' at the instance type as evidence, and the method's \
+                         context reaches a body only as constraints on the method's own \
+                         variables. GHC accepts it with ConstrainedClassMethods (on by default \
+                         since GHC2021). Make '{}' a superclass ('class {} {} => {} {}') or put \
+                         the constraint on the functions that use '{}'.",
+                        c.class_name, c.class_name, c.class_name, type_var, class_name, type_var,
+                        method.name));
+                return Vec::new();
+            }
+            if !method_vars.contains(v) {
+                self.push_error_ctx_note(
+                    DiagnosticKind::Other(format!(
+                        "Constraint '{}' in the signature of method '{}' mentions the type \
+                         variable '{}', which the method's type does not",
+                        spelled, method.name, v)),
+                    ctx,
+                    format!(
+                        "nothing at a use of '{}' could determine '{}', so the constraint \
+                         could never be discharged — GHC rejects the signature as ambiguous \
+                         (\"Could not deduce ({} {}0)\").",
+                        method.name, v, c.class_name, v));
+                return Vec::new();
+            }
+            let entry = TyConstraint { class_name: c.class_name.clone(), type_var: v.clone() };
+            if !own.iter().any(|o| o.class_name == entry.class_name && o.type_var == entry.type_var) {
+                own.push(entry);
+            }
+        }
+        own
     }
 
     /// Extract the head type constructor name from a Type.
@@ -1062,16 +1197,30 @@ impl Checker {
         }).collect();
 
         // The class method's own constraints beyond the class's (`traverse`'s
-        // `Applicative f`), over the method type's variable names — what a
-        // method body may assume of the method's own variables, exactly as
-        // GHC puts the method signature's context in scope in an instance
-        // body. The class's own constraint is the instance itself (its
-        // context above says what the instance's variables provide).
-        let method_givens = |checker: &Self, method: &str| -> Vec<(String, Ty)> {
-            checker.method_constraints.get(method).map(|cs| cs.iter()
-                .filter(|c| !(c.class_name == class_name && c.type_var == class_info.type_var))
-                .map(|c| (c.class_name.clone(), Ty::Var(TyVar { name: c.type_var.clone(), id: u32::MAX })))
-                .collect()).unwrap_or_default()
+        // `Applicative f`, a source class's `describeWith :: Show b => …`),
+        // over the method type's variable names. The method's function at
+        // this instance is a constrained function whose context is the
+        // instance's context FOLLOWED BY these: `check_function` lets the
+        // body assume both (the skolem givens), and the monomorphizer gives
+        // both dictionary parameters when the function goes dictionary-
+        // passing (past the specialization cap, or called from a
+        // dictionary-passing body at a still-polymorphic `b`) — the
+        // instance's dictionaries first, then the method's own, the order
+        // the instance's dictionary form takes them in (`ensure_dictform`).
+        // Kept apart from the context (a table of body givens alone), the
+        // method's own constraints reached the body's givens only, and the
+        // function past the cap became a type-erased shared copy whose
+        // `show b` printed a constructor tag. The class's own constraint is
+        // the instance itself (its context above says what the instance's
+        // variables provide).
+        let method_context = |checker: &Self, method: &str| -> Vec<(String, Ty)> {
+            let mut declared = ctx_fresh.clone();
+            if let Some(cs) = checker.method_constraints.get(method) {
+                declared.extend(cs.iter()
+                    .filter(|c| !(c.class_name == class_name && c.type_var == class_info.type_var))
+                    .map(|c| (c.class_name.clone(), Ty::Var(TyVar { name: c.type_var.clone(), id: u32::MAX }))));
+            }
+            declared
         };
 
         for method_def in methods {
@@ -1104,14 +1253,11 @@ impl Checker {
 
             // Type-check the instance method against the specialized type,
             // with the instance's declared context and the method's own
-            // constraints in scope for its body.
-            if !ctx_fresh.is_empty() {
+            // constraints as its declared context.
+            let declared = method_context(self, &method_def.name);
+            if !declared.is_empty() {
                 self.fn_contexts.insert(mangled_name.clone(),
-                    FnContext { declared: ctx_fresh.clone(), ..FnContext::default() });
-            }
-            let givens = method_givens(self, &method_def.name);
-            if !givens.is_empty() {
-                self.instance_method_givens.insert(mangled_name.clone(), givens);
+                    FnContext { declared, ..FnContext::default() });
             }
             if let Some(tfun) = self.check_function(&mangled_name, &method_def.clauses, &method_ty) {
                 result_fns.push(tfun);
@@ -1132,15 +1278,11 @@ impl Checker {
                 instance_info.method_fns.insert(method_name.clone(), mangled_name.clone());
 
                 // A default body is checked at this instance's type, so it
-                // gets the same declared context and method givens as an
-                // explicit method body.
-                if !ctx_fresh.is_empty() {
+                // gets the same declared context as an explicit method body.
+                let declared = method_context(self, method_name);
+                if !declared.is_empty() {
                     self.fn_contexts.insert(mangled_name.clone(),
-                        FnContext { declared: ctx_fresh.clone(), ..FnContext::default() });
-                }
-                let givens = method_givens(self, method_name);
-                if !givens.is_empty() {
-                    self.instance_method_givens.insert(mangled_name.clone(), givens);
+                        FnContext { declared, ..FnContext::default() });
                 }
                 if let Some(tfun) = self.check_function(&mangled_name, default_clauses, &specialized_ty) {
                     result_fns.push(tfun);

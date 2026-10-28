@@ -44,6 +44,48 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A class method's own context is part of the method's type, as in
+  GHC** (`class Describe a where describeWith :: Show b => a -> b ->
+  String` with `instance Describe Bool where describeWith _ b = show b`
+  was rejected "No instance for 'Show b': … the signature does not
+  require 'Show b'" at the instance body, and `class Container f where
+  showAll :: Show a => f a -> [String]; showAll c = map show (toL c)`
+  at the default body, where GHC compiles and runs them). The class
+  declaration converted each method signature with the context
+  discarded, so the method carried only its class's constraint: nothing
+  reached the body as a given, and nothing was checked at a use. Now the
+  signature's context — every `C tyvar` over the method's own variables
+  — joins the class's constraint in the method's constraint list, the
+  one list every consumer already read for the builtin `traverse ::
+  (Traversable t, Applicative f) => …`: a use emits it at the
+  instantiated type (`describeWith True Opaque` with no `Show Opaque` is
+  "No instance for 'Show Opaque'" at the use, as GHC; a use nothing
+  determines is ambiguous; a use under a caller's `Show b` is
+  discharged by it; `Semigroup m` does not discharge `Monoid m`), an
+  instance body or a default body may assume it of the method's own
+  variables (`==` under `Ord b` through the superclass), and it travels
+  through a constrained existential. The method's function at an
+  instance is a constrained function whose context is the instance's
+  followed by the method's own, so the monomorphizer treats it as one:
+  past the specialization limit it goes dictionary-passing with the
+  method's dictionaries instead of becoming a type-erased shared copy
+  (which showed `T:1` for `T:Red` from the thirteenth `b` type on); its
+  dictionary form takes them after the context's; a concrete-head
+  instance with a monomorphic or nullary sibling method still has a
+  dictionary form (the siblings are their own); a nullary method with a
+  context of its own (`emptyOf :: Monoid m => f m`) is a closure over
+  its dictionaries in a composed dictionary; and a context instance
+  (`instance Container f => Container (Wrap f)`) used at a ground type
+  through a dictionary is composed, so the context's dictionary is
+  closed over before the method's own arrive. What the machinery cannot
+  carry is rejected at the class declaration with the reason instead of
+  silently dropped: a constraint on the class variable itself (`m :: Eq
+  a => a -> Bool` — Haskell 2010 §4.1.3 forbids it; GHC admits it
+  through ConstrainedClassMethods, on by default since GHC2021: a
+  documented deviation, see HASKDIFF.md), a compound constraint argument
+  (`Show (f a)`), a class not in scope, and a constraint on a variable
+  the method's type does not mention (GHC: ambiguous). Found by the
+  2026-10 fresh-eyes review (T15).
 - **An instance declaration's superclass requirement is decided by
   instance resolution under the instance's context, as GHC decides it**
   (`class Eq a => Container a` with `instance Eq a => Container [a]` or

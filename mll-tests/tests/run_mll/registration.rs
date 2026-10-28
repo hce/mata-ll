@@ -232,6 +232,18 @@ mll_test!(dict_superclass_closure, "dict_superclass_closure.mll");
 // or derived witness and `Ord a` providing `Eq a` are accepted and run
 // as GHC, specialized and through dictionaries alike.
 mll_test!(superclass_structural, "superclass_structural.mll");
+// T15: a class method's own context (`describeWith :: Show b => …`) is
+// part of the method's type — emitted at a use, assumed by an instance or
+// default body, discharged by a caller's context or a superclass, carried
+// through an existential.
+mll_test!(method_context, "method_context.mll");
+// T15: the same context in the monomorphizer's worlds — the instance
+// method past the specialization limit takes a dictionary (not a
+// type-erased copy), the dictionary forms take the method's dictionaries
+// after the context's, a concrete-head instance with monomorphic and CAF
+// siblings has a dictionary form, a nullary method with its own context
+// is a closure, a context instance at a ground type is composed.
+mll_test!(method_context_dict, "method_context_dict.mll");
 // T2: a derived instance of a parameterized type records GHC's derived
 // context and has a dictionary form, so it stays correct past the
 // specialization limit and inside dictionary-passing bodies; a phantom

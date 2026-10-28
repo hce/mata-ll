@@ -863,6 +863,22 @@ generic over them, as in GHC. The differences:
   compile-time "No instance" error. (Previously this ambiguity check
   existed only for the builtin classes; it now applies uniformly to
   every source-defined class.)
+- **A class method's own context is part of its type**, as in GHC:
+  `class Describe a where describeWith :: Show b => a -> b -> String`
+  lets an instance body (or a default body) use `show b`, and a use of
+  `describeWith` at a `b` with no Show instance is a compile-time "No
+  instance" at the use. Two shapes GHC accepts are rejected at the class
+  declaration, with the reason: a constraint on the **class variable
+  itself** (`class C a where m :: Eq a => a -> Bool`) — Haskell 2010
+  §4.1.3 forbids it and GHC admits it only through
+  ConstrainedClassMethods (on by default since GHC2021); mata-ll carries
+  a method's context as constraints on the method's own variables, so
+  make `Eq` a superclass (`class Eq a => C a`) or put the constraint on
+  the functions that use `m` — and a **compound constraint argument**
+  (`showIt :: Show (f a) => f a -> String`), which names no single
+  variable for a use site to check or an instance body to assume: move
+  it to the functions that use the method, or constrain the variable
+  itself.
 - **User instances of Functor, Applicative and Monad carry GHC's
   defaults.** An instance writes `fmap`; `pure` and either `<*>` or
   `liftA2`; and `>>=` — `<$>` defaults to `fmap`, `<*>`/`liftA2` to each

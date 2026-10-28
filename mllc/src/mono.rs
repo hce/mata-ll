@@ -4703,6 +4703,23 @@ impl Monomorphizer {
                 && inst.method_fns.values().any(|f| self.dict_passing_fns.contains(f)))
     }
 
+    /// Does a method of `class_name` carry constraints of its own
+    /// (`method_dict_constraints`) while `ty`'s head instance has a context
+    /// (`instance Container f => Container (Wrap f)`)? Such a method has no
+    /// specialization at the ground type — its own variable stays free —
+    /// so its entry is the instance's dictionary form, which takes the
+    /// context's dictionaries before the method's own: the dictionary
+    /// must be COMPOSED (the context dictionaries closed over), as for a
+    /// polymorphic type. A static table naming the dictionary form bare
+    /// handed the caller's Monoid dictionary to the context parameter.
+    fn head_method_needs_context(&self, class_name: &str, ty: &Ty) -> bool {
+        let Some(head) = InstHead::of(ty) else { return false };
+        let Some(inst) = self.instances.get(&(class_name.to_string(), head)) else { return false };
+        inst.context.as_ref().is_some_and(|ctx| !ctx.is_empty())
+            && self.classes.get(class_name).is_some_and(|ci| ci.methods.iter()
+                .any(|(m, _)| self.method_dict_constraints.contains_key(m)))
+    }
+
     /// Build a runtime dictionary EXPRESSION for `class_name` at type `ty`,
     /// inside a dictionary-passing body whose own dictionaries are `ev`'s
     /// parameters (empty in the main walk, where the only evidence is the
@@ -4792,7 +4809,9 @@ impl Monomorphizer {
     ///     methods are shape-generic, e.g. `show`).
     fn decide_dict(&mut self, class_name: &str, ty: &Ty, ev: &DictEnv) -> TExpr {
         let over_hidden = Self::contains_skolem(ty) && self.has_skolem_dicts(ty);
-        if (!ty.free_vars().is_empty() || over_hidden || self.head_method_is_dict_passing(class_name, ty))
+        if (!ty.free_vars().is_empty() || over_hidden
+                || self.head_method_is_dict_passing(class_name, ty)
+                || self.head_method_needs_context(class_name, ty))
             && let Some(dict) = self.compose_instance_dict(class_name, ty, ev)
         {
             return dict;
@@ -5368,14 +5387,35 @@ impl Monomorphizer {
         let mut work: Vec<(String, String, String)> = Vec::new();
         for (method, method_sig) in &class_info.methods {
             let base = inst.method_fns.get(method)?.clone();
+            // The arity that decides the DictCtor field shape: a closure
+            // over the context dictionaries for arity > 0, the constructed
+            // VALUE for a nullary method (see SpecKind::DictCtor). The
+            // method's own dictionaries (`method_dict_constraints`) count
+            // as parameters here: a use applies them to the field
+            // (`dict_method_use`), so a nullary method with a context of
+            // its own is a closure, never a value built from the context
+            // dictionaries alone.
+            let own_dicts = self.method_dict_constraints.get(method).map_or(0, |cs| cs.len());
+            let arity = Self::spine_arrow_count(method_sig) + own_dicts;
             if !self.poly_fns.contains_key(&base) {
-                return None;
+                // A monomorphic method of a concrete-head instance
+                // (`plain·Bool :: Bool -> String` beside `describeWith·Bool
+                // :: Show b => Bool -> b -> String`): a concrete head
+                // declares no context, and a method with constraints of
+                // its own is polymorphic in their variables, so this
+                // function takes no dictionary at all and is its own
+                // dictionary form. Refusing the whole instance here (as
+                // this used to) left the sibling with a dictionary built
+                // from specializations, whose `describeWith` entry took
+                // no Show dictionary and read the caller's as its flag.
+                if !ctx.is_empty() || own_dicts > 0 {
+                    return None;
+                }
+                names.push((method.clone(), base, arity));
+                continue;
             }
             let dictform = crate::ast::minted(&format!("{}_", base), "dictform");
-            // The method's VALUE arity decides the DictCtor field shape:
-            // a closure over the context dictionaries for arity > 0, the
-            // constructed VALUE for a nullary method (see SpecKind::DictCtor).
-            names.push((method.clone(), dictform.clone(), Self::spine_arrow_count(method_sig)));
+            names.push((method.clone(), dictform.clone(), arity));
             work.push((method.clone(), base, dictform));
         }
         // Seed the cache BEFORE rewriting bodies: a method whose body uses

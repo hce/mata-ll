@@ -705,19 +705,16 @@ impl Checker {
         // evidence. GADT refinement happens BEFORE this (at pattern time), so a
         // refined variable is concrete by the time the body is checked and is
         // never skolemized. See `skolemize_sig_body_vars` / `check_clause`.
+        // The declared context: a top-level function's signature context,
+        // or — for an instance method — the instance's context followed by
+        // the class method's own constraints (check_instance declares both;
+        // `traverse·[]` gets `Applicative f`, `describeWith·Bool` its
+        // `Show b`), so the body may assume them and a dictionary-passing
+        // copy takes their dictionaries, exactly as for a constrained
+        // top-level function.
         let declared_context = self.fn_contexts.get(name).cloned().unwrap_or_default();
-        // What the BODY may assume: the declared context and, for an
-        // instance method, the class method's own constraints
-        // (`instance_method_givens`). The latter are evidence for the body
-        // alone — they join the skolem givens and `declared_cvars` below,
-        // never `at_use`/`at_dict` (a caller sees the instance, not these).
-        let method_givens = self.instance_method_givens.get(name).cloned().unwrap_or_default();
-        let body_context = FnContext {
-            declared: declared_context.declared.iter().chain(method_givens.iter()).cloned().collect(),
-            ..FnContext::default()
-        };
         let (sig_skolems, demote) =
-            self.skolemize_sig_body_vars(&fresh_ty, &body_context, &renames);
+            self.skolemize_sig_body_vars(&fresh_ty, &declared_context, &renames);
 
         // Re-express this function's declared constraints over the freshened
         // signature variables (the `at_use` epoch), so a caller can match each
@@ -760,14 +757,6 @@ impl Checker {
             .collect();
         if !at_use.is_empty() && let Some(cx) = self.fn_contexts.get_mut(name) {
             cx.at_use = at_use;
-        }
-        for (cls, arg) in &method_givens {
-            if let Ty::Var(sv) = arg {
-                let fresh_name = renames.get(&sv.name).unwrap_or(&sv.name);
-                if let Some(tv) = name_to_var.get(fresh_name) {
-                    declared_cvars.push((cls.clone(), tv.clone()));
-                }
-            }
         }
 
         // Add self for recursion

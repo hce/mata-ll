@@ -897,6 +897,153 @@ main = print (tag (1 :: Int))
     );
 }
 
+// T15: a class method's own context (`describeWith :: Show b => …`) is
+// part of the method's type. A use at a type with no instance is a
+// "No instance" at the USE (GHC: "No instance for (Show Opaque) arising
+// from a use of describeWith"); a use at a variable the caller's context
+// does not constrain enough is the missing-context rejection (GHC:
+// "Could not deduce (Monoid m)" — `Semigroup m` is not `Monoid m`); a
+// use nothing determines is ambiguous. The context used to be discarded
+// at the class declaration, so the instance BODY was refused instead
+// ("the signature does not require 'Show b'").
+#[test]
+fn method_context_use_without_instance_is_rejected() {
+    let source = r#"
+class Describe a where
+    describeWith :: Show b => a -> b -> String
+
+instance Describe Bool where
+    describeWith _ b = show b
+
+data Opaque = Opaque
+
+main :: IO ()
+main = putStrLn (describeWith True Opaque)
+"#;
+    let msg = expect_compile_error(source, &[], &["No instance for 'Show Opaque'", "definition of 'main'"]);
+    assert!(
+        !msg.contains("signature does not require"),
+        "the instance body must be accepted (the method's context is its given): {msg}"
+    );
+}
+
+#[test]
+fn method_context_not_provided_by_caller_context_is_rejected() {
+    let source = r#"
+class Container f where
+    cfold :: Monoid m => (a -> m) -> f a -> m
+
+newtype Box a = Box a
+
+instance Container Box where
+    cfold f (Box a) = f a
+
+useIt :: (Container f, Semigroup m) => (a -> m) -> f a -> m
+useIt = cfold
+
+main :: IO ()
+main = putStrLn (useIt show (Box (1 :: Int)))
+"#;
+    expect_compile_error(source, &[], &[
+        "No instance for 'Monoid m'",
+        "signature does not require 'Monoid m'",
+        "definition of 'useIt'",
+    ]);
+}
+
+#[test]
+fn method_context_undetermined_use_is_ambiguous() {
+    let source = r#"
+class Describe a where
+    describeWith :: Show b => a -> b -> String
+
+instance Describe Bool where
+    describeWith _ b = show b
+
+main :: IO ()
+main = putStrLn (describeWith True undefined)
+"#;
+    expect_compile_error(source, &[], &["Ambiguous type", "'Show' instance", "definition of 'main'"]);
+}
+
+// The shapes the method-context machinery cannot carry are rejected at
+// the class declaration with the reason, never dropped: a constraint on
+// the class variable (Haskell 2010 §4.1.3 forbids it; GHC admits it
+// through ConstrainedClassMethods — a documented deviation), a compound
+// constraint argument, a class not in scope, and a constraint on a
+// variable the method's type does not mention (GHC: ambiguous).
+#[test]
+fn method_context_on_class_variable_is_rejected() {
+    let source = r#"
+class C a where
+    m :: Eq a => a -> Bool
+
+main :: IO ()
+main = putStrLn "x"
+"#;
+    expect_compile_error(source, &[], &[
+        "Constraint 'Eq a' in the signature of method 'm' constrains the class variable 'a' of class 'C'",
+        "note:",
+        "Haskell 2010",
+        "ConstrainedClassMethods",
+        "class Eq a => C a",
+    ]);
+}
+
+#[test]
+fn method_context_compound_argument_is_rejected() {
+    let source = r#"
+class Container f where
+    showIt :: Show (f a) => f a -> String
+    showIt x = show x
+    toL :: f a -> [a]
+
+instance Container Maybe where
+    toL Nothing = []
+    toL (Just x) = [x]
+
+main :: IO ()
+main = putStrLn (showIt (Just (1 :: Int)))
+"#;
+    expect_compile_error(source, &[], &[
+        "Constraint 'Show (f a)' in the signature of method 'showIt' must apply the class to a plain type variable",
+        "note:",
+        "compound argument names no single variable",
+    ]);
+}
+
+#[test]
+fn method_context_unknown_class_is_rejected() {
+    let source = r#"
+class C a where
+    m :: Frob b => a -> b -> Bool
+
+main :: IO ()
+main = putStrLn "x"
+"#;
+    expect_compile_error(source, &[], &[
+        "Unknown typeclass 'Frob'",
+        "signature of method 'm' in class 'C'",
+        "must be a class that is in scope",
+    ]);
+}
+
+#[test]
+fn method_context_on_unmentioned_variable_is_rejected() {
+    let source = r#"
+class C a where
+    m :: Show c => a -> Bool
+
+main :: IO ()
+main = putStrLn "x"
+"#;
+    expect_compile_error(source, &[], &[
+        "Constraint 'Show c' in the signature of method 'm' mentions the type variable 'c', which the method's type does not",
+        "note:",
+        "ambiguous",
+    ]);
+}
+
 #[test]
 fn num_unit_is_rejected() {
     let source = r#"

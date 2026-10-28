@@ -1,0 +1,32 @@
+T:1
+T:"s"
+T:[1]
+T:[True]
+T:Just 2
+T:Just "m"
+T:(1,2)
+T:(1,"p")
+T:("q",True)
+T:[[1]]
+T:[Just 3]
+T:Just [4]
+T:Red
+T:[Green]
+T:Just Red
+T:(Red,Green)
+T:[(1,Red)]
+T:Just (Just Green)
+T:[[Red]]
+F:Just [Red]
+T:[Red,Green]
+T:Just Green|Just Green
+T:TrueyesT:Red
+F:[False]|[False]noF:Red|Red
+T:[[[True]]]|[[[True]]]|[[[True]]]|[[[True]]]yesT:Red|Red|Red|Red
+!
+[[],[]]
+[[],[]]
+|1[[]]
+|2[[],[]]
+|2[[],[]]
+|1[[]]

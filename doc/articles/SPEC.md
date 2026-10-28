@@ -904,9 +904,17 @@ gaps locally.
 ## Consequences
 
 - Typeclass method implementations are checked against the method's
-  declared signature, not inferred independently. Inside an instance
-  body the method signature's own context is in scope as well
-  (`traverse`'s `Applicative f`), as in GHC.
+  declared signature, not inferred independently. A method signature's
+  own context (`traverse`'s `Applicative f`; a source class's
+  `describeWith :: Show b => a -> b -> String`) is part of the method's
+  type: inside an instance body or a default body it is in scope as a
+  given on the method's own variables, and a use of the method emits it
+  at the instantiated type alongside the class's constraint, as in GHC.
+  It must be in the Haskell 2010 form `C tyvar` over one of the
+  method's own variables — a constraint on the class variable itself,
+  a compound argument such as `Show (f a)`, or a variable the method's
+  type does not mention is rejected at the class declaration (see
+  HASKDIFF.md, "Typeclasses").
 - Every use of a class method emits that class's constraint — `succ`
   wants `Enum a`, `>>=` wants `Monad m`, exactly as `show` wants `Show
   a` — and the constraints left over at a definition's boundary are

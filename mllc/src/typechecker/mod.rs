@@ -682,18 +682,6 @@ pub struct Checker {
     /// — a compound constraint like `GEncode (Rep a)` keeps its shape — with
     /// a field per spelling. See [`FnContext`].
     fn_contexts: HashMap<String, FnContext>,
-    /// Per instance method (by its minted name): the class method's OWN
-    /// constraints beyond the class's (`traverse`'s `Applicative f`), over
-    /// the method type's variable names. Givens for the method's body —
-    /// `instance Traversable [] where traverse f xs = list_traverse f xs`
-    /// uses an Applicative method at `f`, as GHC allows because the method
-    /// signature's context is in scope in an instance body — and nothing
-    /// else: they are no part of the function's dictionary convention,
-    /// which the monomorphizer composes from the instance context and
-    /// `method_dict_constraints`, so they live apart from `fn_contexts`
-    /// (whose entries, even empty ones, the monomorphizer reads as "this
-    /// function has a declared context").
-    instance_method_givens: HashMap<String, Vec<(String, Ty)>>,
     /// Class constraints carried by a class method, keyed by method name
     /// (e.g. "show" -> [Show a]). Instantiating the method emits a wanted
     /// constraint on the freshened type so it can be discharged.
@@ -825,7 +813,6 @@ impl Checker {
             local_types: HashSet::new(),
             orphan_check_enabled: false,
             fn_contexts: HashMap::new(),
-            instance_method_givens: HashMap::new(),
             method_constraints: HashMap::new(),
             wanted: Vec::new(),
             lit_pat_eq_wanted: Vec::new(),

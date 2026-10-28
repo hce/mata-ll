@@ -2282,6 +2282,18 @@ impl CodeGen {
                     let impl_ref = self.lua_ref(&sv);
                     let mut impl_args: Vec<Expr> =
                         dict_params.iter().map(|p| Expr::name(p.clone())).collect();
+                    if *arity == 0 && n_dicts == 0 {
+                        // A nullary method of a concrete-head instance that
+                        // takes no dictionary of its own (`ensure_dictform`
+                        // names the method's function itself): the field
+                        // holds that CAF's value, as a static dictionary's
+                        // would — there is nothing to apply.
+                        items.push(Item::KV(
+                            format!("{} = ", self.dict_field(m)),
+                            Expr::name(impl_ref),
+                        ));
+                        continue;
+                    }
                     if *arity == 0 {
                         items.push(Item::KV(
                             format!("{} = ", self.dict_field(m)),
