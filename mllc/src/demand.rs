@@ -2176,7 +2176,7 @@ fn pattern_demand(pat: &TPattern, body: &DemandMap) -> Option<Demand> {
             pattern_demand(inner, body).or_else(|| body.get(name).cloned())
         }
         TPattern::Wildcard => None,
-        TPattern::LitPat(..) => Some(Demand::Head),
+        TPattern::LitPat(..) | TPattern::LitEq { .. } => Some(Demand::Head),
         TPattern::Paren(inner) => pattern_demand(inner, body),
         TPattern::Tuple(ps) => Some(Demand::Fields(
             ps.iter().map(|p| pattern_demand(p, body)).collect(),

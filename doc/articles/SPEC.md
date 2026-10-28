@@ -1245,6 +1245,18 @@ is the identity and is erased, so `(42 :: Int)` and
 `(3.14 :: Number)` still compile to the bare Lua values `42` and
 `3.14`.
 
+An integer literal in a *pattern* is Haskell 2010 §3.17.2's: it
+matches a value `v` of type `a` exactly when `v == fromInteger k`,
+with the `Eq a` and `Num a` instances of the scrutinee's type — so a
+definition that matches a literal at a signature variable needs both
+classes in its context (`(Num a, Eq a) => …`; `Num a` alone is
+rejected, as in GHC). At a user `Num` type the match calls the type's
+own `==` on the scrutinee and the literal converted by its
+`fromInteger` (converted once per literal and type, not per match);
+at `Int` the literal's value is `fromInteger` at `Int`, which wraps an
+out-of-range literal exactly as GHC does. A fractional literal pattern
+(`0.5`) matches at `Number` only.
+
 An unconstrained numeric literal is resolved by GHC's defaulting rule
 `default (Integer, Number)` (matching GHC's `(Integer, Double)`):
 the first of `Integer` then `Number` whose instances satisfy the

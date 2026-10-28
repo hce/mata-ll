@@ -43,6 +43,33 @@ main = print (f True)
     expect_compile_error(source, &[], &["No instance", "Num", "Bool"]);
 }
 
+// An integer literal pattern is Haskell 2010 §3.17.2's `scrutinee ==
+// fromInteger k`, so a definition matching one at a signature variable
+// needs `Eq` of that variable as well as `Num` — GHC: "Could not deduce
+// (Eq a) arising from the literal". The checker used to want only `Num`,
+// so the definition compiled and the match compared a value whose `==`
+// was never consulted. The message must say why the pattern wants `Eq`.
+#[test]
+fn integer_literal_pattern_needs_eq_in_context() {
+    let source = r#"
+poly :: Num a => a -> String
+poly 0 = "zero"
+poly _ = "other"
+
+main :: IO ()
+main = putStrLn (poly (0 :: Int))
+"#;
+    expect_compile_error(source, &[], &[
+        "No instance for 'Eq a'",
+        "signature does not require 'Eq a'",
+        "note:",
+        "integer literal pattern",
+        "== fromInteger",
+        "3.17.2",
+        "Could not deduce (Eq a)",
+    ]);
+}
+
 #[test]
 fn negate_at_numeric_types_stays_accepted() {
     let source = r#"

@@ -198,6 +198,15 @@ struct CodeGen {
     forward_declared: std::collections::HashSet<String>,
     /// Variables known to hold concrete values (not thunks), skip __force
     concrete_vars: std::collections::HashSet<String>,
+    /// While the fields of a constructor pattern are being tested: the
+    /// field path of every variable the pattern binds, by binder name. A
+    /// condition emitted for a field — a `LitEq`'s `==` through a
+    /// dictionary the SAME pattern captures (`g (Box 0)` with `Box`
+    /// existential over `(Num a, Eq a)`) — runs before the clause binds
+    /// anything, so a dictionary read through such a binder (`DictMethod`
+    /// on the binder) reads the matched value's field directly. Scoped to
+    /// the walk of that pattern's fields (`walk_ctor_fields`).
+    pattern_dict_paths: std::collections::HashMap<String, lua::Expr>,
     /// The locals a bind chain has forced IN PLACE (`x = __force(x)`, the
     /// write-back an emitter-read operand of an inline ST read takes —
     /// see `forced_local_in_place`) and claimed concrete for the rest of
@@ -427,6 +436,7 @@ impl CodeGen {
             constructors: Vec::new(), newtypes: Vec::new(), newtype_types: Vec::new(),
             forward_declared: std::collections::HashSet::new(),
             concrete_vars: std::collections::HashSet::new(),
+            pattern_dict_paths: std::collections::HashMap::new(),
             chain_forced_locals: Vec::new(),
             params_always_cheap: std::collections::HashMap::new(),
             param_conv: std::collections::HashMap::new(),

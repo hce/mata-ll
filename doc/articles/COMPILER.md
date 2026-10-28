@@ -389,7 +389,26 @@ scrutinee itself as an always-true conjunct (`Cond::Force`,
 the pattern's left-to-right position. The `and` chain alone therefore
 reproduces GHC's match order: `(_, _)` under a `Just` diverges on ⊥, and a
 tuple column left of a failing column is forced before that column is
-tried. A trailing force of a pattern that binds a variable is left to the
+tried. An integer literal pattern's test is Haskell 2010 §3.17.2's
+`scrutinee == fromInteger k`, decided by the pattern's checked type
+(`TPattern::LitPat` carries it; the checker wants `Eq` and `Num` of it):
+the monomorphizer's pattern walk (`literal_pattern_use`) leaves a pattern
+at `Int`, `Integer` or `Number` alone, and codegen spells those as a
+native `==` against the literal's exact 64-bit or double value
+(`lua_int_literal`, `wrap_decimal_to_i64` for GHC's wrap of an
+out-of-range literal at `Int`) or the bignum compare against the interned
+`__mll_biglit` entry; at a type whose `==` is a function it rewrites the
+pattern to `TPattern::LitEq`, the type's `==` (dispatched exactly like a
+guard's, `dispatch_method`) over the literal converted by the type's
+`fromInteger` (`literal_use`) — a module-level constant per (literal,
+type) at a ground type, the dictionaries' methods in a dictionary-passing
+body (the rewrite's revisit of the patterns decides what the main walk
+deferred, through `cur_dict_env`), and the captured dictionaries of an
+existential pattern for a literal in one of its own fields (which codegen
+reads off the matched value, `pattern_dict_paths`, since the clause binds
+nothing while its match is tested). A pattern whose type codegen cannot
+name — a local binding left polymorphic — keeps the runtime's
+type-directed `__mll_lit_eq`. A trailing force of a pattern that binds a variable is left to the
 binding statement that follows the condition (`clause_condition`), and a
 scrutinee already in WHNF (entry-forced, chain-split rebind, a forced
 `case` scrutinee) is a bare name there and contributes no force.

@@ -690,6 +690,12 @@ pub struct Checker {
     /// (class name, the instantiated type the constraint applies to). Discharged
     /// at the function boundary once unification has resolved the type.
     wanted: Vec<(String, Ty)>,
+    /// The types integer literal patterns were checked at while checking
+    /// the current function — the `Eq` wanteds those patterns pushed, so a
+    /// missing `Eq` in the signature's context can say it is the pattern's
+    /// comparison that wants it. Kept in step with `wanted` (cleared and
+    /// rolled back alongside it).
+    lit_pat_eq_wanted: Vec<Ty>,
     /// Types assigned to value-level binders (parameters, lambda/case/do binders,
     /// let/where bindings) seen while checking the current function. Their type
     /// variables count as *determined by the program*: a leftover class
@@ -809,6 +815,7 @@ impl Checker {
             fn_contexts: HashMap::new(),
             method_constraints: HashMap::new(),
             wanted: Vec::new(),
+            lit_pat_eq_wanted: Vec::new(),
             binder_types: Vec::new(),
             fromjson_types: HashSet::new(),
             functor_fmap_futures: HashMap::new(),

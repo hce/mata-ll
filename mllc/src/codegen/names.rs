@@ -67,6 +67,41 @@ pub(super) fn lua_quoted_string(s: &[u8]) -> String {
     out
 }
 
+/// The ONE canonical Lua spelling of an `Int` value, read as exactly that
+/// value by every host. Decimal, except `i64::MIN`, which has no decimal
+/// Lua spelling (Lua parses the magnitude `9223372036854775808` first — a
+/// float on 5.3+, since it overflows the integer subtype — and negates
+/// that). Its hex spelling `0x8000000000000000` wraps to the integer
+/// minimum only on a host WITH an integer subtype; LuaJIT and Lua 5.1/5.2
+/// read it as the double +2^63 — a sign error on a value a double
+/// represents exactly (`n > minBound` was False there). `(-0x7fffffffffffffff
+/// - 1)` is the integer minimum on 5.3+ and exactly -2^63 on a doubles-only
+/// host (the hex maximum rounds up to 2^63 there, and the `- 1` is absorbed).
+pub(super) fn lua_int_literal(n: i64) -> String {
+    if n == i64::MIN {
+        "(-0x7fffffffffffffff - 1)".to_string()
+    } else {
+        n.to_string()
+    }
+}
+
+/// GHC's `fromInteger` at `Int` for a decimal literal outside the i64
+/// range: the value modulo 2^64, read as a two's-complement 64-bit integer
+/// (`9223372036854775808` is `minBound`, `18446744073709551617` is `1`).
+/// Wrapping arithmetic over the digits IS reduction modulo 2^64. The
+/// literal is digits with an optional leading sign (the lexer's shape).
+pub(super) fn wrap_decimal_to_i64(digits: &str) -> i64 {
+    let (negative, magnitude) = match digits.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, digits),
+    };
+    let mut acc: i64 = 0;
+    for d in magnitude.bytes() {
+        acc = acc.wrapping_mul(10).wrapping_add(i64::from(d - b'0'));
+    }
+    if negative { acc.wrapping_neg() } else { acc }
+}
+
 /// The ONE canonical Lua literal for a `Number` (Double) value. Rust's
 /// `Display` for f64 drops a whole value's fraction (`10.0.to_string()` is
 /// `"10"`), and Lua 5.3+ reads a bare `10` as a native INTEGER — so a

@@ -142,7 +142,12 @@ different speed. Annotate a value `:: Int` for the fast machine word when
 the deployment host is Lua 5.3+ or the values provably stay below 2^53;
 the full story (`div` beyond 2^53, the erased-`show` corner) is in
 CAVEATS.md under "Int overflow wraps silently". `Integer` is exact on
-every host.
+every host. An integer literal pattern at `Int` compares with the
+literal's 64-bit value, wrapped exactly as GHC's `fromInteger` wraps an
+out-of-range literal (`f 9223372036854775808 = …` matches `minBound`, as
+in GHC, which warns); on a doubles-only host that value is exact when it
+is a double (`minBound` is) and rounds past 2^53 like every other `Int`
+there.
 
 Numeric defaulting is GHC's implicit `default (Integer, Number)` (`Number`
 is GHC's `Double`), so an unannotated literal used only in integer

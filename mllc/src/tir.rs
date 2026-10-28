@@ -578,6 +578,10 @@ impl TPattern {
             TPattern::Tuple(ps) => TPattern::Tuple(ps.into_iter().map(|p| p.apply_subst(subst)).collect()),
             TPattern::As(n, p) => TPattern::As(n, Box::new(p.apply_subst(subst))),
             TPattern::LitPat(l, ty) => TPattern::LitPat(l, ty.apply_subst(subst)),
+            TPattern::LitEq { eq, value } => TPattern::LitEq {
+                eq: eq.apply_subst(subst),
+                value: value.apply_subst(subst),
+            },
             other => other, // Wildcard
         }
     }
@@ -592,7 +596,8 @@ impl TPattern {
             TPattern::As(_, p) => p.demote_skolems(demote),
             TPattern::Tuple(ps) => { for p in ps.iter_mut() { p.demote_skolems(demote); } }
             TPattern::LitPat(_, ty) => *ty = ty.demote_skolems(demote),
-            _ => {} // Wildcard carries no type
+            // Minted by the monomorphizer, after every checker demotion.
+            TPattern::LitEq { .. } | TPattern::Wildcard => {}
         }
     }
 }
@@ -894,12 +899,28 @@ pub enum TPattern {
         /// every synthesized pattern (`TPattern::ctor`).
         skolems: Vec<(String, u32)>,
     },
-    /// Literal pattern with the TYPE the scrutinee was checked at. The
-    /// type is what lets codegen pick the comparison: an integer literal
-    /// pattern is Num-polymorphic in the source, so without it every
-    /// match went through the type-directed `__mll_lit_eq` — at a known
-    /// machine type the emitted condition is a native `==`.
+    /// Literal pattern with the TYPE the scrutinee was checked at. An
+    /// integer literal pattern is Num-polymorphic in the source (Haskell
+    /// 2010 §3.17.2: it matches when the scrutinee `== fromInteger k`),
+    /// and the type is what decides the comparison. At the host-number
+    /// types codegen emits it directly — a native `==` against the
+    /// literal's exact `Int` or `Number` value, the bignum compare at
+    /// `Integer`; at a type whose `==` and `fromInteger` are functions
+    /// the monomorphizer rewrites the pattern to `LitEq`; a type still
+    /// unresolved when codegen runs (a local binding left polymorphic)
+    /// keeps the runtime's type-directed `__mll_lit_eq`.
     LitPat(TLiteral, Ty),
+    /// An integer literal pattern at a type whose equality is not a host
+    /// operator: GHC's `scrutinee == fromInteger k`, resolved by the
+    /// monomorphizer (`literal_pattern_use`). `eq` is the type's `==` —
+    /// an instance function at a known type, a dictionary read inside a
+    /// dictionary-passing body — and `value` the converted literal: a
+    /// module-level constant (`fromInteger_T (k :: Integer)`, converted
+    /// once, never per match) at a known type, the dictionary's
+    /// `fromInteger` over the literal otherwise. Codegen emits the
+    /// condition `eq(scrutinee, value)`. Forces its scrutinee exactly as
+    /// `LitPat` does and binds nothing.
+    LitEq { eq: TExpr, value: TExpr },
     Paren(Box<TPattern>),
     Tuple(Vec<TPattern>),
     /// As-pattern: `xs@(x : rest)` — binds the name to the whole scrutinee
@@ -929,7 +950,8 @@ impl TPattern {
             TPattern::Var(..) | TPattern::Wildcard => false,
             TPattern::Paren(inner) => inner.forces_scrutinee(),
             TPattern::As(_, inner) => inner.forces_scrutinee(),
-            TPattern::Constructor { .. } | TPattern::LitPat(..) | TPattern::Tuple(_) => true,
+            TPattern::Constructor { .. } | TPattern::LitPat(..) | TPattern::LitEq { .. }
+            | TPattern::Tuple(_) => true,
         }
     }
 
@@ -955,7 +977,7 @@ impl TPattern {
                 f(name);
                 inner.for_each_var(f);
             }
-            TPattern::Wildcard | TPattern::LitPat(..) => {}
+            TPattern::Wildcard | TPattern::LitPat(..) | TPattern::LitEq { .. } => {}
             TPattern::Constructor { args, .. } => {
                 for a in args { a.for_each_var(f); }
             }

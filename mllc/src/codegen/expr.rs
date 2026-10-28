@@ -23,7 +23,7 @@ use super::CodeGen;
 use super::function::{FnSpillScope, LocalRowsSnapshot, VarsSnapshot};
 use super::pattern::ClauseCond;
 use super::lua::{Block, Expr, FuncBody, Item, Stmt};
-use super::names::{dict_field_name, is_builtin_op, lua_field_index, lua_number_literal, lua_quoted_string, primitive_method_lua_op, sanitize_name};
+use super::names::{dict_field_name, is_builtin_op, lua_field_index, lua_int_literal, lua_number_literal, lua_quoted_string, primitive_method_lua_op, sanitize_name};
 use super::util::{count_arrows};
 use super::strictness::{bare_var_alias, strict_binding_safe};
 
@@ -610,10 +610,22 @@ impl CodeGen {
             }
             TExprKind::DictMethod { dict, method_name } => {
                 // A method of a CONSTRUCTED dictionary (e.g. the `[a]`
-                // dictionary built from the element dictionary). Parenthesized
-                // because the dictionary may be a table literal, which Lua
-                // cannot index directly.
-                let d = self.expr_ast(dict);
+                // dictionary built from the element dictionary), or of a
+                // captured existential dictionary read through its pattern
+                // binder. Parenthesized because the dictionary may be a
+                // table literal, which Lua cannot index directly.
+                //
+                // A binder of the constructor pattern under test (see
+                // `pattern_dict_paths`) is read off the matched value's
+                // field: the clause binds nothing while its match is tested.
+                // A captured dictionary is a total construction, never a
+                // suspension, so the force is a cheap tag check.
+                let d = match &dict.kind {
+                    TExprKind::Var(binder) if self.pattern_dict_paths.contains_key(binder) => {
+                        Expr::force(self.pattern_dict_paths[binder].clone())
+                    }
+                    _ => self.expr_ast(dict),
+                };
                 Expr::index(Expr::paren(d), format!(".{}", self.dict_field(method_name)))
             }
             TExprKind::DictCall { func_name, dict_args, value_args } => {
@@ -2800,11 +2812,10 @@ impl CodeGen {
 
     pub(super) fn literal_ast(&self, lit: &TLiteral) -> Expr {
         match lit {
-            // i64::MIN cannot be written in decimal: Lua parses the positive
-            // magnitude first (overflowing to float) and negates the float.
-            // The hex spelling is defined to wrap to the integer subtype.
-            TLiteral::Integer(i64::MIN) => Expr::lit("0x8000000000000000"),
-            TLiteral::Integer(n) => Expr::lit(n.to_string()),
+            // The exact spelling on every host (`lua_int_literal`: i64::MIN
+            // has no decimal Lua spelling, and its hex spelling is +2^63
+            // on a doubles-only host).
+            TLiteral::Integer(n) => Expr::lit(lua_int_literal(*n)),
             // A too-large-for-i64 literal is hoisted to a `__mll_biglit[N]` CAF
             // (see big_lit_ref) so the decimal->bignum parse runs once at load
             // instead of on every evaluation of this expression.

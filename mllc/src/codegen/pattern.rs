@@ -33,7 +33,7 @@ use crate::tir::*;
 use super::CodeGen;
 use super::function::ScopeSnapshot;
 use super::lua::{Block, Expr, Stmt};
-use super::names::{lua_field_index, lua_number_literal, lua_quoted_string, sanitize_name};
+use super::names::{lua_field_index, lua_int_literal, lua_number_literal, lua_quoted_string, sanitize_name, wrap_decimal_to_i64};
 
 /// One conjunct of a clause condition, in the pattern's left-to-right
 /// walk order. A `Test` is a comparison the pattern contributes (a tag,
@@ -648,7 +648,7 @@ impl CodeGen {
         match pattern {
             TPattern::Var(..) | TPattern::Wildcard => true,
             TPattern::Paren(inner) | TPattern::As(_, inner) => self.pattern_cannot_fail(inner),
-            TPattern::LitPat(..) => false,
+            TPattern::LitPat(..) | TPattern::LitEq { .. } => false,
             TPattern::Tuple(pats) => pats.iter().all(|p| self.pattern_cannot_fail(p)),
             TPattern::Constructor { name, args, .. } => {
                 if self.is_newtype(name) {
@@ -706,6 +706,65 @@ impl CodeGen {
         }
     }
 
+    /// The call `eq(scrutinee, value)` of a `LitEq` pattern — GHC's
+    /// `scrutinee == fromInteger k` with the type's own `==`. The
+    /// scrutinee is already a forced Lua expression (the match emitter
+    /// carries the force, see `match_scrutinee` and `field_path`), which
+    /// every parameter convention of `eq` accepts: a lazy position takes
+    /// a value as it takes a suspension, a site-forced one wants exactly
+    /// WHNF. The converted literal takes `eq`'s convention for its second
+    /// parameter, as the general call emitter would give it: `value` is a
+    /// module-level constant at a known type (a memoized suspension the
+    /// callee forces, delivered WHNF at a site-forced position) or the
+    /// dictionary's `fromInteger` over the literal in a dictionary-passing
+    /// body. The callee's emitted arity splits the call as any saturated
+    /// call's (`split_call_ast`).
+    fn lit_eq_call_ast(&mut self, eq: &TExpr, scrutinee: &Expr, value: &TExpr) -> Expr {
+        let (strict, site_forced) = match &eq.kind {
+            TExprKind::Var(name) => (
+                self.callee_strict_row(name).is_some_and(|row| row.get(1).copied().unwrap_or(false)),
+                self.callee_conv_row(name).is_some_and(|row| matches!(
+                    row.get(1), Some(super::analysis::ParamConv::SiteForced))),
+            ),
+            _ => (false, false),
+        };
+        let callee = self.callee_ast(eq);
+        let arity = self.known_callee_arity(eq);
+        let converted = if site_forced {
+            self.site_forced_arg_ast(value)
+        } else {
+            self.arg_ast(value, strict)
+        };
+        Self::split_call_ast(callee, vec![scrutinee.clone(), converted], arity)
+    }
+
+    /// The fields of a data constructor pattern, matched in order from
+    /// index `first` (after the tag, when the type has one). While they are
+    /// walked, every variable the pattern binds is readable by its field
+    /// path (`pattern_dict_paths`): a field's condition that needs a
+    /// dictionary this same pattern captures — a literal pattern at an
+    /// existential's hidden type — reads it off the value under test, since
+    /// the clause binds nothing until every condition has held. The paths
+    /// are registered for exactly this walk.
+    fn walk_ctor_fields(&mut self, scrutinee: &Expr, args: &[TPattern], first: usize, conditions: &mut Vec<Cond>, bindings: &mut Vec<(String, Expr)>) {
+        let mut registered: Vec<String> = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            if let TPattern::Var(binder, _) = arg {
+                let path = Expr::index(scrutinee.clone(), format!("[{}]", i + first));
+                if self.pattern_dict_paths.insert(binder.clone(), path).is_none() {
+                    registered.push(binder.clone());
+                }
+            }
+        }
+        for (i, arg) in args.iter().enumerate() {
+            let path = Self::field_path(scrutinee, i + first, arg);
+            self.collect_pattern_conditions(&path, arg, conditions, bindings);
+        }
+        for binder in registered {
+            self.pattern_dict_paths.remove(&binder);
+        }
+    }
+
     /// The conjuncts (`Cond`, in left-to-right walk order) and lazy
     /// bindings of matching `pattern` against `scrutinee` — the one
     /// definition every match emitter (the clause chain, the guarded
@@ -714,7 +773,7 @@ impl CodeGen {
     /// a test reads it, a tuple/record contributes it (`push_force_cond`),
     /// and a nested forcing sub-pattern does the same for its own field at
     /// its own position.
-    pub(super) fn collect_pattern_conditions(&self, scrutinee: &Expr, pattern: &TPattern, conditions: &mut Vec<Cond>, bindings: &mut Vec<(String, Expr)>) {
+    pub(super) fn collect_pattern_conditions(&mut self, scrutinee: &Expr, pattern: &TPattern, conditions: &mut Vec<Cond>, bindings: &mut Vec<(String, Expr)>) {
         match pattern {
             TPattern::Var(name, _) => { bindings.push((sanitize_name(name), scrutinee.clone())); }
             // As-pattern: bind the WHOLE scrutinee to the name, then match
@@ -729,44 +788,65 @@ impl CodeGen {
             }
             TPattern::Wildcard => {}
             TPattern::LitPat(lit, pat_ty) => {
-                // An integer literal pattern is Num-polymorphic: the scrutinee
-                // may be a machine Int or a boxed Integer, so compare through the
-                // type-directed __mll_lit_eq — UNLESS the pattern's carried type
-                // resolved to machine Int, where the scrutinee is a plain Lua
-                // number and the condition is a native `==` (a call per match
-                // otherwise; it was a fifth of the hm_churn loop). Every
-                // scrutinee expression reaching a literal condition is forced —
-                // the same invariant the Str/Bool `==` arm below always relied
-                // on — so the comparison never sees a thunk table.
-                // Other literals keep native `==`.
-                match lit {
-                    // See literal_ast: i64::MIN has no decimal Lua spelling
-                    // (kept type-directed: the hex spelling reads as a large
-                    // POSITIVE double on LuaJIT either way, and the MIN
-                    // corner is not worth a second spelling analysis).
-                    TLiteral::Integer(i64::MIN) => conditions.push(Cond::Test(Expr::call_named(
-                        "__mll_lit_eq",
-                        vec![scrutinee.clone(), Expr::lit("0x8000000000000000")],
-                    ))),
-                    TLiteral::Integer(n)
-                        if matches!(pat_ty, crate::types::Ty::Con(c) if c == "Int") =>
-                    {
-                        conditions.push(Cond::Test(Expr::binop(
+                // An integer literal pattern is Haskell 2010 §3.17.2's
+                // `scrutinee == fromInteger k`, decided by the pattern's
+                // carried type (the checker wants `Eq` and `Num` of it; the
+                // monomorphizer rewrites a pattern at a type whose `==` is a
+                // function to `LitEq`, the arm below). Here the comparison
+                // is a host operator and the literal is spelled as
+                // `fromInteger k` AT the carried type:
+                //   * `Int`: native `==` against the literal's 64-bit value,
+                //     wrapped like GHC's `fromInteger` (a literal outside
+                //     the i64 range arrives as a BigInteger — the only
+                //     literal spelling of `minBound`, `-9223372036854775808`,
+                //     is one) and spelled so every host reads it exactly
+                //     (`lua_int_literal`). Native, not a call per match: the
+                //     call was a fifth of the hm_churn loop.
+                //   * `Number`: native `==` against the literal rounded to
+                //     the nearest double, GHC's `fromInteger` at Double, in
+                //     the float spelling (`literal_ast`).
+                //   * `Integer`: the bignum compare against the literal's
+                //     interned Integer (`big_lit_ref`: parsed once at load,
+                //     never lifted per match).
+                //   * a type codegen cannot name — a local binding left
+                //     polymorphic, whose one closure serves every type it is
+                //     used at: the runtime's type-directed `__mll_lit_eq`,
+                //     exact for the host representations it can tell apart.
+                // Every scrutinee expression reaching a literal condition is
+                // forced — the invariant the Str/Bool `==` arm below always
+                // relied on — so the comparison never sees a thunk table.
+                let host_ty = match pat_ty {
+                    crate::types::Ty::Con(c) => c.as_str(),
+                    _ => "",
+                };
+                let native_eq = |rhs: String| Cond::Test(Expr::binop("==", scrutinee.clone(), Expr::lit(rhs)));
+                let test = match (lit, host_ty) {
+                    (TLiteral::Integer(n), "Int") => native_eq(lua_int_literal(*n)),
+                    (TLiteral::BigInteger(s), "Int") => native_eq(lua_int_literal(wrap_decimal_to_i64(s))),
+                    (TLiteral::Integer(n), "Number") => native_eq(lua_number_literal(*n as f64)),
+                    (TLiteral::BigInteger(s), "Number") => native_eq(lua_number_literal(
+                        s.parse::<f64>().expect("an integer literal is a decimal numeral"),
+                    )),
+                    (TLiteral::Integer(_) | TLiteral::BigInteger(_), "Integer") => {
+                        let digits = match lit {
+                            TLiteral::Integer(n) => n.to_string(),
+                            TLiteral::BigInteger(s) => s.clone(),
+                            _ => unreachable!(),
+                        };
+                        Cond::Test(Expr::binop(
                             "==",
-                            scrutinee.clone(),
-                            Expr::lit(n.to_string()),
-                        )));
+                            Expr::call_named("__int_cmp", vec![scrutinee.clone(), self.big_lit_ref(&digits)]),
+                            Expr::lit("0"),
+                        ))
                     }
-                    TLiteral::Integer(n) => conditions.push(Cond::Test(Expr::call_named(
+                    (TLiteral::Integer(n), _) => Cond::Test(Expr::call_named(
                         "__mll_lit_eq",
-                        vec![scrutinee.clone(), Expr::lit(n.to_string())],
-                    ))),
-                    // Hoisted to a `__mll_biglit[N]` CAF (see big_lit_ref): the
-                    // pattern's constant is parsed once, not on every match.
-                    TLiteral::BigInteger(s) => conditions.push(Cond::Test(Expr::call_named(
+                        vec![scrutinee.clone(), Expr::lit(lua_int_literal(*n))],
+                    )),
+                    (TLiteral::BigInteger(s), _) => Cond::Test(Expr::call_named(
                         "__mll_lit_eq",
                         vec![scrutinee.clone(), self.big_lit_ref(s)],
-                    ))),
+                    )),
                     _ => {
                         let s = match lit {
                             // Float spelling, matching literal_ast (Lua compares
@@ -781,9 +861,19 @@ impl CodeGen {
                             TLiteral::Unit => "nil".into(),
                             TLiteral::Integer(_) | TLiteral::BigInteger(_) => unreachable!(),
                         };
-                        conditions.push(Cond::Test(Expr::binop("==", scrutinee.clone(), Expr::lit(s))));
+                        native_eq(s)
                     }
-                }
+                };
+                conditions.push(test);
+            }
+            // The resolved form of an integer literal pattern (see
+            // `TPattern::LitEq`): the type's `==` applied to the forced
+            // scrutinee and the converted literal. The condition is the
+            // call itself — a compiled function returns WHNF (the runtime's
+            // WHNF-return invariant), so a guard `v == fromInteger k` would
+            // emit exactly this test.
+            TPattern::LitEq { eq, value } => {
+                conditions.push(Cond::Test(self.lit_eq_call_ast(eq, scrutinee, value)));
             }
             TPattern::Constructor { name, args, .. } => {
                 if self.is_newtype(name) {
@@ -809,11 +899,8 @@ impl CodeGen {
                             Expr::index(scrutinee.clone(), "[1]"),
                             Expr::lit(format!("{}", tag)),
                         )));
-                        for (i, arg) in args.iter().enumerate() {
-                            let path = Self::field_path(scrutinee, i + 2, arg);
-                            self.collect_pattern_conditions(&path, arg, conditions, bindings);
-                        }
-                    } else if let Some(fields) = self.luadict_con_fields.get(name) {
+                        self.walk_ctor_fields(scrutinee, args, 2, conditions, bindings);
+                    } else if let Some(fields) = self.luadict_con_fields.get(name).cloned() {
                         // Single LuaDict constructor: no tag to test, so the
                         // pattern contributes its force when nothing beneath
                         // it tests; then bind each positional sub-pattern
@@ -830,10 +917,7 @@ impl CodeGen {
                         // pattern whether or not a field is bound
                         // (`h (P _ _ : _)` on `[⊥]` diverges).
                         self.push_force_cond(scrutinee, pattern, conditions);
-                        for (i, arg) in args.iter().enumerate() {
-                            let path = Self::field_path(scrutinee, i + 1, arg);
-                            self.collect_pattern_conditions(&path, arg, conditions, bindings);
-                        }
+                        self.walk_ctor_fields(scrutinee, args, 1, conditions, bindings);
                     }
                 } else {
                     match name.as_str() {

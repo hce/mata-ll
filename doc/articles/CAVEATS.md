@@ -79,7 +79,11 @@ and earlier — 5.3 is where Lua gained the integer subtype). Overflow wraps
 silently — there is no checked arithmetic
 at runtime. If you need to detect overflow, check the bounds manually.
 On LuaJIT, integers are represented as doubles, so precision is lost beyond
-2^53.
+2^53. `minBound :: Int` itself is a double (-2^63 is a power of two), and
+the compiler spells it so every host reads it exactly — a constant-folded
+`-9223372036854775807 - 1` and the literal pattern `-9223372036854775808`
+compare correctly on LuaJIT; `minBound + 1`, `maxBound` and the wrap of
+`negate minBound` are where the 2^53 limit shows.
 
 A second consequence of LuaJIT's doubles-only representation: the
 LAST-RESORT type-erased `show` — the runtime dispatch used only when the
@@ -147,8 +151,15 @@ like `let x = 5 in putStrLn x` is reported as a deferred `No instance for
 (Num String)` at the enclosing binding rather than a use-site "cannot unify
 Integer with String" — the program is still rejected, but the message is the
 instance error GHC also gives. (Numeric *literal patterns* are
-`Num`-polymorphic like GHC's `(== fromInteger n)` and compare
-type-directed at runtime.)
+`Num`-polymorphic like GHC's `(== fromInteger n)`, want `Eq` of the
+scrutinee's type as GHC does, and compile to that comparison at the
+pattern's type: a native `==` at `Int` and `Number`, the bignum compare
+at `Integer`, the type's own `==` against a once-converted `fromInteger
+n` at a user `Num` type, the dictionaries' methods in a
+dictionary-passing body. Only a local binding left polymorphic — one
+closure for every type it is used at — compares type-directed at
+runtime, and can then only tell the host representations apart: `Int`,
+`Number` and `Integer`, not a user type.)
 
 ## Numeric defaulting only applies to standard classes
 

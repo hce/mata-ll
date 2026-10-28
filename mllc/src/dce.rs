@@ -145,6 +145,13 @@ fn collect_pattern(p: &TPattern, refs: &mut HashSet<String>) {
                 collect_pattern(e, refs);
             }
         }
+        // A resolved literal pattern references its type's `==` and the
+        // converted literal's constant (see `TPattern::LitEq`): both are
+        // uses, exactly as a guard `v == fromInteger k` would be.
+        TPattern::LitEq { eq, value } => {
+            collect_expr(eq, refs);
+            collect_expr(value, refs);
+        }
         TPattern::Var(_, _) | TPattern::Wildcard | TPattern::LitPat(..) => {}
     }
 }

@@ -380,6 +380,20 @@ pub struct Monomorphizer {
     /// rewrite) instead of falling back to an arbitrary existing
     /// specialization of it.
     in_dictform: bool,
+    /// The dictionary environment of the dictionary-passing body whose
+    /// clauses are being rewritten (`rewrite_dict_passing_fn`, the instance
+    /// dictform of `ensure_dictform`), read by the pattern walk: an integer
+    /// literal pattern at the body's class variable resolves its `==` and
+    /// `fromInteger` through these parameters exactly as a guard `v ==
+    /// fromInteger k` would (`literal_pattern_use`). `None` in the main
+    /// walk, where evidence comes only from captured existential
+    /// dictionaries.
+    cur_dict_env: Option<DictEnv>,
+    /// The module-level constants minted for integer literal patterns at a
+    /// ground type (`literal_pattern_constant`): (literal digits, type) ->
+    /// constant name, so `fromInteger_T k` is converted once per (k, T) —
+    /// never per pattern, never per match.
+    lit_pat_consts: HashMap<(String, Ty), String>,
     /// Closed-type-family equations (borrowed from the checker) so a family
     /// application in a method's dispatch type is reduced to its concrete form
     /// before instance selection. The Generics `Rep` family is the caller:
@@ -587,6 +601,8 @@ impl Monomorphizer {
             fn_constraint_args,
             cur_dict_by_arg: Vec::new(),
             in_dictform: false,
+            cur_dict_env: None,
+            lit_pat_consts: HashMap::new(),
             ty_families: checker.get_ty_families().clone(),
         }
     }
@@ -3523,11 +3539,13 @@ impl Monomorphizer {
         let func_name = func.name.clone();
         let saved_dict_by_arg = std::mem::replace(&mut self.cur_dict_by_arg, dict_by_arg);
         let saved_dict_params = std::mem::replace(&mut self.cur_dict_params, dict_params);
+        let saved_dict_env = self.cur_dict_env.replace(ev.clone());
         for clause in &mut func.clauses {
             self.map_clause_exprs_scoped(clause, &mut |m, e| {
                 m.rewrite_dict_expr(e, &func_name, &ev)
             });
         }
+        self.cur_dict_env = saved_dict_env;
         self.cur_dict_params = saved_dict_params;
         self.cur_dict_by_arg = saved_dict_by_arg;
     }
@@ -5438,11 +5456,13 @@ impl Monomorphizer {
             // class (`describe (Box label other) = …` under a class with a
             // `label` method) is that binder, not a dictionary access —
             // the same discipline as `rewrite_dict_passing_fn` (T12).
+            let saved_dict_env = self.cur_dict_env.replace(ev.clone());
             for clause in f.clauses.iter_mut() {
                 self.map_clause_exprs_scoped(clause, &mut |m, e| {
                     m.rewrite_dict_expr(e, "", &ev)
                 });
             }
+            self.cur_dict_env = saved_dict_env;
             self.generated.push(f);
         }
         self.cur_dict_params = saved_dict_params;
@@ -5522,8 +5542,8 @@ impl Monomorphizer {
     ) -> TPattern {
         match pat {
             TPattern::Constructor { name, args, skolems } => {
-                let args: Vec<TPattern> = args.into_iter().map(|a| self.ex_rewrite_pattern(a, caps)).collect();
                 let Some(ex) = self.ex_ctors.get(&name).cloned() else {
+                    let args = args.into_iter().map(|a| self.ex_rewrite_pattern(a, caps)).collect();
                     return TPattern::Constructor { name, args, skolems };
                 };
                 let n = ex.field_types.len();
@@ -5533,36 +5553,140 @@ impl Monomorphizer {
                 // and hands back the same (class, skolem) -> binder
                 // mapping, so the captured dictionaries are in scope for
                 // the rewrite exactly as they were for the main walk.
+                let mut args = args;
+                let mut own: Vec<((String, u32), String)> = Vec::new();
                 if args.len() == n + ex.captures.len() {
                     for (i, (cls, var)) in ex.captures.iter().enumerate() {
                         if let TPattern::Var(binder, _) = &args[n + i]
                             && let Some(id) = own_skolem(var)
                         {
-                            caps.push(((cls.clone(), id), binder.clone()));
+                            own.push(((cls.clone(), id), binder.clone()));
                         }
                     }
-                    return TPattern::Constructor { name, args, skolems };
-                }
-                // Only a pattern at the DECLARED arity is rewritten.
-                if args.len() != n {
-                    return TPattern::Constructor { name, args, skolems };
-                }
-                let mut args = args;
-                for (i, (cls, var)) in ex.captures.iter().enumerate() {
-                    let binder = format!("__exd{}_{}", self.ex_binder_counter, i);
-                    if let Some(id) = own_skolem(var) {
-                        caps.push(((cls.clone(), id), binder.clone()));
+                } else if args.len() == n {
+                    // A pattern at the DECLARED arity gets its binders.
+                    for (i, (cls, var)) in ex.captures.iter().enumerate() {
+                        let binder = format!("__exd{}_{}", self.ex_binder_counter, i);
+                        if let Some(id) = own_skolem(var) {
+                            own.push(((cls.clone(), id), binder.clone()));
+                        }
+                        args.push(TPattern::Var(binder, Ty::Unit));
                     }
-                    args.push(TPattern::Var(binder, Ty::Unit));
-                }
-                self.ex_binder_counter += 1;
+                    self.ex_binder_counter += 1;
+                } else {
+                    let args = args.into_iter().map(|a| self.ex_rewrite_pattern(a, caps)).collect();
+                    return TPattern::Constructor { name, args, skolems };
+                };
+                // The fields are rewritten UNDER this pattern's own captured
+                // dictionaries: a literal pattern in a field at the hidden
+                // type (`g (Box 0)`) resolves its `==` and `fromInteger` to
+                // the binders this pattern binds (`literal_pattern_use`),
+                // which codegen reads off the matched value's own fields
+                // while the match is still being tested
+                // (`pattern_dict_paths`).
+                let args = self.with_ex_scope(own.clone(), |m| {
+                    args.into_iter().map(|a| m.ex_rewrite_pattern(a, caps)).collect()
+                });
+                caps.extend(own);
                 TPattern::Constructor { name, args, skolems }
             }
             TPattern::Paren(inner) => TPattern::Paren(Box::new(self.ex_rewrite_pattern(*inner, caps))),
             TPattern::As(n, inner) => TPattern::As(n, Box::new(self.ex_rewrite_pattern(*inner, caps))),
             TPattern::Tuple(ps) => TPattern::Tuple(self.ex_rewrite_patterns(ps, caps)),
+            // The pattern walk is also where an integer literal pattern's
+            // comparison is decided (`literal_pattern_use`): once per
+            // visit, so a pattern the main walk left deferred is decided by
+            // the dictionary rewrite's revisit, with the body's evidence.
+            TPattern::LitPat(lit @ (TLiteral::Integer(_) | TLiteral::BigInteger(_)), ty) =>
+                self.literal_pattern_use(lit, ty),
             other => other,
         }
+    }
+
+    /// An integer literal pattern at `ty` — Haskell 2010 §3.17.2: it
+    /// matches when the scrutinee `== fromInteger k`, with the `Eq` and
+    /// `Num` of the scrutinee's type (the checker wants both). The one
+    /// decision for every pattern position (clause, `case`, lambda,
+    /// let/where binding, comprehension generator):
+    ///   * at `Int`, `Integer` and `Number` the comparison is a host
+    ///     operator: the pattern stays a `LitPat` and codegen spells it
+    ///     (`collect_pattern_conditions`);
+    ///   * at a type whose `==` resolves to a function — the decision a
+    ///     guard's `==` takes (`dispatch_method`): an instance function at
+    ///     a ground type, a dictionary read inside a dictionary-passing
+    ///     body or under a captured existential dictionary — the pattern
+    ///     becomes `LitEq` over that `==` and the literal converted by the
+    ///     type's `fromInteger` (`literal_use`, the expression literal's
+    ///     own lowering, so the user's `fromInteger` receives an Integer as
+    ///     in GHC). At a ground type the converted literal is a module-level
+    ///     constant (`literal_pattern_constant`);
+    ///   * a decision deferred (the main walk of a body about to go
+    ///     dictionary form; the rewrite's revisit decides it with the
+    ///     evidence) or impossible (a local binding left polymorphic — one
+    ///     closure for every type it is used at — or a rank-2 skolem with
+    ///     no evidence) keeps the `LitPat`: codegen's runtime type-directed
+    ///     compare, exact for the host representations it can tell apart.
+    fn literal_pattern_use(&mut self, lit: TLiteral, ty: Ty) -> TPattern {
+        if matches!(&ty, Ty::Con(c) if c == "Int" || c == "Integer" || c == "Number") {
+            return TPattern::LitPat(lit, ty);
+        }
+        let ev = self.cur_dict_env.clone().unwrap_or_default();
+        let eq_ty = Ty::fun(&[ty.clone(), ty.clone()], Ty::Con("Bool".into()));
+        let eq = match self.dispatch_method("==", &eq_ty, &ev) {
+            MethodUse::Impl(name) => TExpr::new(TExprKind::Var(name), eq_ty),
+            MethodUse::Evidence(kind) => TExpr::new(kind, eq_ty),
+            MethodUse::Missing(binding) => {
+                self.push_no_instance("==", &binding);
+                return TPattern::LitPat(lit, ty);
+            }
+            MethodUse::Native | MethodUse::Deferred => return TPattern::LitPat(lit, ty),
+        };
+        let value = match self.literal_use(lit.clone(), &ty, &ev) {
+            Ok(converted) => converted,
+            Err(lit) => return TPattern::LitPat(lit, ty),
+        };
+        let ground = ty.free_vars().is_empty() && !Self::contains_skolem(&ty);
+        let value = if ground { self.literal_pattern_constant(&lit, &ty, value) } else { value };
+        TPattern::LitEq { eq, value }
+    }
+
+    /// The module-level constant holding `fromInteger_T k` for a literal
+    /// pattern at ground `ty`, minted once per (literal, type): a value
+    /// binding, which codegen emits as a suspension forced on first use
+    /// (its body calls the type's `fromInteger`), so the conversion runs
+    /// at most once per program — never per match, never at load.
+    fn literal_pattern_constant(&mut self, lit: &TLiteral, ty: &Ty, converted: TExpr) -> TExpr {
+        let digits = match lit {
+            TLiteral::Integer(n) => n.to_string(),
+            TLiteral::BigInteger(s) => s.clone(),
+            _ => unreachable!("only an integer literal pattern is resolved to a constant"),
+        };
+        let key = (digits.clone(), ty.clone());
+        let name = match self.lit_pat_consts.get(&key) {
+            Some(name) => name.clone(),
+            None => {
+                let base = crate::ast::minted("litpat", &digits.replace('-', "m"));
+                let name = self.mangle_name(&base, ty);
+                self.lit_pat_consts.insert(key, name.clone());
+                self.generated.push(TFunction {
+                    name: name.clone(),
+                    ty: ty.clone(),
+                    clauses: vec![TClause {
+                        span: None,
+                        patterns: vec![],
+                        guards: vec![],
+                        body: Some(converted),
+                        where_binds: vec![],
+                    }],
+                    specialized: true,
+                    spec_origin: None,
+                    dict_params: vec![],
+                    derived_strict: false,
+                });
+                name
+            }
+        };
+        TExpr::new(TExprKind::Var(name), ty.clone())
     }
 
     /// The constrained-existential constructor at the head of a spine that

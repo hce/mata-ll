@@ -616,6 +616,7 @@ impl Checker {
     pub(super) fn check_function(&mut self, name: &str, clauses: &[Clause], declared_ty: &Ty) -> Option<TFunction> {
         self.current_fn = Some(name.to_string());
         self.wanted.clear();
+        self.lit_pat_eq_wanted.clear();
         self.binder_types.clear();
         self.pattern_skolems.clear();
         // Every clause of one function binds the same number of arguments
@@ -776,6 +777,7 @@ impl Checker {
             // safe: the clause's own error is reported and fails compilation,
             // and once it is fixed the constraints are checked for real.
             let wanted_before = self.wanted.len();
+            let lit_pat_before = self.lit_pat_eq_wanted.len();
             match self.check_clause(clause, &fresh_ty, &sig_skolems, &clause_ctx) {
                 Ok((tc, clause_subst)) => {
                     tclauses.push(tc);
@@ -794,6 +796,7 @@ impl Checker {
                 }
                 Err(e) => {
                     self.wanted.truncate(wanted_before);
+                    self.lit_pat_eq_wanted.truncate(lit_pat_before);
                     // Locate the error at the offending statement captured while
                     // checking the body, falling back to the clause head for a
                     // shape error that crossed no statement marker (e.g. an
@@ -1080,6 +1083,12 @@ impl Checker {
                                 TyVar { name: name.to_string(), id: v.id }
                             });
                         let fail_note = monad_fail_note(&rc);
+                        // The missing `Eq` is an integer literal pattern's
+                        // comparison when such a pattern was checked at
+                        // this variable.
+                        let lit_pat_note = (rc == "Eq" && self.lit_pat_eq_wanted.iter().any(|t| {
+                            t.apply_subst(&overall_subst).demote_skolems(&demote).free_vars().contains(&v)
+                        })).then(|| literal_pattern_eq_note(&shown.name));
                         self.push_error_span(
                             DiagnosticKind::MissingContextConstraint { class: rc, ty: Ty::Var(shown) },
                             format!("definition of '{}'", name),
@@ -1087,6 +1096,7 @@ impl Checker {
                         );
                         if let Some(diag) = self.errors.last_mut() {
                             diag.notes.extend(fail_note);
+                            diag.notes.extend(lit_pat_note);
                         }
                     }
                 }
@@ -1518,8 +1528,10 @@ impl Checker {
         // the reported error is fixed.
         let mut binding_errored = false;
         let wanted_before = self.wanted.len();
+        let lit_pat_before = self.lit_pat_eq_wanted.len();
         let (texpr, body_ty, bs) = self.infer_expr(&ld.body, &env).unwrap_or_else(|e| {
             self.wanted.truncate(wanted_before);
+            self.lit_pat_eq_wanted.truncate(lit_pat_before);
             self.push_error_span(
                 e,
                 format!("the where-binding '{}' ({})", ld.name, ctx),
@@ -2039,14 +2051,21 @@ impl Checker {
                 match lit {
                     // A numeric literal pattern is Num-polymorphic like the
                     // expression literal: it matches at the scrutinee's numeric
-                    // type (Int, Integer, or a user Num), not a fixed Int. The
-                    // codegen compares it type-directed (see __mll_lit_eq).
+                    // type (Int, Integer, or a user Num), not a fixed Int —
+                    // Haskell 2010 §3.17.2 defines the match as `scrutinee ==
+                    // fromInteger k`, so it wants `Eq` of that type as well
+                    // as `Num` (GHC: "Could not deduce (Eq a) arising from
+                    // the literal"); the recorded type lets the missing-`Eq`
+                    // diagnostic name the pattern as the reason.
                     Literal::Integer(_) | Literal::BigInteger(_) => {
                         self.wanted.push(("Num".to_string(), expected.clone()));
+                        self.wanted.push(("Eq".to_string(), expected.clone()));
+                        self.lit_pat_eq_wanted.push(expected.clone());
                         // The carried type is the EXPECTED type, resolved by
                         // whatever substitution closes over it later
-                        // (TPattern::apply_subst) — Int lets codegen emit a
-                        // native ==, anything unresolved keeps __mll_lit_eq.
+                        // (TPattern::apply_subst); the monomorphizer and
+                        // codegen pick the comparison from it
+                        // (`literal_pattern_use`, `collect_pattern_conditions`).
                         Ok((
                             TPattern::LitPat(Self::convert_literal(lit), expected.clone()),
                             Subst::empty(),
@@ -3574,6 +3593,17 @@ impl Checker {
 /// desugaring asked for it. Said on the "No instance" diagnostics for the
 /// class, where the reader otherwise sees a constraint the source never
 /// mentions.
+/// Why a signature lacking `Eq` rejects a definition with an integer
+/// literal pattern: the pattern's match IS an `==` (Haskell 2010 §3.17.2).
+fn literal_pattern_eq_note(var: &str) -> String {
+    format!(
+        "an integer literal pattern matches when the value it is matched against is `== fromInteger <literal>` \
+         (Haskell 2010 §3.17.2), so the type it is matched at needs an `Eq` instance as well as `Num`, and a \
+         signature that leaves the type as general as `{var}` must say so: add `Eq {var}` to its context. \
+         GHC rejects this the same way (\"Could not deduce (Eq {var}) arising from the literal\")"
+    )
+}
+
 fn monad_fail_note(class: &str) -> Option<String> {
     (class == "MonadFail").then(|| {
         "a pattern that can fail to match on the left of `<-` in a do-block (`Just x <- action`) \

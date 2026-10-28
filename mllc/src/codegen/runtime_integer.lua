@@ -500,15 +500,29 @@ local function fromInteger_Number(x)
     if type(x) == "table" then return __int_to_double(x) end
     return x
 end
--- Numeric-literal pattern equality. The scrutinee may be a machine number (Int)
--- or a boxed Integer; Lua's `==` skips a metamethod for a mixed table/number
--- pair, so match type-directed: a boxed scrutinee compares the literal lifted to
--- an Integer, a machine scrutinee compares natively.
+-- Numeric-literal pattern equality at a type the compiler could not name: a
+-- local binding left polymorphic, whose one closure serves every type it is
+-- used at. The scrutinee is then a machine number (Int or Number) or a boxed
+-- Integer, and the literal a machine number or (past the i64 range) an
+-- interned Integer; Lua's `==` skips a metamethod for a mixed table/number
+-- pair, so the match is type-directed: a boxed scrutinee compares the literal
+-- lifted to an Integer; a machine scrutinee compares the literal narrowed to
+-- its own representation — GHC's `fromInteger` at Int (wrapping) or at Double
+-- (rounding), both of which an Integer literal denotes exactly when the host
+-- has no integer subtype to tell the two apart. Total in both directions: the
+-- (number, Integer) pair used to fall through to a bare `x == n`, never true.
 local function __mll_lit_eq(x, n)
     x = __force(x)
     if type(x) == "table" then
         if type(n) ~= "table" then n = fromInteger_Integer(n) end
         return __int_cmp(x, n) == 0
+    end
+    if type(n) == "table" then
+        if math.type then
+            if math.type(x) == "integer" then return x == __int_to_machine(n) end
+            return x == __int_to_double(n)
+        end
+        return x == __int_to_machine(n) or x == __int_to_double(n)
     end
     return x == n
 end

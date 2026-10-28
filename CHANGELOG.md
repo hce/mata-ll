@@ -44,6 +44,41 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **An integer literal pattern matches exactly when GHC's definition
+  matches, at every type, on every host** (`direct (M 3)` with `direct 0
+  = "zero"` at a user `Num` type printed `other`; `f minBound` with `f
+  (-9223372036854775808) = "min"` at `Int` printed `other`; on LuaJIT `n
+  > (-9223372036854775807 - 1)` was `False`). Haskell 2010 §3.17.2
+  defines the match as `scrutinee == fromInteger k` with the `Eq` and
+  `Num` of the scrutinee's type; mata-ll compared every non-`Int`
+  scrutinee through a runtime helper that knew only machine numbers and
+  bignums, so a user type's `==` and `fromInteger` were never consulted
+  (a derived `Eq` or a hand-written one alike, in a specialized body and
+  in a dictionary-passing one), the only literal spelling of `minBound ::
+  Int` — a literal past the i64 range — was compared as a bignum against
+  a machine number (never true), and the constant-folded `minBound` was
+  spelled `0x8000000000000000`, which a doubles-only host reads as +2^63.
+  The comparison is now decided once, by the pattern's type: at `Int` a
+  native `==` against the literal's exact 64-bit value, wrapped as GHC's
+  `fromInteger` wraps an out-of-range literal (`9223372036854775808`
+  matches `minBound`) and spelled so every host reads it exactly
+  (`(-0x7fffffffffffffff - 1)` for the minimum, in expressions too); at
+  `Number` a native `==` against the literal rounded to a double; at
+  `Integer` the bignum compare against the literal interned once at load;
+  at a user `Num` type the type's own `==` applied to the scrutinee and
+  the literal converted by the type's `fromInteger` once per (literal,
+  type) into a module-level constant; in a dictionary-passing body (a
+  function used past the specialization cap, or applied to an
+  existential's hidden value — including a literal in a field of the
+  existential pattern itself) the `Eq` dictionary's `==` and the `Num`
+  dictionary's `fromInteger`. The runtime type-directed compare remains
+  only for a local binding left polymorphic, and is total in both
+  directions. The typechecker now wants `Eq` as well as `Num` of the
+  pattern's type, so `poly :: Num a => a -> String; poly 0 = …` is
+  rejected as GHC rejects it, with a note saying the pattern compares
+  with `==`. Found by the 2026-10 fresh-eyes review (T3, O4, O5).
+  (GHC-goldened cases `lit_pat_typed_eq`, `lit_pat_int_bounds`,
+  `lit_pat_int_bounds_wrap`.)
 - **A section or partial application evaluates a captured operand once,
   however often it is applied** (`filter (< maximum xs) xs` computed
   `maximum xs` per element: 5 s for 3000 elements where GHC takes
