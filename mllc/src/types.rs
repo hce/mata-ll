@@ -887,14 +887,15 @@ impl Subst {
     /// be related to it). Merging instead unifies the two images when they
     /// are compatible, so both bindings hold in the result.
     ///
-    /// When the images genuinely conflict, `self`'s binding is kept — that is
-    /// deliberate, not a fallback: GADT-style clauses refine the same
-    /// signature variable to *different* concrete types per clause
-    /// (`action RedL` binds c := 'Red, `action GreenL` binds c := 'Green),
-    /// and those refinements must stay clause-local. A conflicting image is
-    /// always such a concrete refinement (two free clause variables can never
-    /// conflict), so nothing is severed by keeping it out of the shared
-    /// substitution.
+    /// The two clause substitutions agree on every signature variable by
+    /// construction: each clause binds it to the SAME rigid skolem
+    /// (`check_clause` skolemizes the signature before its patterns), and a
+    /// GADT refinement is a clause-local given, never a binding here — so
+    /// a clause's `a ~ Int` can neither narrow the function's type nor
+    /// reach another clause's constraints. The remaining variables are
+    /// clause-local and fresh, so two images can conflict only when the
+    /// unifier cannot equate them (an unreduced type-family application);
+    /// `self`'s image is kept then, as `compose` would.
     pub fn merge(&self, other: &Subst) -> Subst {
         let mut result = self.compose(other);
         for (v, t_other) in &other.map {
@@ -1412,6 +1413,16 @@ pub type SkolemMap = HashMap<u32, Ty>;
 /// then forgets (the equality holds in that branch only; nothing outside
 /// it ever learns `a ~ Int`, which is what keeps the refinement local).
 ///
+/// Only an INDEX is refinable — a skolem inside the arguments of the type
+/// constructor being matched. The head of the scrutinee type must be that
+/// type constructor itself: the equality a constructor pattern proves is
+/// between its result type's index and the scrutinee's (`G Int ~ G a`
+/// gives `a ~ Int`), and a scrutinee whose whole type is a rigid variable
+/// (`f :: a -> Int; f (Just _) = 1`, or the same `case` over `a`) matches
+/// no constructor at all — GHC: "Couldn't match expected type 'a' with
+/// actual type 'Maybe a0'; 'a' is a rigid type variable". Such a head is
+/// handed to the plain unifier, which reports exactly that rigidity.
+///
 /// Mechanically, every skolem of either side becomes a bindable variable
 /// carrying the skolem's own (unique) id for the duration of one ordinary
 /// unification, and the resulting bindings are sorted afterwards: a binding
@@ -1424,7 +1435,7 @@ pub fn unify_refining(t1: &Ty, t2: &Ty, fams: &TyFamilies) -> Result<(Subst, Sko
     let mut sks: Vec<(String, u32)> = Vec::new();
     t1.collect_skolems(&mut sks);
     t2.collect_skolems(&mut sks);
-    if sks.is_empty() {
+    if sks.is_empty() || head_is_skolem(t1) || head_is_skolem(t2) {
         return Ok((unify_tf(t1, t2, fams)?, SkolemMap::new()));
     }
     let as_var = |name: &str, id: u32| TyVar { name: format!("__sk_{}", name), id };
@@ -1476,6 +1487,16 @@ pub fn unify_refining(t1: &Ty, t2: &Ty, fams: &TyFamilies) -> Result<(Subst, Sko
         *img = img.apply_subst(&subst);
     }
     Ok((subst, givens))
+}
+
+/// Is the outermost head of `t` — the type constructor position of an
+/// application spine — a rigid skolem? (`a`, `f Int` for a rigid `f`.)
+fn head_is_skolem(t: &Ty) -> bool {
+    let mut head = t;
+    while let Ty::App(f, _) = head {
+        head = f;
+    }
+    matches!(head, Ty::Skolem(..))
 }
 
 /// Unification that reduces closed-type-family applications to normal form on
@@ -2129,7 +2150,10 @@ impl Diagnostic {
                       the same way."),
             DiagnosticKind::AmbiguousType { .. } =>
                 Some("add a type annotation to pin the type down, e.g. \
-                      `show (Nothing :: Maybe Int)`. GHC rejects this the same way."),
+                      `show (Nothing :: Maybe Int)`. This is Haskell's ambiguity \
+                      rule (GHC: \"Ambiguous type variable\"): a class constraint \
+                      whose type no caller and no annotation can ever fix has no \
+                      instance to pick."),
             DiagnosticKind::MissingContextConstraint { .. } =>
                 Some("a bare polymorphic variable has no instance unless the signature \
                       requires one. GHC reports this as \"add (C a) to the context\"."),

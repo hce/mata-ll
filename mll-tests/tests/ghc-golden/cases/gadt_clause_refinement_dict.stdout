@@ -1,0 +1,26 @@
+int 42
+any True
+any "s"
+any Just 2
+any [3]
+any (4,True)
+any Just True
+any [True,False]
+any Just [5]
+any [[6]]
+any Just (Just 7)
+any (True,"t")
+any [Just 8]
+any Just "u"
+any ("v",[9])
+any [(10,False)]
+any (Just 11,[12])
+any [[[13]]]
+any ((),Just ())
+any 14
+int 2
+any "hidden"
+any Just False
+int 5
+any True
+any False

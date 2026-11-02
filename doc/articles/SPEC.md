@@ -172,7 +172,14 @@ equalities into scope for that branch. For example:
     eval (If c t e)   = if eval c then eval t else eval e
 
 In the `LitI` branch, the compiler knows `a ~ Int`, so returning
-`n :: Int` as `a` is valid. In the `LitB` branch, `a ~ Bool`.
+`n :: Int` as `a` is valid. In the `LitB` branch, `a ~ Bool`. A
+class constraint the branch wants is solved at the refined type: with
+`eval :: Show a => Expr a -> String`, the `LitI` branch's `show (n +
+1)` wants `Show Int` and `Num Int`, which the instances give, even
+though the signature gives only `Show a`. The equality is the branch's
+alone and leaves no trace outside it — the clause order does not
+matter, and `eval`'s type stays `Show a => Expr a -> String` for the
+other clauses and for every caller.
 The equality holds wherever the constructor is matched: as a clause
 pattern, in a case alternative over a value of type `Expr a`, nested
 under another constructor (an existential's hidden type is refined the

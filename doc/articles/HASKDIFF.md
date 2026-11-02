@@ -1034,6 +1034,26 @@ b`) is checked against that signature only after its body has been
 inferred, so its constructor patterns do not refine `b` (rejected as a
 signature mismatch; GHC accepts it).
 
+## A class constraint at a structured GADT refinement has no evidence
+
+A GADT constructor pattern refines the signature's index for its clause
+or case alternative, and a class constraint the body wants at the
+refined type is solved at that type: under `a ~ Int` from `GI :: G Int`,
+`show (x + 1)` in `describe :: Show a => G a -> a -> String` wants `Show
+Int` and `Num Int`, which the instances give, exactly as under GHC. The
+deviation is a refinement whose image still contains a type variable of
+the pattern: `P :: E a -> E a -> E (a, a)` matched in `showEv :: Show a
+=> E a -> String` gives `a ~ (b, b)` for a `b` the pattern introduced,
+and `show (ev x, ev y)` wants `Show (b, b)`. GHC rewrites the given
+`Show a` through the equality and solves it. mata-ll has no evidence
+for that wanted: `b` occurs in no type a caller fixes, so the clause is
+rejected as ambiguous ("nothing here determines the type '(b, b)'"), in
+a clause pattern and in a case alternative alike. Write the clause so
+the constraint is at a type the signature or an instance gives
+(`showEv (P x y) = … show (ev x) …` needs `Show b`, which GHC also
+rejects; a `Show (a, a)` context, or a separate function at the pair
+type, states what is wanted).
+
 ## Linear types match GHC's `LinearTypes`
 
 mata-ll implements GHC's linear arrows. A function arrow may carry a

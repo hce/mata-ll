@@ -44,6 +44,40 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A clause's GADT refinement is local to that clause, so a constrained
+  GADT function may put its refining clause first** (`describe :: Show a
+  => G a -> a -> String; describe GI x = "int " <> show (x + 1); describe
+  GAny x = "any " <> show x` was rejected "Ambiguous type: nothing here
+  determines the type 'a', so no 'Show' instance can be chosen for it",
+  with a note claiming GHC rejects it the same way; GHC prints `int 42`,
+  `any True`. The same two clauses in the other order compiled.) A
+  signature variable was still flexible while a clause's patterns were
+  checked, so the GADT pattern's `a ~ Int` was an ordinary binding `a :=
+  Int` that outlived its clause: it narrowed the function's type to `G
+  Int -> Int -> String` when the refining clause came first (the
+  clause-merge keeps the first binding), and the next clause's `Show a`
+  was then over a variable that type no longer mentioned. Now the
+  signature is rigid for the whole clause, patterns included, and a
+  constructor pattern on a signature index refines it exactly as in a
+  case alternative — a given of that clause, applied to its view of the
+  environment and its result type and then forgotten (GHC's rule: the
+  equality scopes over the clause's right-hand side). The function keeps
+  its declared type in both worlds, so the refining clause may come
+  first, in the middle, or twice under two constraints; its body may use
+  a method the signature does not give (`x + 1` under `Show a` alone is
+  well-typed under `a ~ Int`), a guard, a where-helper over the refined
+  parameter, and a parameter bound before the refining pattern reads as
+  the refined type. The rigid patterns also close a hole the flexible
+  reading left: a non-GADT pattern could narrow a signature variable
+  (`f :: a -> Int; f (Just _) = 1`, `f True = 1`, and the same `case`
+  over `a`, all compiled; GHC: "'a' is a rigid type variable") — the
+  refining unifier refines an INDEX of the scrutinee type, never a
+  scrutinee whose whole type is the variable. The ambiguity note now
+  states the Haskell rule instead of asserting GHC's verdict. Found by
+  the 2026-10 fresh-eyes review (T17). (GHC-goldened cases
+  `gadt_clause_refinement_local` and, past the specialization cap and
+  through an existential, `gadt_clause_refinement_dict`; the rejections
+  pinned in `compile_errors`.)
 - **Every builtin class carries GHC's default methods, so an instance
   that gives GHC's minimal complete definition is complete here too**
   (`instance Foldable Tree` defining `foldr` alone was rejected at the

@@ -765,6 +765,70 @@ main = print (f MkInt)
     expect_compile_error(source, &[], &["Non-exhaustive", "'f'", "MkBool"]);
 }
 
+// T17: a signature variable is rigid for the WHOLE clause, patterns
+// included (the accept side — a GADT constructor pattern refining it as a
+// given of its clause alone — is cases/gadt_clause_refinement_local.mll
+// and gadt_clause_refinement_dict.mll, GHC-goldened). A non-GADT
+// constructor pattern on a bare signature variable is not a refinement:
+// GHC "Couldn't match expected type 'a' with actual type 'Maybe a0'; 'a'
+// is a rigid type variable". Regression: the variable was flexible at
+// pattern time, so this bound `a := Maybe b` and compiled.
+#[test]
+fn constructor_pattern_cannot_narrow_signature_variable() {
+    expect_compile_error(
+        "f :: a -> Int\nf (Just _) = 1\nf Nothing = 0\n\nmain :: IO ()\nmain = print (f (Just True))\n",
+        &[],
+        &["Cannot match 'a' with 'Maybe", "rigid type variable", "clause 1 of 'f'"],
+    );
+}
+
+// The same rule in a case alternative: the refining unifier may refine
+// an INDEX of the scrutinee type (`G a` against `G Int`), never a
+// scrutinee whose whole type is the rigid variable. Regression: the
+// skolem at the head was promoted like an index and `a ~ Maybe b` became
+// the branch's given.
+#[test]
+fn case_alternative_cannot_narrow_signature_variable() {
+    expect_compile_error(
+        "g :: a -> Int\ng y = case y of\n    Just _ -> 1\n    Nothing -> 0\n\nmain :: IO ()\nmain = print (g (Just True))\n",
+        &[],
+        &["Cannot match 'a' with 'Maybe", "rigid type variable", "definition of 'g'"],
+    );
+}
+
+// A literal pattern narrows no better than a constructor: `True` at a
+// bare `a` is GHC's "Couldn't match expected type 'a' with actual type
+// 'Bool'". Regression: accepted, with `a := Bool`.
+#[test]
+fn literal_pattern_cannot_narrow_signature_variable() {
+    expect_compile_error(
+        "f :: a -> Int\nf True = 1\nf _ = 0\n\nmain :: IO ()\nmain = print (f False)\n",
+        &[],
+        &["Cannot match 'a' with 'Bool'", "rigid type variable", "clause 1 of 'f'"],
+    );
+}
+
+// A clause's GADT refinement scopes over what FOLLOWS the refining
+// pattern. A numeric literal pattern on an EARLIER argument is checked at
+// the rigid `a` with only the signature's context: `f 0 GI` under `Show a`
+// alone wants `Eq a` and `Num a` of the literal, which `a ~ Int` from the
+// later `GI` does not reach — GHC: "Could not deduce 'Eq a' arising from
+// the literal '0'". (The accept side, the literal AFTER the refining
+// pattern or a guard `x == 0` in the clause body, is in
+// cases/gadt_clause_refinement_local.mll.)
+#[test]
+fn literal_pattern_before_refining_gadt_pattern_needs_context() {
+    let msg = expect_compile_error(
+        "data G a where\n    GI :: G Int\n    GAny :: G a\n\n\
+         f :: Show a => a -> G a -> String\nf 0 GI = \"zero\"\nf x GI = show (x + 1)\nf x GAny = show x\n\n\
+         main :: IO ()\nmain = putStrLn (f 0 GI)\n",
+        &[],
+        &["No instance for 'Eq a'", "the signature does not require 'Eq a'"],
+    );
+    assert!(msg.contains("No instance for 'Num a'"), "the literal's Num constraint is reported too, got: {msg}");
+    assert!(!msg.contains("Ambiguous"), "a refining clause must not be reported ambiguous, got: {msg}");
+}
+
 // Unit satisfies what is REGISTERED for it (Show/Eq/Ord, plus user
 // `instance C ()`), not every class. Regression: the entailment Unit arm
 // was Satisfied unconditionally, so `Num ()` typechecked and crashed in
@@ -7287,7 +7351,7 @@ fn enum_method_on_undetermined_type_is_ambiguous() {
     expect_compile_error(
         "main :: IO ()\nmain = print (fromEnum (toEnum 65))\n",
         &[],
-        &["Ambiguous type", "Enum", "GHC rejects this the same way"],
+        &["Ambiguous type", "Enum", "GHC: \"Ambiguous type variable\""],
     );
     // Control: with a numeric class in the set the variable defaults
     // (`succ 1` is `succ (1 :: Integer)`), as under GHC.

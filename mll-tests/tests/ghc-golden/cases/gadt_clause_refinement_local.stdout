@@ -1,0 +1,23 @@
+int 42
+any True
+any "s"
+int 42
+bool True
+any "m"
+int 3
+bool False
+any True
+zero
+neg 3
+pos 7
+any "g"
+int 10/6
+any [1,2]
+int any 2
+any ()
+int 2
+any "x"
+none
+(1,2)
+True
+(False,True)

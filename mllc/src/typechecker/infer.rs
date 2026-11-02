@@ -688,23 +688,24 @@ impl Checker {
             }
         }
         // The caller-visible signature, with each universally-quantified
-        // variable renamed to a fresh FLEXIBLE unification variable. Patterns
-        // and every downstream pass work on this, exactly as before — crucially,
-        // a GADT constructor pattern may still refine a signature variable to a
-        // concrete type-index within a clause (`s := 'Empty`), which the flexible
-        // reading makes an ordinary local unification.
+        // variable renamed to a fresh FLEXIBLE unification variable: the
+        // type every downstream pass (generalization, the dictionary
+        // convention, monomorphization) works on.
         let (fresh_ty, renames) = self.freshen_sig_type_mapped(declared_ty);
-        // For SOUNDNESS: while checking a clause BODY, any signature variable a
-        // pattern did NOT already pin is skolemized (made rigid) so the body
-        // cannot narrow it — that is what rejects a body more general than the
-        // signature (`f :: a -> Int` / `f x = x`). `sig_skolems` maps each fresh
-        // signature variable to its own rigid skolem, `demote` maps that skolem
-        // back once the body checks, and each skolem is registered with the
-        // classes the declared context provides so a `Monad m =>`-constrained
-        // variable is still discharged by the context while a bare one has no
-        // evidence. GADT refinement happens BEFORE this (at pattern time), so a
-        // refined variable is concrete by the time the body is checked and is
-        // never skolemized. See `skolemize_sig_body_vars` / `check_clause`.
+        // For SOUNDNESS: while a clause is checked — its patterns and its
+        // body — every signature variable is skolemized (made rigid) so
+        // nothing in the clause can narrow it: that is what rejects a body
+        // more general than the signature (`f :: a -> Int` / `f x = x`) and
+        // a pattern narrower than it (`f :: a -> Int` / `f (Just _) = 1`).
+        // `sig_skolems` maps each fresh signature variable to its own rigid
+        // skolem, `demote` maps that skolem back once the clauses are
+        // checked, and each skolem is registered with the classes the
+        // declared context provides so a `Monad m =>`-constrained variable
+        // is still discharged by the context while a bare one has no
+        // evidence. A GADT constructor pattern refines such a skolem for its
+        // clause alone, as a given the clause applies and forgets (see
+        // `check_clause`); the skolem — and so the function's type and the
+        // other clauses — never learns of it. See `skolemize_sig_body_vars`.
         // The declared context: a top-level function's signature context,
         // or — for an instance method — the instance's context followed by
         // the class method's own constraints (check_instance declares both;
@@ -790,15 +791,17 @@ impl Checker {
                     tclauses.push(tc);
                     // Merge, don't just compose: each clause is checked against
                     // the same signature, so two clauses routinely bind the
-                    // same signature variable to their own clause-local
-                    // variables. Composition would keep the first clause's
-                    // binding and silently drop the second's, severing the
-                    // second clause's body types from the signature — its
-                    // class constraints would escape the declared-context
-                    // check, and the monomorphizer could never relate its
-                    // types to a concrete instantiation. (GADT-style per-
-                    // clause refinements conflict instead of unifying and
-                    // deliberately stay clause-local — see Subst::merge.)
+                    // same clause-local variable through a signature variable
+                    // (every clause binds `a1` to the one skolem `sk_a`, and
+                    // its own fresh variables to that). Composition would keep
+                    // the first clause's binding and silently drop the
+                    // second's, severing the second clause's body types from
+                    // the signature — its class constraints would escape the
+                    // declared-context check, and the monomorphizer could
+                    // never relate its types to a concrete instantiation. A
+                    // clause's GADT refinement is not in its substitution at
+                    // all (it is a given of that clause), so nothing here can
+                    // narrow the function's type — see Subst::merge.
                     overall_subst = overall_subst.merge(&clause_subst);
                 }
                 Err(e) => {
@@ -908,13 +911,12 @@ impl Checker {
                 .map(|c| c.patterns.iter().map(PatCell::P).collect())
                 .collect();
             // Argument types for GADT-aware exhaustiveness — from the
-            // DECLARED signature (fresh_ty), not the checked final_ty: a
-            // GADT clause's pattern refines the signature's index variable
-            // through the clause substitution (`f :: G b -> Int; f MkInt =
-            // 1` leaves final_ty at `G Int -> Int`), and exhaustiveness
-            // against the refined index dropped every constructor of the
-            // OTHER indices — the caller chooses `b`, so the declared type
-            // is the set of values that can arrive.
+            // DECLARED signature (fresh_ty): the caller chooses `b` in `f
+            // :: G b -> Int`, so the declared type is the set of values
+            // that can arrive and every index's constructors are required.
+            // (final_ty is that same type today — a clause's GADT
+            // refinement is a given of the clause, not a binding — but the
+            // declared type is what the rule is ABOUT, so it is named.)
             let mut col_tys: Vec<Option<Ty>> = Vec::with_capacity(width);
             let mut t = &fresh_ty;
             for _ in 0..width {
@@ -1238,21 +1240,41 @@ impl Checker {
         self.error_span = None;
         self.error_notes.clear();
         let mut local_env = self.env.clone();
-        let mut remaining_ty = fun_ty.clone();
-        let mut subst = Subst::empty();
+        // Every signature variable is RIGID for the whole clause, patterns
+        // included: the substitution starts as the skolemization itself, so
+        // the patterns are checked against `G sk_a -> sk_a -> String`, not
+        // against flexible variables a pattern could bind. That is what
+        // makes a GADT constructor pattern on a signature type go through
+        // `unify_refining` and come back as a GIVEN of this clause (`a ~
+        // Int` for `describe GI x`), exactly as in a case alternative:
+        // applied to the clause's view of the environment and its result
+        // type below, then forgotten. GHC's rule — the equality scopes over
+        // the clause's right-hand side and nothing else. With the variable
+        // flexible at pattern time (the earlier design) the refinement was
+        // an ordinary binding `a := Int` that outlived the clause: it
+        // narrowed the function's type to `G Int -> Int -> String` when the
+        // refining clause came first, and another clause's `Show a` was
+        // then over a variable the function's type no longer mentioned
+        // and was rejected as ambiguous (T17). It also let a non-GADT
+        // pattern narrow a signature variable at all (`f :: a -> Int; f
+        // (Just _) = 1` was accepted; GHC: "'a' is a rigid type variable").
+        // `check_function` demotes the skolems back once every clause has
+        // been checked.
+        let mut subst = Subst::from_map(sig_skolems.clone());
+        let mut remaining_ty = fun_ty.apply_subst(&subst);
         let mut tpatterns = Vec::new();
         // Existential skolems minted anywhere in this clause (argument
         // patterns or nested matches in the body) must not survive into the
         // function's own type; snapshot to know which ones are ours.
         let skolems_before = self.pattern_skolems.len();
-        // The GADT givens the argument patterns introduce. A signature
-        // variable is still FLEXIBLE here (skolemized only below), so a
-        // GADT pattern on a signature type refines it through `subst`
-        // itself; givens arise for a skolem that is already rigid at
-        // pattern time — an existential unpacked by an enclosing pattern
-        // (`f (Some (I n))` for `Some :: E a -> Some` proves that `a ~ Int`
-        // for this clause) — and apply to the clause's view of its
-        // environment and result type, exactly as in a case alternative.
+        // The GADT givens the argument patterns introduce: a signature
+        // index refined by a constructor pattern (`a ~ Int` above), or an
+        // existential unpacked by an enclosing pattern and refined by a
+        // nested one (`f (Some (I n))` for `Some :: E a -> Some` proves
+        // that `a ~ Int` for this clause). A later pattern sees the earlier
+        // ones' givens in its expected type (`f :: a -> G a -> String; f x
+        // GI` binds `x` at `a`, which the body then reads as Int through
+        // the refined environment).
         let mut givens = SkolemMap::new();
 
         for pattern in &clause.patterns {
@@ -1281,27 +1303,11 @@ impl Checker {
             }
         }
 
-        // Skolemize every signature variable the PATTERNS did not already pin,
-        // for the duration of the body check. A GADT constructor pattern may
-        // have refined a signature variable to a concrete type-index (`s :=
-        // 'Empty`), resolved through `subst`; that variable is now concrete and
-        // is left alone. Every still-free signature variable becomes its rigid
-        // skolem so the body cannot narrow it — the soundness check. The map is
-        // applied to the body's expected return type AND to the local
-        // environment (parameters bound at signature-variable types), so the
-        // body sees one consistent, rigid view; `check_function` demotes the
-        // skolems back afterwards.
-        let body_skolems: Subst = {
-            let mut map = HashMap::new();
-            for (v, sk) in sig_skolems {
-                if Ty::Var(v.clone()).apply_subst(&subst) == Ty::Var(v.clone()) {
-                    map.insert(v.clone(), sk.clone());
-                }
-            }
-            Subst::from_map(map)
-        };
-        subst = subst.compose(&body_skolems);
-
+        // The body sees the clause's refinements: the environment (the
+        // parameters bound at signature-variable types) and the expected
+        // return type read each refined index as the concrete type the
+        // pattern proved; every other signature variable stays its rigid
+        // skolem, so the body cannot narrow it — the soundness check.
         if !givens.is_empty() {
             local_env = local_env.refined(&givens);
         }

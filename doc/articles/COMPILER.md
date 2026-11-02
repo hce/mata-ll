@@ -224,6 +224,29 @@ Order matters because later passes depend on earlier registrations:
   instance's context or a superclass of a context class, since nothing
   discharges it later), `collect_required_var_constraints` and
   `context_failure_note` are all thin walks over it.
+- **Function clauses and GADT refinement** (`check_function` /
+  `check_clause` in `infer.rs`). A signature's variables are freshened
+  (`freshen_sig_type_mapped`) and every clause is checked against the
+  SKOLEMIZED signature (`skolemize_sig_body_vars`): the clause's
+  substitution starts as the skolemization, so its patterns and its body
+  both see rigid variables and neither can narrow one (`f :: a -> Int`
+  rejects `f x = x` and `f (Just _) = 1` alike). A constructor pattern
+  is matched with `unify_refining` (`types.rs`): a skolem inside an
+  INDEX of the scrutinee type (`G a` against `GI :: G Int`) is not a
+  mismatch but a GIVEN of the branch (`SkolemMap`, `a ~ Int`), which the
+  owner of the branch — a clause, a case alternative — applies to its
+  view of the environment (`TypeEnv::refined`) and its expected result
+  type, then forgets; a skolem at the HEAD of the scrutinee type (the
+  whole type is `a`) goes to the plain unifier and is the rigid mismatch
+  GHC reports. The refinement therefore never enters a clause's
+  substitution: `Subst::merge` over the clauses agrees on every
+  signature variable (all bind the one skolem), the function's final
+  type is its declared type whichever clause refines, and a clause's
+  wanteds are judged at the types its body saw (`Show Int` solved by
+  the instance in the refining clause, `Show a` by the context in the
+  other). The skolems are demoted back to the flexible variables once
+  all clauses are checked (`demote_skolems`), so generalization, the
+  dictionary convention and the monomorphizer see ordinary variables.
 - **Deriving** (`typechecker/derive.rs`) — auto-generates `Show`/`Eq`/etc.
   A derived instance is registered like a written one: with GHC's derived
   context (`derived_context` — the class at each type parameter that

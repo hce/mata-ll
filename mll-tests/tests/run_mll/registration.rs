@@ -326,6 +326,8 @@ mll_test!(tuple_instance, "tuple_instance.mll");
 mll_test!(functor_forward_ref, "functor_forward_ref.mll");
 mll_test!(gadt_exhaustive_rigid, "gadt_exhaustive_rigid.mll");
 mll_test!(gadt_unnamed_universal, "gadt_unnamed_universal.mll");
+mll_test!(gadt_clause_refinement_local, "gadt_clause_refinement_local.mll");
+mll_test!(gadt_clause_refinement_dict, "gadt_clause_refinement_dict.mll");
 mll_test!(radix_literals, "radix_literals.mll");
 mll_test!(qualified_operator_module, "qualified_operator_module.mll");
 mll_test!(import_merge, "import_merge.mll");
