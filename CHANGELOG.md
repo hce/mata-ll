@@ -44,6 +44,26 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A stepped range with a zero step — `[x, x .. y]` at `Int` and
+  `Integer` — walks in GHC's direction.** `take 3 [1, 1 .. 5 :: Int]`
+  printed `[]` (GHC `[1,1,1]`), `take 3 [5, 5 .. 1 :: Int]` printed
+  `[5,5,5]` (GHC `[]`), the same two inversions at `Integer`, and
+  `[True, True .. False]` was `[True,True,…]` (GHC `[]`: the Bool
+  instance walks the Int helper, as a derived instance does). The
+  Prelude's `enumFromThenToHelper_Int` and `_Integer` chose the upward
+  walk on `step > 0`, so a zero step took the downward branch and stopped
+  on `x < limit` — the inversion. GHC.Enum chooses it on `x2 >= x1`
+  (`efdtIntUp`; base's `enumDeltaToInteger` on `delta >= 0`): a zero step
+  is an upward walk that never passes its limit, infinitely many `x` when
+  `x <= y` and `[]` otherwise. Both helpers branch on `step >= 0` now;
+  every nonzero step is unchanged (base's edge shapes `[1, 5 .. 3]` =
+  `[1]`, `[5, 1 .. 3]` = `[5]`, `[3, 1 .. 5]` = `[]` held before and hold
+  now), and the derived instances' `enumStep`, `Enum ()` and `Enum
+  Number` already had GHC's rule. The backend fuzzer's vocabulary now has
+  the Int and Integer ranges under a take budget, a third of the stepped
+  ones with a zero step, oracled against base's `eftInt`, `efdtInt` and
+  `enumDeltaToInteger`. Found by the 2026-10 fresh-eyes review (N5).
+  (GHC-goldened case `enum_zero_step_range`.)
 - **A `Number` is an IEEE double on every host — it never carries Lua's
   integer subtype, whose arithmetic wraps at 2^63.** On Lua 5.3+ an
   integer-syntax literal at `Number` was emitted as a bare integer numeral

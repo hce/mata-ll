@@ -422,6 +422,7 @@ mll_test!(ord_bool, "ord_bool.mll");
 mll_test!(num_sign_edges, "num_sign_edges.mll");
 mll_test!(record_brace_next_line, "record_brace_next_line.mll");
 mll_test!(enum_range, "enum_range.mll");
+mll_test!(enum_zero_step_range, "enum_zero_step_range.mll");
 mll_test!(read_typeclass, "read_typeclass.mll");
 mll_test!(monad_nonio, "monad_nonio.mll");
 mll_test!(derive_enum, "derive_enum.mll");

@@ -873,6 +873,12 @@ variable.
     --   [1,3..10] →  enumFromThenTo 1 3 10
     --   [1..]     →  enumFrom 1
     --   [1,3..]   →  enumFromThen 1 3
+    -- A stepped range walks in GHC.Enum's direction: upward iff the
+    -- second element is not below the first (stopping once an element
+    -- passes the limit), downward only for a negative step. So
+    -- [1,5..3] is [1], [5,1..3] is [5], [3,1..5] is [], and a zero
+    -- step is an infinite list of the start when it does not exceed
+    -- the limit ([1,1..5]) and [] when it does ([5,5..1]).
 
 # Type inference
 

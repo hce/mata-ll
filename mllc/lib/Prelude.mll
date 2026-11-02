@@ -597,9 +597,13 @@ enumFromTo_Int n m = if n > m then [] else n : enumFromTo_Int (n + 1) m
 enumFromThenTo_Int :: Int -> Int -> Int -> [Int]
 enumFromThenTo_Int n next m = enumFromThenToHelper_Int n (next - n) m
 
+-- GHC.Enum's direction rule (`enumFromThenTo x1 x2 y | x2 >= x1 = efdtIntUp
+-- ..`): the walk is upward when the step is zero or positive and stops
+-- once it passes the limit, so `[x, x .. y]` is infinitely many `x` when
+-- `x <= y` and `[]` otherwise; only a negative step walks down.
 enumFromThenToHelper_Int :: Int -> Int -> Int -> [Int]
 enumFromThenToHelper_Int x step m =
-    if step > 0
+    if step >= 0
     then if x > m then [] else x : enumFromThenToHelper_Int (x + step) step m
     else if x < m then [] else x : enumFromThenToHelper_Int (x + step) step m
 
@@ -668,9 +672,11 @@ enumFromTo_Integer n m = if n > m then [] else n : enumFromTo_Integer (n + 1) m
 enumFromThenTo_Integer :: Integer -> Integer -> Integer -> [Integer]
 enumFromThenTo_Integer n next m = enumFromThenToHelper_Integer n (next - n) m
 
+-- The same direction rule as the Int helper (base's `enumDeltaToInteger x
+-- delta lim | delta >= 0 = up_list ..`): a zero step walks upward.
 enumFromThenToHelper_Integer :: Integer -> Integer -> Integer -> [Integer]
 enumFromThenToHelper_Integer x step m =
-    if step > 0
+    if step >= 0
     then if x > m then [] else x : enumFromThenToHelper_Integer (x + step) step m
     else if x < m then [] else x : enumFromThenToHelper_Integer (x + step) step m
 

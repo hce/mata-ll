@@ -2286,10 +2286,18 @@ Range syntax desugars to \texttt{Enum} methods:
 [1,3..10]     -- enumFromThenTo 1 3 10 => [1,3,5,7,9]
 [1..]         -- enumFrom 1            => [1,2,3,...] (infinite)
 [1,3..]       -- enumFromThen 1 3      => [1,3,5,...] (infinite)
+[10,7..1]     -- enumFromThenTo 10 7 1 => [10,7,4,1]
+[1,1..5]      -- enumFromThenTo 1 1 5  => [1,1,1,...] (infinite)
+[5,5..1]      -- enumFromThenTo 5 5 1  => []
 \end{lstlisting}
 
 Works with any type that has an \texttt{Enum} instance, including
-user-defined types with \texttt{deriving Enum}.
+user-defined types with \texttt{deriving Enum}. A stepped range walks
+in the direction GHC's \texttt{Enum} instances take: upward when the
+second element is not below the first, stopping once an element passes
+the limit, and downward only for a negative step -- so a zero step is
+an infinite list of the start when it does not exceed the limit and
+empty when it does.
 
 %======================================================================
 \section{Differences from Haskell}

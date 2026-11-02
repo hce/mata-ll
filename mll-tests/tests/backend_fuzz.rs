@@ -43,7 +43,11 @@
 //! doubles. The fragment never reaches an infinity or a NaN: every Number
 //! production bounds its magnitude (products and powers take literal
 //! operands, division takes a nonzero literal divisor), so IEEE arithmetic
-//! in the strict reference is bit-identical to the host's.
+//! in the strict reference is bit-identical to the host's. The Enum
+//! ranges at Int and Integer (`take k [a .. c]`, `take k [a, b .. c]`, a
+//! third of them with a zero step) are oracled against base's own
+//! `eftInt`/`efdtInt`/`enumDeltaToInteger`, so the direction rule
+//! (upward iff `b >= a`) has a standing probe beside the hand corpus.
 //!
 //! Everything is deterministic and offline: each program derives from
 //! (BATCH_SEED, index) through SplitMix64, so any failure reproduces by
@@ -339,6 +343,15 @@ enum Expr {
         arm: Box<Expr>,
     },
     Call(P, Vec<Expr>),
+    /// `take K [a .. c]` / `take K [a, b .. c]` at Int or Integer — the
+    /// Enum range methods, under a literal take budget because the stepped
+    /// form is infinite at a zero step. The probe is GHC.Enum's direction
+    /// rule (the walk is upward iff `b >= a`, so a zero step walks upward:
+    /// infinitely many `a` when `a <= c`, `[]` otherwise) and the limit
+    /// shapes below, between and beyond the first pair; the operands are
+    /// atoms, which keeps the fragment away from the Int overflow edge
+    /// (base guards it with `y - delta`), a separate concern.
+    Range { from: Box<Expr>, then: Option<Box<Expr>>, to: Box<Expr>, budget: usize },
     /// A bare reference to a prelude/scaffold function used first-class
     /// (`map`, `const`, `($)`, …) — the arity-widening and adapters path.
     FunRef(P),
@@ -489,6 +502,10 @@ fn render(e: &Expr) -> String {
             bv,
             render(arm)
         ),
+        Expr::Range { from, then, to, budget } => match then {
+            Some(t) => format!("(take {} [{}, {} .. {}])", budget, render(from), render(t), render(to)),
+            None => format!("(take {} [{} .. {}])", budget, render(from), render(to)),
+        },
         Expr::Call(p, args) => {
             let rendered: Vec<String> = args.iter().map(render).collect();
             match p {
@@ -1202,6 +1219,12 @@ fn eval(e: &Expr, env: &Env) -> Value {
             let vals: Vec<Value> = args.iter().map(|a| eval(a, env)).collect();
             call_builtin(p, vals)
         }
+        Expr::Range { from, then, to, budget } => {
+            let x1 = eval(from, env);
+            let x2 = then.as_ref().map(|t| eval(t, env));
+            let y = eval(to, env);
+            Value::List(ghc_range(&x1, x2.as_ref(), &y, *budget))
+        }
         Expr::FunRef(p) => Value::Builtin(p.clone(), Vec::new()),
         Expr::Annot(e, _) => eval(e, env),
     }
@@ -1209,6 +1232,104 @@ fn eval(e: &Expr, env: &Env) -> Value {
 
 fn b2(v: Value) -> Box<Value> {
     Box::new(v)
+}
+
+/// The first `budget` elements of GHC.Enum's `enumFromTo x1 y` (no `x2`)
+/// or `enumFromThenTo x1 x2 y` at Int and Integer, from base's
+/// definitions rather than from mata-ll's Prelude: `eftInt` walks up by
+/// one while `x <= y`; `efdtInt` takes the upward walk iff `x2 >= x1` (a
+/// zero step is upward, so it yields `x1` forever when `x1 <= y` and
+/// nothing when `x1 > y`), answers `[x1]` or `[]` outright when the limit
+/// falls short of `x2`, and otherwise stops against `y - delta` so the
+/// walk never computes an element past the limit; `enumDeltaToInteger`
+/// is the plain `x > lim` / `x < lim` walk, with the same `delta >= 0`
+/// direction rule.
+fn ghc_range(x1: &Value, x2: Option<&Value>, y: &Value, budget: usize) -> Vec<Value> {
+    match (x1, x2, y) {
+        (Value::Int(x1), None, Value::Int(y)) => {
+            let mut out = Vec::new();
+            let mut x = *x1;
+            while out.len() < budget && x <= *y {
+                out.push(Value::Int(x));
+                if x == *y {
+                    break;
+                }
+                x += 1;
+            }
+            out
+        }
+        (Value::Int(x1), Some(Value::Int(x2)), Value::Int(y)) => {
+            efdt_int(*x1, *x2, *y, budget).into_iter().map(Value::Int).collect()
+        }
+        (Value::Integer(x1), None, Value::Integer(y)) => {
+            let mut out = Vec::new();
+            let mut x = *x1;
+            while out.len() < budget && x <= *y {
+                out.push(Value::Integer(x));
+                x += 1;
+            }
+            out
+        }
+        (Value::Integer(x1), Some(Value::Integer(x2)), Value::Integer(y)) => {
+            let delta = x2 - x1;
+            let mut out = Vec::new();
+            let mut x = *x1;
+            while out.len() < budget {
+                let past = if delta >= 0 { x > *y } else { x < *y };
+                if past {
+                    break;
+                }
+                out.push(Value::Integer(x));
+                x = x
+                    .checked_add(delta)
+                    .expect("backend_fuzz: Integer range budget exceeded (generator bug)");
+            }
+            out
+        }
+        _ => panic!("evaluator: range over {x1:?} / {x2:?} / {y:?}"),
+    }
+}
+
+/// base's `efdtIntUp` / `efdtIntDn`, element for element, cut at `budget`.
+fn efdt_int(x1: i64, x2: i64, y: i64, budget: usize) -> Vec<i64> {
+    let mut out = Vec::new();
+    if x2 >= x1 {
+        if y < x2 {
+            if y >= x1 {
+                out.push(x1);
+            }
+        } else {
+            let delta = x2.wrapping_sub(x1);
+            let y2 = y.wrapping_sub(delta);
+            out.push(x1);
+            let mut x = x2;
+            while out.len() < budget {
+                out.push(x);
+                if x > y2 {
+                    break;
+                }
+                x = x.wrapping_add(delta);
+            }
+        }
+    } else if y > x2 {
+        if y <= x1 {
+            out.push(x1);
+        }
+    } else {
+        let delta = x2.wrapping_sub(x1);
+        let y2 = y.wrapping_sub(delta);
+        out.push(x1);
+        let mut x = x2;
+        while out.len() < budget {
+            out.push(x);
+            if x < y2 {
+                break;
+            }
+            x = x.wrapping_add(delta);
+        }
+    }
+    out.truncate(budget);
+    out
 }
 
 /// GHC.Real's `(^)` at Double, exactly: `x ^ 0 = 1`; otherwise powImpl.
@@ -2089,7 +2210,7 @@ impl Gen {
     }
 
     fn list_expr(&mut self, elem: &Ty, depth: usize) -> Expr {
-        match self.r.below(14) {
+        match self.r.below(15) {
             0 | 1 => {
                 // map with a random source element type.
                 let src = gen_ty(&mut self.r, 1, false);
@@ -2178,6 +2299,24 @@ impl Gen {
                 let k = gen_key_ty(&mut self.r, 1);
                 let m = self.expr(&Ty::hm(k, elem.clone()), depth - 1);
                 Expr::Call(P::HmValues, vec![m])
+            }
+            13 | 14 if matches!(elem, Ty::Int | Ty::Integer) => {
+                // A range under a take budget (see Expr::Range). One
+                // third of the stepped ranges repeat the start as the
+                // second element — the zero step, whose direction is the
+                // rule's edge; the small atoms put the limit below,
+                // between and beyond the first pair about equally. The
+                // budget is never zero, so each range shows at least its
+                // first element or its emptiness.
+                let from = self.atom(elem);
+                let then = match self.r.below(3) {
+                    0 => None,
+                    1 => Some(b(from.clone())),
+                    _ => Some(b(self.atom(elem))),
+                };
+                let to = self.atom(elem);
+                let budget = 1 + self.r.below(5);
+                Expr::Range { from: b(from), then, to: b(to), budget }
             }
             _ => {
                 let n = self.r.below(4);

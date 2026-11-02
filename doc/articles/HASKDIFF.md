@@ -774,7 +774,7 @@ class `Hashable` are mata-ll's own.
 | `Eq` | the same types, plus `IORef a` (reference identity, as GHC) |
 | `Ord` | the same types but `IORef` (see the previous section) |
 | `Read` | `Int`, `Integer`, `Number`, `Bool`, `String` — GHC's grammar per type, no `Maybe`/list/tuple readers (there is no `deriving (Read)`) |
-| `Enum` | `Int`, `Integer`, `Number` (GHC's `Enum Double`: `fromEnum` truncates, the ranges are base's `numericEnumFrom` family), `Bool`, `Ordering`, `()`, and derived enumerations |
+| `Enum` | `Int`, `Integer`, `Number` (GHC's `Enum Double`: `fromEnum` truncates, the ranges are base's `numericEnumFrom` family), `Bool`, `Ordering`, `()`, and derived enumerations — every stepped range takes GHC.Enum's direction: upward iff the second element is not below the first, so `[x, x .. y]` is infinitely many `x` when `x <= y` and `[]` otherwise |
 | `Bounded` | `Int`, `Bool`, `Ordering`, `()`, tuples up to the 15-tuple, and derived enumerations and single-constructor products |
 | `Num` | `Int`, `Integer`, `Number` |
 | `Real` | `Int`, `Integer`, `Number` |
