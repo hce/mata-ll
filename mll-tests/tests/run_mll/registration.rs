@@ -713,6 +713,12 @@ mll_test!(ord_minimal_instance, "ord_minimal_instance.mll");
 // instance, a showsPrec-only Show instance with showParen precedence,
 // and show-only instances left unparenthesized inside derived fields/Just.
 mll_test!(eq_minimal_instance, "eq_minimal_instance.mll");
+mll_test!(num_minimal_instance, "num_minimal_instance.mll");
+mll_test!(fractional_integral_minimal, "fractional_integral_minimal.mll");
+mll_test!(enum_minimal_instance, "enum_minimal_instance.mll");
+mll_test!(foldable_foldr_only, "foldable_foldr_only.mll");
+mll_test!(minimal_defaults_dictionary, "minimal_defaults_dictionary.mll");
+mll_test!(monoid_mconcat_only, "monoid_mconcat_only.mll");
 mll_test!(show_shows_prec_instance, "show_shows_prec_instance.mll");
 // GHC's boxed-STArray laziness: stores keep the value as given (a
 // never-read bottom is silent); reads force the slot.

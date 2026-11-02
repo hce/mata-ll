@@ -724,13 +724,61 @@ it — and, structurally, the compiler-owned containers: `Ord [a]`
 `sortBy` (stable mergesort, GHC's `Data.List` behavior) live in the
 Prelude like the other list functions.
 
-## Show and Eq carry GHC's methods and defaults; `showList` is absent
+## Every builtin class carries GHC's defaults; `showList` is absent
 
-The builtin `Eq` class has GHC's two methods, `==` and `/=`, each
-defaulting through the other, and `Ord` carries GHC's seven defaults —
-an instance may give any minimal complete definition (`==` alone, `/=`
-alone, `compare` alone, `<=` alone). `Show` has `show` and `showsPrec`,
-again with GHC's mutual defaults, plus the Prelude's `ShowS`, `shows`,
+Every builtin class has GHC's default methods (base 4.21), so an
+instance that gives GHC's minimal complete definition is complete here
+too, and one that gives less is warned about at the instance
+declaration, as under `-Wmissing-methods` (the warning is on by
+default here). The minimal definitions are GHC's:
+
+| class | minimal definition | defaults |
+|---|---|---|
+| `Eq` | `==` or `/=` | each through the other |
+| `Ord` | `compare` or `<=` | the other five, `max`, `min` |
+| `Show` | `showsPrec` or `show` | each through the other |
+| `Num` | `+`, `*`, `abs`, `signum`, `fromInteger`, and `negate` or `-` | `negate x = 0 - x`, `x - y = x + negate y` |
+| `Fractional` | `fromRational`, and `recip` or `/` | `recip x = 1 / x`, `x / y = x * recip y` |
+| `Integral` | `quotRem`, `toInteger` | `quot`, `rem`, `div`, `mod`, `divMod` over `quotRem` |
+| `Real` | nothing (no `toRational`: no `Rational`) | — |
+| `Enum` | `toEnum`, `fromEnum` | `succ`, `pred` and the four ranges through `Int` |
+| `Bounded` | `minBound`, `maxBound` | — |
+| `Functor` | `fmap` | `<$>` (a method here, see below) |
+| `Applicative` | `pure`, and `<*>` or `liftA2` | each through the other |
+| `Monad` | `>>=` | `>>`, `return = pure` |
+| `Foldable` | `foldr` | `foldl`, `foldl'` (continuation folds over `foldr`) |
+| `Traversable` | `traverse` | — |
+| `Semigroup` | `<>` | — |
+| `Monoid` | `mempty` or `mconcat` | `mempty = mconcat []`, `mappend = (<>)`, `mconcat = foldr mappend mempty` |
+| `MonadFail` | `fail` | — |
+| `Read` | `read` | — |
+
+Where GHC's minimal definition offers a method mata-ll does not have,
+only the other half exists: `Foldable` has no `foldMap` method (it is a
+Prelude function over `foldr`), so `foldr` is required where GHC takes
+`foldMap | foldr`; `Traversable` has no `sequenceA` method (a Prelude
+function over `traverse`), so `traverse` is required; `Read` has `read`
+alone where GHC has `readsPrec | readPrec`. `Semigroup` has no
+`sconcat`/`stimes`. A `{-# MINIMAL #-}` pragma in a source class is
+not read (every pragma is dropped with a warning): a source class gets
+GHC's rule for a class without the pragma, every method that has no
+default is required, and a class whose methods default through each
+other accepts an instance giving neither, silently, as GHC does.
+
+An instance that leaves a required method out is still accepted, as
+GHC accepts it, with the warning: a use of a method that has no default
+is a compile error here ("No instance for 'foldr' on type 'Tree'",
+naming the instance) where GHC compiles it and fails at run time — a
+use inside another default of the same instance counts (`foldl'`'s
+default calls `foldr`, so a `Foldable` instance without `foldr` is
+rejected whether or not the program folds); a
+mutual pair with neither half given (`negate`/`-`, `==`/`/=`,
+`show`/`showsPrec`, `<*>`/`liftA2`, …) recurses between the two
+defaults at the first use, under GHC and here alike (GHC's run
+exhausts its stack; a Lua run reports a stack overflow).
+
+`Eq`'s `/=`, `Ord`'s seven and `Show`'s pair were the first to carry
+their defaults; `Show` also has the Prelude's `ShowS`, `shows`,
 `showString` and `showParen`, so a hand-written `showsPrec d x =
 showParen (d > 10) …` behaves as under GHC: a derived `Show` shows a
 positional field at precedence 11 through the field type's own
@@ -745,9 +793,7 @@ syntax included — at 11).
 render as a string literal, and mata-ll's `String` is a primitive type
 (see "Strings and ByteStrings"). A record field and a list element are
 shown with `show` rather than `showsPrec 0`; the two coincide for every
-lawful instance. An instance that defines neither method of a pair
-(`==`/`/=`, `show`/`showsPrec`) is accepted as GHC accepts it (GHC warns
-under `-Wmissing-methods`) and loops at the first use.
+lawful instance.
 
 ## The Prelude is a curated subset
 

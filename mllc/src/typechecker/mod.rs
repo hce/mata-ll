@@ -397,6 +397,17 @@ pub struct ClassInfo {
     pub methods: Vec<(String, Ty)>,
     /// Default method implementations (AST clauses, keyed by method name)
     pub default_methods: HashMap<String, Vec<Clause>>,
+    /// The class's minimal complete definition — GHC's `MINIMAL` formula
+    /// in conjunctive normal form: an instance must define at least one
+    /// method of EVERY inner group (`[["+"], ["*"], …, ["negate", "-"]]`
+    /// for Num). A builtin class states GHC's pragma by hand in
+    /// `register_builtin_class`; a source class gets GHC's rule for a
+    /// class without the pragma — every method that has no default is a
+    /// group of its own — except the Prelude's own source classes, whose
+    /// pragmas live beside the builtin ones (`prelude_source_class_minimal`).
+    /// `check_instance` warns at the instance declaration for each group
+    /// the instance leaves empty, as GHC's `-Wmissing-methods` does.
+    pub minimal: Vec<Vec<String>>,
 }
 
 /// Instance info
@@ -2704,10 +2715,11 @@ impl Checker {
     /// aliases once more — idempotent re-registration, see
     /// `preregister_families_and_aliases`).
     fn register_classes_and_families(&mut self, module: &Module) {
-        for decl in &module.decls {
+        for (decl_idx, decl) in module.decls.iter().enumerate() {
             match decl {
                 Decl::ClassDecl { name, type_var, superclasses, methods } => {
-                    self.register_class(name, type_var, superclasses, methods);
+                    let in_prelude = decl_idx < self.prelude_decl_count;
+                    self.register_class(name, type_var, superclasses, methods, in_prelude);
                 }
                 Decl::TypeFamily { name, equations, .. } => {
                     self.type_families.insert(name.clone(), equations.clone());

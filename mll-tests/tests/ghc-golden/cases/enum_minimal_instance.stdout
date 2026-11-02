@@ -1,0 +1,6 @@
+(Green,Blue,Green,Red)
+([0,1,2],Green)
+([Red,Green,Blue],[Green,Blue])
+([Red,Green,Blue],[Green,Blue],[])
+([Red,Blue],[Blue,Green,Red],[Red,Green,Blue],[Blue,Red])
+([(Red,10),(Green,20),(Blue,30)],[Red,Blue])

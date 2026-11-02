@@ -44,6 +44,41 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **Every builtin class carries GHC's default methods, so an instance
+  that gives GHC's minimal complete definition is complete here too**
+  (`instance Foldable Tree` defining `foldr` alone was rejected at the
+  first `foldl` — "No instance for 'foldl' on type 'Tree'" — where GHC
+  prints `[3,2,1]`; a `Num` instance giving `-` but not `negate` was
+  rejected at `negate`, one giving `negate` but not `-` at `-`, where
+  GHC accepts both through `negate x = 0 - x` and `x - y = x + negate
+  y`). Foldable gave only `foldl'` a default, Num, Fractional, Integral
+  and Enum none at all. Now every builtin class registers base's
+  defaults — `foldl` over `foldr`; Num's and Fractional's mutual pairs;
+  Integral's `quot`/`rem`/`div`/`mod`/`divMod` over `quotRem`; Enum's
+  `succ`/`pred` and the four ranges over `toEnum`/`fromEnum` — and its
+  `MINIMAL` formula, beside the method list, and the Prelude's `Monoid`
+  gets base's `mempty = mconcat []` (minimal `mempty | mconcat`). An
+  instance is judged at its declaration, as GHC's `-Wmissing-methods`
+  judges it: a group of the minimal definition it leaves empty is a
+  warning ("instance 'Num V' gives neither 'negate' nor '-': one of
+  them is required (the other follows from it)"; "instance 'Foldable
+  Tree' gives no 'foldr', and the class has no default for it"), the
+  program compiles as under GHC, and a use of a method that has no
+  default stays the compile error it was, now naming the instance that
+  lacks it. A source class without the pragma gets GHC's rule (every
+  method without a default is required). Alongside: a sibling method
+  called from a body that stays polymorphic — the dictionary form of its
+  own instance — at a type that WIDENS the method's arity (`foldr` at
+  `b := acc -> acc` inside a continuation-passing `foldl`) resolved to
+  the generic copy, whose parameter count is the declared one, so a
+  `foldr`-only Foldable reached through an existential crashed in Lua
+  ("attempt to call a table value"); such a use now takes the copy at
+  its arrow count, as a plain function's does. Found by the 2026-10
+  fresh-eyes review (T16, L17). (GHC-goldened cases
+  `foldable_foldr_only`, `num_minimal_instance`,
+  `fractional_integral_minimal`, `enum_minimal_instance`,
+  `minimal_defaults_dictionary`, `monoid_mconcat_only`; the
+  declaration warnings pinned in `compile_errors`.)
 - **A class method's own context is part of the method's type, as in
   GHC** (`class Describe a where describeWith :: Show b => a -> b ->
   String` with `instance Describe Bool where describeWith _ b = show b`

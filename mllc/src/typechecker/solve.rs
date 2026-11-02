@@ -556,7 +556,10 @@ impl Checker {
 
     // --- Typeclass handling ---
 
-    pub(super) fn register_class(&mut self, name: &str, type_var: &str, superclasses: &[String], methods: &[ClassMethod]) {
+    /// `in_prelude`: the declaration is the Prelude's own (`lib/Prelude.mll`),
+    /// whose classes carry their `MINIMAL` pragma in the compiler
+    /// (`prelude_source_class_minimal`) since the source form has none.
+    pub(super) fn register_class(&mut self, name: &str, type_var: &str, superclasses: &[String], methods: &[ClassMethod], in_prelude: bool) {
         // The class variable's kind was already inferred, order-independently
         // and with superclass agreement, by `infer_class_kinds` (pass 1b)
         // and lives in `class_kinds`. `class Foldable t where foldr :: … ->
@@ -683,12 +686,24 @@ impl Checker {
             }
         }
 
+        // The minimal complete definition: GHC's rule for a class without a
+        // `MINIMAL` pragma — every method without a default is required,
+        // each a group of its own — unless the compiler holds the pragma
+        // for this Prelude class. (A `{-# MINIMAL #-}` pragma in a source
+        // class is not read: the lexer drops every pragma with an "ignored
+        // pragma" warning.)
+        let minimal = in_prelude.then(|| Self::prelude_source_class_minimal(name)).flatten()
+            .unwrap_or_else(|| method_types.iter()
+                .filter(|(m, _)| !default_methods.contains_key(m))
+                .map(|(m, _)| vec![m.clone()])
+                .collect());
         self.classes.insert(name.to_string(), ClassInfo {
             name: name.to_string(),
             type_var: type_var.to_string(),
             superclasses: superclasses.to_vec(),
             methods: method_types,
             default_methods,
+            minimal,
         });
     }
 
@@ -1290,9 +1305,81 @@ impl Checker {
             }
         }
 
+        self.warn_missing_methods(class_name, &target_ty, &class_info, &provided_methods);
+
         self.register_instance(instance_info);
 
         result_fns
+    }
+
+    /// GHC's `-Wmissing-methods`, at the instance declaration: one warning
+    /// per group of the class's minimal complete definition
+    /// (`ClassInfo::minimal`) that the instance leaves empty. A warning,
+    /// not an error, because the program is still GHC's: a required method
+    /// with no default is absent — its use is a compile error here
+    /// ("No instance for '<method>' on type '<T>'", where GHC fails at run
+    /// time) — and a mutual pair with neither half given recurses between
+    /// the two defaults at the first use, under GHC and here alike. The
+    /// derived instances never come through here (each defines every
+    /// method), nor do the builtin ones.
+    fn warn_missing_methods(
+        &mut self,
+        class_name: &str,
+        target_ty: &Ty,
+        class_info: &ClassInfo,
+        provided: &std::collections::HashSet<String>,
+    ) {
+        let paren = crate::types::paren_ty;
+        let head = format!("instance '{} {}'", class_name, paren(target_ty));
+        for group in &class_info.minimal {
+            if group.iter().any(|m| provided.contains(m)) {
+                continue;
+            }
+            let quoted: Vec<String> = group.iter().map(|m| format!("'{}'", m)).collect();
+            let (msg, note) = match quoted.as_slice() {
+                [] => continue,
+                [one] => (
+                    format!("{} gives no {}, and the class has no default for it", head, one),
+                    format!(
+                        "a use of {} at '{}' is a compile error here (\"No instance for {} on type \
+                         '{}'\"); GHC accepts the instance with this same warning \
+                         (-Wmissing-methods) and fails at run time at the first use",
+                        one, paren(target_ty), one, paren(target_ty)
+                    ),
+                ),
+                [first, second] => (
+                    format!(
+                        "{} gives neither {} nor {}: one of them is required (the other follows from it)",
+                        head, first, second
+                    ),
+                    format!(
+                        "the class defines each of {} and {} in terms of the other, so with neither \
+                         given a use of either one recurses without end at run time; GHC accepts \
+                         the instance with this same warning (-Wmissing-methods), and the program \
+                         loops at the first use there as it does here",
+                        first, second
+                    ),
+                ),
+                many => (
+                    format!(
+                        "{} gives none of {}: one of them is required (the others follow from it)",
+                        head, many.join(", ")
+                    ),
+                    format!(
+                        "the class defines each of {} in terms of the others, so with none given a \
+                         use of any one recurses without end at run time; GHC accepts the instance \
+                         with this same warning (-Wmissing-methods)",
+                        many.join(", ")
+                    ),
+                ),
+            };
+            self.push_warning_span(
+                DiagnosticKind::Other(msg),
+                format!("instance {} {}", class_name, target_ty),
+                None,
+                vec![note],
+            );
+        }
     }
 
     /// Expose instances for the monomorphizer

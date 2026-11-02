@@ -7641,3 +7641,180 @@ main = do
     assert!(compile(source, Path::new("."), &[]).is_ok(),
         "a structural superclass instance with its context, and a witness declared later, must be accepted");
 }
+
+// Every builtin class carries GHC's default methods and its MINIMAL
+// formula (2026-10 review, T16/L17), and an instance is judged at its
+// DECLARATION: a group of the minimal definition the instance leaves
+// empty is GHC's `-Wmissing-methods` warning — a warning, because the
+// program is still GHC's. A required method with no default is absent
+// (its use is the compile error it always was, now naming the instance);
+// a mutual pair with neither half given loops at the first use, under GHC
+// and here alike.
+#[test]
+fn instance_missing_required_method_warns_at_declaration() {
+    let src = "data C = C Int deriving (Show, Eq)\n\ninstance Bounded C where\n    minBound = C 0\n\nmain :: IO ()\nmain = print (minBound :: C)\n";
+    let result = compile(src, Path::new("."), &[])
+        .expect("an instance missing an unused required method compiles, with a warning");
+    let rendered: Vec<String> = result.warnings.iter().map(|w| w.to_string()).collect();
+    assert_eq!(rendered.len(), 1, "one warning, for the one missing method: {rendered:?}");
+    assert!(rendered[0].contains("instance 'Bounded C' gives no 'maxBound', and the class has no default for it"),
+        "the warning names the instance and the method: {}", rendered[0]);
+    assert!(rendered[0].contains("in instance Bounded C"), "attributed to the declaration: {}", rendered[0]);
+    assert!(rendered[0].contains("-Wmissing-methods") && rendered[0].contains("compile error here"),
+        "the note explains GHC's verdict and mata-ll's at a use: {}", rendered[0]);
+    // A use of the absent method is the compile error it always was, and
+    // the note sends the reader to the instance rather than to a missing one.
+    let e = expect_compile_error(
+        &src.replace("print (minBound :: C)", "print (maxBound :: C)"),
+        &[],
+        &["No instance for 'maxBound' on type 'C'",
+          "there is an instance 'Bounded C', but it does not define 'maxBound'",
+          "has no default for it: add 'maxBound' to the instance"],
+    );
+    assert!(!e.contains("gives no 'maxBound', and the class"), "the warning is not an error: {e}");
+    // A Foldable instance without `foldr` is rejected outright, program
+    // or no program: the instance's own `foldl'` default calls `foldr`
+    // (GHC's `foldMap | foldr` has no counterpart here, foldMap being a
+    // Prelude function). The error is located at the instance and
+    // names the missing method.
+    expect_compile_error(
+        "data Tree a = Leaf | Node (Tree a) a (Tree a)\n\ninstance Foldable Tree where\n    foldl _ z Leaf = z\n    foldl f z (Node l x r) = foldl f (f (foldl f z l) x) r\n\nmain :: IO ()\nmain = print (foldl (+) 0 (Node Leaf 1 Leaf))\n",
+        &[],
+        &["No instance for 'foldr' on type 'Tree'",
+          "the Foldable instance for 'Tree'",
+          "there is an instance 'Foldable Tree', but it does not define 'foldr'"],
+    );
+}
+
+#[test]
+fn instance_missing_both_halves_of_a_mutual_pair_warns_and_compiles() {
+    // GHC: the same warning ("No explicit implementation for either
+    // 'negate' or '-'"), and the program compiles; the run loops.
+    let src = "data V = V Int deriving (Show, Eq)\n\ninstance Num V where\n    (+) (V a) (V b) = V (a + b)\n    (*) (V a) (V b) = V (a * b)\n    abs (V a) = V (abs a)\n    signum (V a) = V (signum a)\n    fromInteger n = V (fromInteger n)\n\nmain :: IO ()\nmain = print (V 1 - V 4)\n";
+    let result = compile(src, Path::new("."), &[]).expect("compiles, as under GHC");
+    let rendered: Vec<String> = result.warnings.iter().map(|w| w.to_string()).collect();
+    assert_eq!(rendered.len(), 1, "{rendered:?}");
+    assert!(rendered[0].contains("instance 'Num V' gives neither 'negate' nor '-': one of them is required (the other follows from it)"),
+        "{}", rendered[0]);
+    assert!(rendered[0].contains("recurses without end at run time") && rendered[0].contains("-Wmissing-methods"),
+        "the note says what happens at a use: {}", rendered[0]);
+
+    // Applicative's pair: `<*>` | `liftA2`.
+    let src = "newtype Id a = Id a\n\ninstance Functor Id where\n    fmap f (Id x) = Id (f x)\n\ninstance Applicative Id where\n    pure x = Id x\n\nmain :: IO ()\nmain = pure ()\n";
+    let result = compile(src, Path::new("."), &[]).expect("compiles, as under GHC");
+    let rendered: Vec<String> = result.warnings.iter().map(|w| w.to_string()).collect();
+    assert_eq!(rendered.len(), 1, "{rendered:?}");
+    assert!(rendered[0].contains("instance 'Applicative Id' gives neither '<*>' nor 'liftA2'"), "{}", rendered[0]);
+}
+
+#[test]
+fn source_class_instance_missing_undefaulted_method_warns() {
+    // A source class has no MINIMAL pragma, so GHC's rule for one applies:
+    // every method without a default is required. A class whose methods
+    // default through each other gets no warning for an instance giving
+    // neither — exactly GHC without the pragma (the pragma is not read:
+    // the lexer drops every `{-# … #-}`).
+    let src = "class Shape a where\n    area :: a -> Int\n    label :: a -> String\n    label _ = \"shape\"\n\ninstance Shape Bool where\n    label _ = \"bool\"\n\nclass Twin a where\n    one :: a -> Int\n    two :: a -> Int\n    one x = two x\n    two x = one x\n\ninstance Twin Bool where\n\nmain :: IO ()\nmain = putStrLn (label True)\n";
+    let result = compile(src, Path::new("."), &[]).expect("compiles, with a warning");
+    let rendered: Vec<String> = result.warnings.iter().map(|w| w.to_string()).collect();
+    assert_eq!(rendered.len(), 1, "only Shape's missing 'area' warns: {rendered:?}");
+    assert!(rendered[0].contains("instance 'Shape Bool' gives no 'area', and the class has no default for it"),
+        "{}", rendered[0]);
+}
+
+#[test]
+fn minimal_complete_instances_do_not_warn() {
+    // One instance per builtin class at GHC's minimal complete definition
+    // (and each alternative of a pair), plus the Prelude's Monoid at
+    // `mconcat` alone: no warning anywhere, and every default resolves.
+    let src = r#"
+data A = A Int deriving (Show, Eq)
+instance Num A where
+    (+) (A x) (A y) = A (x + y)
+    (*) (A x) (A y) = A (x * y)
+    (-) (A x) (A y) = A (x - y)
+    abs (A x) = A (abs x)
+    signum (A x) = A (signum x)
+    fromInteger n = A (fromInteger n)
+
+data B = B Int deriving (Show, Eq)
+instance Num B where
+    (+) (B x) (B y) = B (x + y)
+    (*) (B x) (B y) = B (x * y)
+    negate (B x) = B (negate x)
+    abs (B x) = B (abs x)
+    signum (B x) = B (signum x)
+    fromInteger n = B (fromInteger n)
+instance Ord B where
+    compare (B x) (B y) = compare x y
+instance Real B where
+instance Enum B where
+    toEnum n = B n
+    fromEnum (B n) = n
+instance Integral B where
+    quotRem (B x) (B y) = (B (quot x y), B (rem x y))
+    toInteger (B n) = toInteger n
+instance Fractional B where
+    recip (B x) = B (negate x)
+    fromRational _ = B 0
+
+data C = C Int
+instance Eq C where
+    (/=) (C x) (C y) = x /= y
+instance Ord C where
+    (<=) (C x) (C y) = x <= y
+instance Show C where
+    showsPrec _ (C x) s = "C" <> show x <> s
+instance Bounded C where
+    minBound = C 0
+    maxBound = C 9
+
+data Pair a = Pair a a
+instance Functor Pair where
+    fmap f (Pair x y) = Pair (f x) (f y)
+instance Foldable Pair where
+    foldr f z (Pair x y) = f x (f y z)
+instance Traversable Pair where
+    traverse f (Pair x y) = liftA2 Pair (f x) (f y)
+
+newtype Id a = Id a
+instance Functor Id where
+    fmap f (Id x) = Id (f x)
+instance Applicative Id where
+    pure x = Id x
+    liftA2 f (Id x) (Id y) = Id (f x y)
+instance Monad Id where
+    (>>=) (Id x) k = k x
+
+newtype Box a = Box a
+instance Functor Box where
+    fmap f (Box x) = Box (f x)
+instance Applicative Box where
+    pure x = Box x
+    (<*>) (Box f) (Box x) = Box (f x)
+
+newtype Total = Total Int deriving Show
+instance Semigroup Total where
+    (<>) (Total a) (Total b) = Total (a + b)
+instance Monoid Total where
+    mconcat ts = Total (sum [n | Total n <- ts])
+
+main :: IO ()
+main = do
+    print (negate (A 1), B 1 - B 2, B 7 `div` B 2, succ (B 1), B 1 / B 2)
+    print (C 1 == C 1, C 1 < C 2, max (C 1) (C 2), show (C 3), minBound :: C)
+    print (foldl (flip (:)) [] (Pair 1 2), sum (Pair 3 4))
+    case traverse (\x -> Just x) (Pair 1 2) of
+        Just (Pair x y) -> print (x + y)
+        Nothing -> pure ()
+    case Id 1 >>= (\x -> Id (x + 1)) >> Id 5 of
+        Id v -> print v
+    case fmap (+ 1) (Box 1) of
+        Box v -> print v
+    print (mempty :: Total, mconcat [Total 1, Total 2])
+"#;
+    let result = compile(src, Path::new("."), &[]).expect("every minimal instance is complete");
+    assert!(result.warnings.is_empty(),
+        "a minimal complete definition must not warn: {:?}",
+        result.warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>());
+}

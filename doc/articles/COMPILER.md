@@ -186,7 +186,17 @@ Order matters because later passes depend on earlier registrations:
   declaration what the list cannot hold: a constraint on the class
   variable, a compound argument, an unknown class, a variable the type
   does not mention), and `emit_use_constraints` turns each use into a
-  *wanted* at the instantiated type. At the end of `check_function`,
+  *wanted* at the instantiated type. A builtin class also states GHC's
+  `MINIMAL` formula (`ClassInfo::minimal`, beside its method list) and
+  its default methods as mata-ll source snippets
+  (`register_builtin_default`, parsed once by
+  `install_builtin_defaults` into the same `default_methods` a source
+  class fills); a source class gets GHC's no-pragma rule (every method
+  without a default is required), the Prelude's own source classes
+  their pragma from `prelude_source_class_minimal`. `check_instance`
+  fills each omitted method from the defaults and warns
+  (`warn_missing_methods`) for every minimal group the instance leaves
+  empty — GHC's `-Wmissing-methods`, at the declaration. At the end of `check_function`,
   `discharge_wanted_constraints` (`infer.rs`) judges the leftovers in one
   place: a wanted with no instance is "No instance"; one mentioning a
   variable the binding's FINAL type does not determine (the `determined`

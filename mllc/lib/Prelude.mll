@@ -353,11 +353,16 @@ infixr 6 <>
 class Semigroup a where
     (<>) :: a -> a -> a
 
--- GHC's default: mappend is the named form of the superclass (<>). A user
--- instance that defines only mempty (the common, GHC-idiomatic shape) still
--- gets a working mappend — and with it foldMap/mconcat.
+-- GHC's defaults: mappend is the named form of the superclass (<>), and
+-- mempty and mconcat define each other (base: `mempty = mconcat []`,
+-- `{-# MINIMAL mempty | mconcat #-}` — the pragma lives in the compiler,
+-- beside the builtin classes' minimal definitions). A user instance that
+-- defines only mempty (the common, GHC-idiomatic shape) still gets a
+-- working mappend — and with it foldMap/mconcat — and one that defines
+-- only mconcat gets mempty.
 class Semigroup a => Monoid a where
     mempty  :: a
+    mempty = mconcat []
     mappend :: a -> a -> a
     mappend x y = x <> y
     -- Fold a list of monoid values into one. A class method with GHC's

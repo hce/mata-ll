@@ -54,14 +54,28 @@ impl Checker {
     }
 
     /// Register one builtin class in a single call: the `ClassInfo` (methods
-    /// in declaration order, no default methods), an env scheme per method
+    /// in declaration order; the default bodies are attached afterwards by
+    /// [`Checker::register_builtin_default`]), an env scheme per method
     /// that wants one, and the per-method wanted constraints. See
     /// [`BuiltinMethod`] for the shape of each entry.
+    ///
+    /// `minimal` is GHC's `MINIMAL` pragma for the class (base 4.21), in
+    /// conjunctive normal form: an instance must define one method of
+    /// every group. It is stated here, by hand, because the builtin
+    /// classes have no source declaration to carry the pragma, and it is
+    /// what `check_instance` judges an instance declaration by — ONE
+    /// RULE for every builtin class: an instance that gives GHC's
+    /// minimal complete definition is complete here too (every other
+    /// method has GHC's default, registered below), and one that gives
+    /// less is warned about at the declaration, as under
+    /// `-Wmissing-methods`, not at the first use. The pragma and the
+    /// defaults must agree: a method outside every group has a default.
     fn register_builtin_class(
         &mut self,
         name: &str,
         type_var: &str,
         superclasses: &[&str],
+        minimal: &[&[&str]],
         methods: Vec<BuiltinMethod>,
     ) {
         let mut method_list = Vec::with_capacity(methods.len());
@@ -89,7 +103,28 @@ impl Checker {
             superclasses: superclasses.iter().map(|s| s.to_string()).collect(),
             methods: method_list,
             default_methods: HashMap::new(),
+            minimal: minimal.iter()
+                .map(|group| group.iter().map(|m| m.to_string()).collect())
+                .collect(),
         });
+    }
+
+    /// The `MINIMAL` pragma of a class the Prelude declares in SOURCE
+    /// (`lib/Prelude.mll`), where the source form carries no pragma: the
+    /// Prelude's classes are the compiler's own, so their pragmas live
+    /// here beside the builtin classes'. `None` for every other source
+    /// class, which gets GHC's rule for a class without a pragma (see
+    /// `register_class`).
+    pub(super) fn prelude_source_class_minimal(name: &str) -> Option<Vec<Vec<String>>> {
+        let groups: &[&[&str]] = match name {
+            // base: `mempty = mconcat []`, `mconcat = foldr mappend mempty`,
+            // `{-# MINIMAL mempty | mconcat #-}`.
+            "Monoid" => &[&["mempty", "mconcat"]],
+            _ => return None,
+        };
+        Some(groups.iter()
+            .map(|group| group.iter().map(|m| m.to_string()).collect())
+            .collect())
     }
 
     /// Attach a DEFAULT method body to a builtin class, written as mata-ll
@@ -134,6 +169,19 @@ impl Checker {
                 .unwrap_or_else(|| panic!("builtin default for unregistered class {class}"))
                 .default_methods
                 .insert(method, clauses);
+        }
+        // The pragma and the defaults agree (see `register_builtin_class`):
+        // a method of a builtin class that belongs to no MINIMAL group is
+        // one an instance may always omit, so it must have a default.
+        for class in self.classes.values() {
+            for (method, _) in &class.methods {
+                assert!(
+                    class.minimal.iter().any(|group| group.contains(method))
+                        || class.default_methods.contains_key(method),
+                    "builtin class {}: method {} is outside every MINIMAL group and has no default",
+                    class.name, method
+                );
+            }
         }
     }
 
@@ -429,7 +477,7 @@ impl Checker {
         // Built-in Functor typeclass
         // fmap :: (a -> b) -> f a -> f b
         let fmap_ty = Ty::fun(&[Ty::arrow(ta.clone(), tb.clone()), fa.clone()], fb.clone());
-        self.register_builtin_class("Functor", "f", &[], vec![
+        self.register_builtin_class("Functor", "f", &[], &[&["fmap"]], vec![
             ("fmap", fmap_ty.clone(), Some(vec![a.clone(), b.clone(), f.clone()]), vec![("Functor", "f")]),
             ("<$>", fmap_ty, Some(vec![a.clone(), b.clone(), f.clone()]), vec![("Functor", "f")]),
         ]);
@@ -504,7 +552,7 @@ impl Checker {
             &[Ty::arrow(ta.clone(), fb.clone()), Ty::list(ta.clone())],
             Ty::App(Box::new(tf.clone()), Box::new(Ty::list(tb.clone()))),
         );
-        self.register_builtin_class("Applicative", "f", &["Functor"], vec![
+        self.register_builtin_class("Applicative", "f", &["Functor"], &[&["pure"], &["<*>", "liftA2"]], vec![
             ("pure", pure_ty.clone(), Some(vec![a.clone(), f.clone()]), vec![("Applicative", "f")]),
             ("<*>", ap_ty, Some(vec![a.clone(), b.clone(), f.clone()]), vec![("Applicative", "f")]),
             ("liftA2", lifta2_ty, Some(vec![a.clone(), b.clone(), c.clone(), f.clone()]), vec![("Applicative", "f")]),
@@ -541,7 +589,7 @@ impl Checker {
         // >>=    :: m a -> (a -> m b) -> m b
         // >>     :: m a -> m b -> m b
         // return :: a -> m a
-        self.register_builtin_class("Monad", "m", &["Applicative"], vec![
+        self.register_builtin_class("Monad", "m", &["Applicative"], &[&[">>="]], vec![
             (">>=", Ty::fun(&[ma.clone(), Ty::arrow(ta.clone(), mb.clone())], mb.clone()),
                 Some(vec![a.clone(), b.clone(), m.clone()]), vec![("Monad", "m")]),
             (">>", Ty::fun(&[ma.clone(), mb.clone()], mb.clone()),
@@ -617,7 +665,7 @@ impl Checker {
         // per element applied to the accumulator forced by `seq`, each call
         // a tail call. length/sum/product/maximum/minimum are defined over
         // it (GHC's are strict too).
-        self.register_builtin_class("Foldable", "t", &[], vec![
+        self.register_builtin_class("Foldable", "t", &[], &[&["foldr"]], vec![
             ("foldr", foldr_ty, Some(vec![a.clone(), b.clone(), t.clone()]), vec![("Foldable", "t")]),
             ("foldl", foldl_ty.clone(), Some(vec![a.clone(), b.clone(), t.clone()]), vec![("Foldable", "t")]),
             ("foldl'", foldl_ty, Some(vec![a.clone(), b.clone(), t.clone()]), vec![("Foldable", "t")]),
@@ -626,6 +674,21 @@ impl Checker {
             "Foldable",
             "foldl'",
             "foldl' f z0 t = foldr (\\x k acc -> let acc' = f acc x in seq acc' (k acc')) (\\acc -> acc) t z0",
+        );
+        // The lazy left fold, for an instance that gives `foldr` alone
+        // (GHC's minimal definition). base defines it as `appEndo (getDual
+        // (foldMap (Dual . Endo . flip f) t)) z`, which with foldMap's own
+        // default over foldr is this continuation-passing fold: the
+        // element's function `\acc -> f acc x` is composed under the
+        // continuation built from the elements to its right, so the
+        // accumulator threads left to right (`f (f (f z x1) x2) x3`), and
+        // `f acc x` is handed to the continuation unevaluated — the
+        // accumulator is as lazy as GHC's (no `seq`, unlike `foldl'`
+        // above): `foldl (\_ x -> x) z t` never looks at an earlier element.
+        self.register_builtin_default(
+            "Foldable",
+            "foldl",
+            "foldl f z t = foldr (\\x k acc -> k (f acc x)) (\\acc -> acc) t z",
         );
 
         // The Foldable instances for [], Maybe and Either (folds over Right,
@@ -647,7 +710,7 @@ impl Checker {
         // `traverse` carries TWO constraints — the class's own (`Traversable
         // t`) and one on its applicative (`Applicative f`) — which is why the
         // constraint field is a list of (class, variable) pairs.
-        self.register_builtin_class("Traversable", "t", &["Functor", "Foldable"], vec![
+        self.register_builtin_class("Traversable", "t", &["Functor", "Foldable"], &[&["traverse"]], vec![
             ("traverse", traverse_ty, Some(vec![a.clone(), b.clone(), f.clone(), t.clone()]),
                 vec![("Traversable", "t"), ("Applicative", "f")]),
         ]);
@@ -671,7 +734,7 @@ impl Checker {
         let enum_from_then_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::List(Box::new(ta.clone())));
         let enum_from_to_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::List(Box::new(ta.clone())));
         let enum_from_then_to_ty = Ty::fun(&[ta.clone(), ta.clone(), ta.clone()], Ty::List(Box::new(ta.clone())));
-        self.register_builtin_class("Enum", "a", &[], vec![
+        self.register_builtin_class("Enum", "a", &[], &[&["toEnum"], &["fromEnum"]], vec![
             ("succ", succ_ty.clone(), Some(vec![a.clone()]), vec![("Enum", "a")]),
             ("pred", succ_ty, Some(vec![a.clone()]), vec![("Enum", "a")]),
             ("toEnum", to_enum_ty, Some(vec![a.clone()]), vec![("Enum", "a")]),
@@ -681,6 +744,21 @@ impl Checker {
             ("enumFromTo", enum_from_to_ty, Some(vec![a.clone()]), vec![("Enum", "a")]),
             ("enumFromThenTo", enum_from_then_to_ty, Some(vec![a.clone()]), vec![("Enum", "a")]),
         ]);
+        // GHC's defaults: an instance that gives `toEnum` and `fromEnum`
+        // (the minimal definition) counts through Int for everything else
+        // — `[x ..]` is `map toEnum [fromEnum x ..]`, unbounded above, so
+        // it is `toEnum` that stops it (a derived instance bounds its
+        // ranges at the last constructor instead; GHC's does the same).
+        for (method, source) in [
+            ("succ", "succ x = toEnum (fromEnum x + 1)"),
+            ("pred", "pred x = toEnum (fromEnum x - 1)"),
+            ("enumFrom", "enumFrom x = map toEnum [fromEnum x ..]"),
+            ("enumFromThen", "enumFromThen x y = map toEnum [fromEnum x, fromEnum y ..]"),
+            ("enumFromTo", "enumFromTo x y = map toEnum [fromEnum x .. fromEnum y]"),
+            ("enumFromThenTo", "enumFromThenTo x1 x2 y = map toEnum [fromEnum x1, fromEnum x2 .. fromEnum y]"),
+        ] {
+            self.register_builtin_default("Enum", method, source);
+        }
 
         // Enum instance for Int
         self.register_builtin_instance("Enum", Ty::Con("Int".to_string()), &[
@@ -722,7 +800,7 @@ impl Checker {
         // exactly as a specialized body does (see mono's `hm_op_use`).
         let hash_key_ty = Ty::arrow(ta.clone(), Ty::Con("String".to_string()));
         let hash_cmp_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::Con("Ordering".to_string()));
-        self.register_builtin_class("Hashable", "a", &[], vec![
+        self.register_builtin_class("Hashable", "a", &[], &[&["__hashKey"], &["__hashCompare"]], vec![
             ("__hashKey", hash_key_ty, None, vec![("Hashable", "a")]),
             ("__hashCompare", hash_cmp_ty, None, vec![("Hashable", "a")]),
         ]);
@@ -746,7 +824,7 @@ impl Checker {
         // Built-in Bounded typeclass
         let min_bound_ty = ta.clone();
         let max_bound_ty = ta.clone();
-        self.register_builtin_class("Bounded", "a", &[], vec![
+        self.register_builtin_class("Bounded", "a", &[], &[&["minBound"], &["maxBound"]], vec![
             ("minBound", min_bound_ty, Some(vec![a.clone()]), vec![("Bounded", "a")]),
             ("maxBound", max_bound_ty, Some(vec![a.clone()]), vec![("Bounded", "a")]),
         ]);
@@ -779,7 +857,7 @@ impl Checker {
             &[Ty::Con("Int".into()), ta.clone(), Ty::Con("String".into())],
             Ty::Con("String".into()),
         );
-        self.register_builtin_class("Show", "a", &[], vec![
+        self.register_builtin_class("Show", "a", &[], &[&["showsPrec", "show"]], vec![
             ("show", show_ty, Some(vec![a.clone()]), vec![("Show", "a")]),
             ("showsPrec", shows_prec_ty, Some(vec![a.clone()]), vec![("Show", "a")]),
         ]);
@@ -788,7 +866,7 @@ impl Checker {
 
         // Built-in Read typeclass
         let read_ty = Ty::arrow(Ty::Con("String".into()), ta.clone());
-        self.register_builtin_class("Read", "a", &[], vec![
+        self.register_builtin_class("Read", "a", &[], &[&["read"]], vec![
             ("read", read_ty, Some(vec![a.clone()]), vec![("Read", "a")]),
         ]);
         // Read instances for base types
@@ -803,7 +881,7 @@ impl Checker {
         // resolved through `==` in the monomorphizer; an instance defining
         // only `/=` was rejected as "not a method".
         let eq_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::Con("Bool".into()));
-        self.register_builtin_class("Eq", "a", &[], vec![
+        self.register_builtin_class("Eq", "a", &[], &[&["==", "/="]], vec![
             ("==", eq_ty.clone(), Some(vec![a.clone()]), vec![("Eq", "a")]),
             ("/=", eq_ty, Some(vec![a.clone()]), vec![("Eq", "a")]),
         ]);
@@ -829,7 +907,7 @@ impl Checker {
         let compare_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::Con("Ordering".into()));
         // `max`/`min` return the class type itself, not Bool.
         let sel_ty = Ty::fun(&[ta.clone(), ta.clone()], ta.clone());
-        self.register_builtin_class("Ord", "a", &["Eq"], vec![
+        self.register_builtin_class("Ord", "a", &["Eq"], &[&["compare", "<="]], vec![
             ("<", cmp_ty.clone(), Some(vec![a.clone()]), vec![("Ord", "a")]),
             (">", cmp_ty.clone(), Some(vec![a.clone()]), vec![("Ord", "a")]),
             ("<=", cmp_ty.clone(), Some(vec![a.clone()]), vec![("Ord", "a")]),
@@ -897,7 +975,8 @@ impl Checker {
             // get their `forall a` env schemes here.
 
             // ---- class Num a ----
-            self.register_builtin_class("Num", "a", &[], vec![
+            self.register_builtin_class("Num", "a", &[],
+                &[&["+"], &["*"], &["abs"], &["signum"], &["fromInteger"], &["negate", "-"]], vec![
                 ("+", bin.clone(), None, vec![("Num", "a")]),
                 ("-", bin.clone(), None, vec![("Num", "a")]),
                 ("*", bin.clone(), None, vec![("Num", "a")]),
@@ -906,18 +985,28 @@ impl Checker {
                 ("signum", un.clone(), Some(vec![a.clone()]), vec![("Num", "a")]),
                 ("fromInteger", from_integer_ty, Some(vec![a.clone()]), vec![("Num", "a")]),
             ]);
+            // GHC's mutual defaults: an instance gives `negate` or `-` and
+            // the other follows (neither given loops at the first use of
+            // either, as under GHC, which warns — so does `check_instance`).
+            self.register_builtin_default("Num", "negate", "negate x = 0 - x");
+            self.register_builtin_default("Num", "-", "x - y = x + negate y");
             // ---- class Num a => Fractional a ----
-            self.register_builtin_class("Fractional", "a", &["Num"], vec![
+            self.register_builtin_class("Fractional", "a", &["Num"],
+                &[&["fromRational"], &["recip", "/"]], vec![
                 ("/", bin.clone(), None, vec![("Fractional", "a")]),
                 ("recip", un.clone(), Some(vec![a.clone()]), vec![("Fractional", "a")]),
                 ("fromRational", from_rational_ty, Some(vec![a.clone()]), vec![("Fractional", "a")]),
             ]);
+            // GHC's mutual defaults: `recip` or `/`, the other follows.
+            self.register_builtin_default("Fractional", "recip", "recip x = 1 / x");
+            self.register_builtin_default("Fractional", "/", "x / y = x * recip y");
             // ---- class (Num a, Ord a) => Real a ----
             // GHC's `Real` has `toRational :: a -> Rational`; mata-ll has no
             // Rational, so the class is a superclass marker with no methods.
-            self.register_builtin_class("Real", "a", &["Num", "Ord"], vec![]);
+            self.register_builtin_class("Real", "a", &["Num", "Ord"], &[], vec![]);
             // ---- class (Real a, Enum a) => Integral a ----
-            self.register_builtin_class("Integral", "a", &["Real", "Enum"], vec![
+            self.register_builtin_class("Integral", "a", &["Real", "Enum"],
+                &[&["quotRem"], &["toInteger"]], vec![
                 ("quot", bin.clone(), None, vec![("Integral", "a")]),
                 ("rem", bin.clone(), None, vec![("Integral", "a")]),
                 ("div", bin.clone(), None, vec![("Integral", "a")]),
@@ -926,6 +1015,21 @@ impl Checker {
                 ("divMod", to_pair, Some(vec![a.clone()]), vec![("Integral", "a")]),
                 ("toInteger", to_integer_ty, Some(vec![a.clone()]), vec![("Integral", "a")]),
             ]);
+            // GHC's defaults over `quotRem` (the minimal definition, with
+            // `toInteger`): `quot`/`rem` project it, `divMod` corrects it
+            // toward negative infinity when the remainder's sign disagrees
+            // with the divisor's, `div`/`mod` project that. base writes the
+            // projections as `where (q, _) = quotRem n d`; a `case` is the
+            // same selection.
+            for (method, source) in [
+                ("quot", "quot n d = case quotRem n d of { (q, _) -> q }"),
+                ("rem", "rem n d = case quotRem n d of { (_, r) -> r }"),
+                ("div", "div n d = case divMod n d of { (q, _) -> q }"),
+                ("mod", "mod n d = case divMod n d of { (_, r) -> r }"),
+                ("divMod", "divMod n d = case quotRem n d of { (q, r) -> if signum r == negate (signum d) then (q - 1, r + d) else (q, r) }"),
+            ] {
+                self.register_builtin_default("Integral", method, source);
+            }
 
             // ---- instances ----
             // Operators self-map (mono keeps them inline); named methods point

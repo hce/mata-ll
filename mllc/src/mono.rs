@@ -1818,7 +1818,34 @@ impl Monomorphizer {
     /// nothing to specialize (not polymorphic, use type not concrete, or the
     /// polymorphic-recursion guard trips).
     fn specialize_instance_fn(&mut self, base: &str, fn_ty: &Ty) -> String {
-        if self.is_polymorphic(fn_ty) || !self.poly_fns.contains_key(base) {
+        if !self.poly_fns.contains_key(base) {
+            return base.to_string();
+        }
+        if self.is_polymorphic(fn_ty) {
+            // A still-polymorphic use — a sibling method called from a
+            // body that stays polymorphic, the dictionary form of its own
+            // instance (`foldl f z p = foldr (\x k acc -> …) id p z` at `b
+            // := acc -> acc`) — is served by the generic copy, except
+            // where the use WIDENS the method's arity: the generic copy
+            // is emitted at the declared arrow count and the N-ary
+            // convention breaks there (`arity_only_fns`), so a foldr-only
+            // Foldable reached through an existential called a
+            // three-parameter continuation with two arguments. Exactly
+            // as the main walk does for a plain function, a widening use
+            // whose residual variables are dead specializes at the
+            // canonicalized type — the copy at the right arrow count. A
+            // live residual (a constrained variable nobody instantiated)
+            // keeps the generic copy, as there.
+            if !self.dict_passing_fns.contains(base)
+                && !self.arity_only_fns.contains(base)
+                && self.arity_widening(base, fn_ty)
+                && self.residual_vars_dead(base, fn_ty)
+            {
+                let canon = Self::canonicalize_vars(fn_ty);
+                if let Some(spec) = self.specialize_at(base, &canon) {
+                    return spec;
+                }
+            }
             return base.to_string();
         }
         // Past the cap, the shared form serves every caller: the composed
@@ -2178,14 +2205,31 @@ impl Monomorphizer {
     }
 
     /// Record a "No instance" error at the clause currently being processed.
+    /// When the class DOES have an instance at the type and it is the
+    /// method that is missing — the instance left out a method the class
+    /// gives no default for (`check_instance` warned there) — the note
+    /// says so, so the reader is sent to the declaration rather than
+    /// hunting for an instance that exists.
     fn push_no_instance(&mut self, method: &str, ty: &Ty) {
         let (msg, hint) = no_instance_parts(method, ty);
+        let mut notes: Vec<String> = hint.map(str::to_string).into_iter().collect();
+        if let Some(class) = self.method_to_class.get(method)
+            && let Some(head) = InstHead::of(ty)
+            && let Some(inst) = self.instances.get(&(class.clone(), head))
+            && !inst.method_fns.contains_key(method)
+        {
+            notes.push(format!(
+                "there is an instance '{} {}', but it does not define '{}' and the class \
+                 '{}' has no default for it: add '{}' to the instance",
+                class, crate::types::paren_ty(&inst.target_type), method, class, method
+            ));
+        }
         self.errors.push(Diagnostic {
             kind: DiagnosticKind::Other(msg),
             context: self.cur_ctx.clone(),
             span: self.cur_span,
             file: None,
-            notes: hint.map(str::to_string).into_iter().collect(),
+            notes,
             baseline: false, excerpt: None, names: None,
         });
     }
