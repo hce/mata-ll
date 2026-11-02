@@ -40,7 +40,11 @@
 //! 3037000500 — whose square passes 2^63), `fromIntegral` of an Int, `/`,
 //! `^`, products of big literals, `negate`/`abs`/`signum`, `sum`, Number
 //! map keys read back through hmKeys/hmToList, and GHC's `show` layout for
-//! doubles. The fragment never reaches an infinity or a NaN: every Number
+//! doubles. `fromIntegral` of an Integer — a multi-limb value as often as
+//! not — is oracled against Rust's correctly rounded `i128 as f64`, the
+//! same nearest-even conversion as GHC's integerToDouble, so the runtime's
+//! Integer -> double path (which once rounded twice past 2^72) has a
+//! standing probe beside the hand corpus. The fragment never reaches an infinity or a NaN: every Number
 //! production bounds its magnitude (products and powers take literal
 //! operands, division takes a nonzero literal divisor), so IEEE arithmetic
 //! in the strict reference is bit-identical to the host's. The Enum
@@ -277,6 +281,7 @@ enum P {
     AbsN,
     SignumN,
     FromIntegralN, // fromIntegral :: Int -> Number (always pinned)
+    FromIntegralIN, // fromIntegral :: Integer -> Number (always pinned)
     PowN,          // (x ^ n) — rendered infix; literal base, exponent 0..3
     // --- HashMap (A17/A20); maps are first-class Ty::Hm values (never in
     // a printed position — the map value needs no Show), observed through
@@ -576,6 +581,7 @@ fn p_name(p: &P) -> &'static str {
         P::AbsN => "abs",
         P::SignumN => "signum",
         P::FromIntegralN => "fromIntegral",
+        P::FromIntegralIN => "fromIntegral",
         P::PowN => "(^)", // never a FunRef; Call renders infix
         // hm ops are only ever rendered saturated (never as a FunRef)
         P::HmToList => "hmToList",
@@ -805,6 +811,7 @@ fn p_arity(p: &P) -> usize {
         | P::AbsN
         | P::SignumN
         | P::FromIntegralN
+        | P::FromIntegralIN
         | P::HmToList
         | P::HmKeys
         | P::HmValues
@@ -1066,6 +1073,14 @@ fn call_builtin(p: &P, mut args: Vec<Value>) -> Value {
         // int2Double: round to nearest, as the host's integer->float
         // conversion and Rust's `as` do.
         P::FromIntegralN => Value::Number(as_int(&args[0]) as f64),
+        // integerToDouble: the nearest double to the exact Integer, ties to
+        // even — Rust's `as` from an integer to f64 is that same rounding.
+        // The generator's Integer budget keeps the magnitude below 2^127,
+        // so the result is finite.
+        P::FromIntegralIN => match &args[0] {
+            Value::Integer(n) => Value::Number(*n as f64),
+            v => panic!("fromIntegral at Integer -> Number on {v:?}"),
+        },
         // GHC.Real's (^) by repeated squaring (powImpl/powImplAcc). The
         // multiplication order matters for a double: mata-ll's `powAcc`
         // multiplies the same pairs (commuted), so the products agree
@@ -1903,9 +1918,10 @@ impl Gen {
     /// literal factor (|k| <= 9), or multiplies two literal atoms (below
     /// 2^126); `^` takes a literal base and an exponent up to 3 (below
     /// 2^189); `/` takes a nonzero literal divisor of magnitude >= 1/4;
-    /// `sum` adds a short list. Depth is bounded, so no value reaches the
-    /// double's range — no infinity, no NaN, and the IEEE results in the
-    /// reference are the host's bit for bit.
+    /// `sum` adds a short list; `fromIntegral` of an Integer brings in at
+    /// most the Integer budget's 2^127. Depth is bounded, so no value
+    /// reaches the double's range — no infinity, no NaN, and the IEEE
+    /// results in the reference are the host's bit for bit.
     fn number_expr(&mut self, depth: usize) -> Expr {
         match self.r.below(16) {
             0 | 1 | 2 => {
@@ -1959,6 +1975,15 @@ impl Gen {
                 Ty::Number,
             ),
             10 => Expr::Call(P::SumN, vec![self.expr(&Ty::list(Ty::Number), depth - 1)]),
+            13 => {
+                // Integer -> Number: a 20-24 digit literal is 3-4 limbs,
+                // and the arithmetic over it grows to 5; the conversion
+                // past 2^72 is the one that has to round by hand.
+                Expr::Annot(
+                    b(Expr::Call(P::FromIntegralIN, vec![self.expr(&Ty::Integer, depth - 1)])),
+                    Ty::Number,
+                )
+            }
             11 => {
                 // head with syntactic-cons evidence.
                 let h = self.expr(&Ty::Number, depth - 1);

@@ -410,8 +410,28 @@ constant folding (§7) can then recognize them.
   - the runtime: `fromInteger_Number` (the dictionary-routed literal
     `dict.fromInteger(5)`, `fromIntegral`) returns `x * 1.0` for a
     machine number (`* 1.0`, not `+ 0.0`: the sum would lose a `-0.0`),
-    `__int_to_double` for a bignum; `__mll_read_number` parses integer
-    syntax through the float lexer (`"-0"` → `-0.0`);
+    `__int_to_double` for a bignum — GHC's `integerToDouble`, correctly
+    rounded (nearest, ties to even, ±Infinity past the range): up to
+    three 2^24 limbs a Horner walk in doubles rounds exactly once (the
+    top two limbs are an exact 48-bit integer, the scaling by 2^24 is
+    exact, the last `+ limb` is the one rounding); from four limbs up the
+    walk would round twice and lose the low limbs that decide a tie, so
+    the wide path rounds the top four limbs (73 bits or more) ONCE —
+    `hi + lo`, hi the top two limbs scaled by 2^48 (a float literal, so
+    a 64-bit-integer host cannot wrap the product), lo the next two —
+    and then decides whether the lower limbs can change that result:
+    they add less than one unit of the rounded integer's lowest bit
+    while its rounding midpoints are integers, so only an exact tie that
+    went to even BELOW the midpoint moves, by one ulp, when some lower
+    limb is nonzero. `delta = (hi - acc) + lo` is V - acc exactly
+    (Sterbenz, then an integer sum below 2^53), and "half an ulp below"
+    is `acc + 2*delta` landing exactly one ulp up. The result is scaled
+    by the lower limbs' width with exact power-of-two multiplications
+    (no `//`, bitwise ops or `pow`, so LuaJIT and PUC agree; a value
+    past 2^1024 overflows to Infinity as IEEE says). A doubles-only
+    host's `__int_to_machine` IS that conversion (its `Int` is a
+    double); `__mll_read_number` parses integer syntax through the float
+    lexer (`"-0"` → `-0.0`);
   - the FFI boundary: `ffi_decode_desc_inner` gives a `Number` leaf the
     `num` descriptor (checked and normalized by `__mll_ffi_decode`, and
     written back into a validation-only record/tuple so the host's table

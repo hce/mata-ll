@@ -147,7 +147,9 @@ literal's 64-bit value, wrapped exactly as GHC's `fromInteger` wraps an
 out-of-range literal (`f 9223372036854775808 = …` matches `minBound`, as
 in GHC, which warns); on a doubles-only host that value is exact when it
 is a double (`minBound` is) and rounds past 2^53 like every other `Int`
-there.
+there. On such a host `fromInteger`/`fromIntegral` at `Int` narrows an
+`Integer` past 2^53 to the nearest double — the same correctly rounded
+value the `Number` target gets — rather than wrapping.
 
 Numeric defaulting is GHC's implicit `default (Integer, Number)` (`Number`
 is GHC's `Double`), so an unannotated literal used only in integer
@@ -170,9 +172,16 @@ double GHC's `fromInteger` at Double denotes (`9007199254740993 ::
 Number` is `9007199254740992.0`, `-0 :: Number` is `-0.0`, and constant
 folding at `Number` is double arithmetic), `read` at `Number` reads
 integer syntax as a double (`read "-0"` is `-0.0`), `fromInteger`/
-`fromIntegral` at `Number` round to the nearest double, every host→Number
-FFI boundary converts (an FFI result, a record field, a JSON number), and
-a `Number` map key reads back as the double it was stored as. So `Number`
+`fromIntegral` at `Number` are GHC's `integerToDouble` — the nearest
+double to the exact `Integer` at every magnitude, ties to even,
+`Infinity` past the double's range (`fromInteger (2 ^ 80 + 2 ^ 27 + 1)`
+is `1.2089258196146294e24` and `3 ^ 80` is `1.4780882941434593e38`, bit
+for bit what GHC prints; the runtime rounds the top four limbs once and
+lets a lower limb break an exact tie, rather than accumulating limb by
+limb in doubles, which rounded twice from 2^72 up), every
+host→Number FFI boundary converts (an FFI result, a record field, a JSON
+number), and a `Number` map key reads back as the double it was stored
+as. So `Number`
 arithmetic agrees with GHC's Double bit for bit on both hosts (`(2 ::
 Number) ^ 64` is `1.8446744073709552e19`, never a wrapped int64), and
 the type-directed `show` prints `3.0` for `3 :: Number` everywhere.

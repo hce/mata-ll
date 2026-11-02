@@ -824,6 +824,9 @@ mll_test!(library_traversals_lazy, "library_traversals_lazy.mll");
 mll_test!(let_seq_pure_function, "let_seq_pure_function.mll");
 mll_test!(integer_smallpath_bounds, "integer_smallpath_bounds.mll");
 mll_test!(integer_bigdiv, "integer_bigdiv.mll");
+// fromInteger at Number is GHC's integerToDouble: correctly rounded at
+// every limb count (ties to even, Infinity past the double's range).
+mll_test!(integer_to_number_rounding, "integer_to_number_rounding.mll");
 mll_test!(integer_show_subtype, "integer_show_subtype.mll");
 mll_test!(list_fusion_inline, "list_fusion_inline.mll");
 mll_test!(inline_shadowed_free_var, "inline_shadowed_free_var.mll");

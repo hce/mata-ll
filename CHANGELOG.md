@@ -44,6 +44,39 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **`fromInteger` and `fromIntegral` of an `Integer` at `Number` are
+  correctly rounded at every magnitude.** From four 2^24 limbs up (2^72)
+  the runtime accumulated the limbs in doubles by Horner's rule, which
+  rounds at each step once the sum passes 53 bits: `fromInteger (3 ^ 80)
+  :: Number` printed `1.4780882941434591e38` (GHC
+  `1.4780882941434593e38`), `2 ^ 95 + 2 ^ 42 + 1` printed
+  `3.961408125713217e28` (GHC `…218e28`), and `2 ^ 80 + 2 ^ 27 + 1` —
+  half an ulp above 2^80 plus the one bit that breaks the tie upward —
+  printed `1.2089258196146292e24` (GHC `1.2089258196146294e24`), because
+  the first rounding had already thrown the low limbs away. GHC's
+  `integerToDouble` is the nearest double to the exact integer, ties to
+  even, ±Infinity past the double's range, and the conversion is that now
+  on both hosts: three limbs or fewer keep the Horner walk (its only
+  rounding is the final addition, so it was already exact); wider values
+  round the top four limbs — 73 bits or more — in one IEEE addition,
+  then let the lower limbs act only where they can: they add less than a
+  unit of that integer's lowest bit while its rounding midpoints are
+  integers, so only an exact tie that went to even below the midpoint
+  moves, one ulp up, when a lower limb is nonzero (the exact distance to
+  the midpoint comes out of the same doubles by Sterbenz's lemma); the
+  result is then scaled by exact power-of-two multiplications — no `//`,
+  bitwise operators or `pow`, so LuaJIT and PUC Lua compute the same
+  bits, at the old walk's cost. The same function serves the
+  dictionary-routed `fromInteger`, the JSON library's `Integer` encoder
+  and the type-directed literal-pattern compare; on a doubles-only host,
+  whose `Int` is a double, `fromInteger` at `Int` past 2^53 is this
+  conversion too (it rounded twice there as well). The backend fuzzer's
+  vocabulary now has `fromIntegral :: Integer -> Number` over its
+  multi-limb Integers, oracled against Rust's correctly rounded `i128 as
+  f64`. Found by the 2026-10 fresh-eyes review (N6). (GHC-goldened case
+  `integer_to_number_rounding`: every limb-count boundary, ties and
+  near-ties up to 38 limbs, the overflow edge, negatives, the existential
+  and literal-pattern routes.)
 - **A stepped range with a zero step — `[x, x .. y]` at `Int` and
   `Integer` — walks in GHC's direction.** `take 3 [1, 1 .. 5 :: Int]`
   printed `[]` (GHC `[1,1,1]`), `take 3 [5, 5 .. 1 :: Int]` printed

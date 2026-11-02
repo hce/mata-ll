@@ -1306,7 +1306,10 @@ literal at `Number` compiles to the bare Lua float `3.14`. An integer
 literal at `Number` is GHC's `fromInteger` at Double, applied at
 compile time: the nearest double, spelled as a Lua float (`(42 ::
 Number)` is `42.0`, `9007199254740993 :: Number` is `9007199254740992.0`,
-`-0 :: Number` is `-0.0`). A `Number` is an IEEE double on every host —
+`-0 :: Number` is `-0.0`), and `fromInteger`/`fromIntegral` of an
+`Integer` value at `Number` is the same conversion at run time: the
+nearest double at every magnitude, ties to even, `Infinity` beyond the
+double's range. A `Number` is an IEEE double on every host —
 it never carries Lua's integer subtype, so `Number` arithmetic never
 wraps at 2^63 and a Number's sign of zero survives; `Int` is the
 integer subtype where the host has one (see CAVEATS "Int overflow

@@ -209,7 +209,7 @@ local function __int_tostring(x)
         groups[#groups + 1] = rem
     end
     -- %d, not tostring: limbs can carry Lua's float subtype (see
-    -- __int_limb), and a float-typed group would print "6.0". Every
+    -- __int_to_machine), and a float-typed group would print "6.0". Every
     -- group is < 10^7, so %d is exact on every host.
     local s = string.format("%d", groups[#groups])
     for i = #groups - 1, 1, -1 do s = s .. string.format("%07d", groups[i]) end
@@ -462,6 +462,53 @@ local function read_Integer(s)
 end
 -- toInteger @Int: lift a machine Int to an Integer (bignum).
 local function toInteger_Int(x) return fromInteger_Integer(__force(x)) end
+-- The Number target is GHC's integerToDouble: the nearest double to the
+-- exact integer, ties to even, +-Infinity past the double's range. Three
+-- limbs or fewer (|x| < 2^72) accumulate by Horner's rule in doubles and
+-- round exactly once: the top two limbs make an integer below 2^48
+-- (exact), its product with 2^24 is a power-of-two scaling (exact), and
+-- the final `+ limb` is the one IEEE operation that rounds. With four
+-- limbs or more a Horner walk passes 53 bits before its last limb and
+-- rounds twice; the low limbs it has already dropped are exactly the bits
+-- that decide a tie (2^80 + 2^27 + 1 fell to 2^80, GHC's answer is
+-- 2^80 + 2^28, and 3^80 was an ulp low). So the wide path rounds the top
+-- FOUR limbs once — hi = the top two limbs scaled by 2^48 (exact), lo =
+-- the next two (exact, below 2^48), acc = hi + lo the one IEEE rounding
+-- of a 73-bit-or-wider integer V — and asks whether the lower limbs can
+-- change that result. They add less than one unit of V's lowest bit,
+-- while V's rounding midpoints are integers (at least 20 bits were
+-- dropped), so they cannot carry V across a midpoint; they matter only
+-- when V sat ON the midpoint and the tie went to even BELOW it: a nonzero
+-- lower limb then puts the true value above the midpoint, and the result
+-- is the next double up. delta = V - acc is computed exactly (hi - acc by
+-- Sterbenz, plus an integer below 2^48, all under 2^53), and "acc is half
+-- an ulp below V" is `acc + 2*delta` landing exactly one ulp up. Then acc
+-- is scaled by the lower limbs' width with exact power-of-two
+-- multiplications, and a value past 2^1024 overflows to Infinity as IEEE
+-- says. No `//`, no bitwise operators, no math.ldexp or pow: both hosts
+-- compute the same bits, and the integer subtype never enters (the 2^48
+-- factor is a float literal, so a host with 64-bit integers cannot wrap
+-- the 96-bit product).
+local function __int_to_double(x)
+    local n = #x
+    local acc = 0.0
+    if n <= 4 then
+        for i = n, 2, -1 do acc = acc * __INT_B + x[i] end
+    else
+        local hi = (x[n] * __INT_B + x[n - 1]) * 281474976710656.0
+        local lo = x[n - 2] * __INT_B + x[n - 3]
+        acc = hi + lo
+        local delta = (hi - acc) + lo
+        if delta > 0 and (acc + 2 * delta) - acc == 2 * delta then
+            for i = n - 4, 2, -1 do
+                if x[i] ~= 0 then acc = acc + 2 * delta; break end
+            end
+        end
+        for _ = 1, n - 5 do acc = acc * __INT_B end
+    end
+    if x[1] < 0 then return -acc end
+    return acc
+end
 -- Reconstruct the machine value of an Integer (high limb first). Limbs can
 -- carry Lua's float subtype (carry propagation divides with `/`, which is
 -- float division on 5.3+), though each limb's VALUE is an exact integer
@@ -469,23 +516,22 @@ local function toInteger_Int(x) return fromInteger_Integer(__force(x)) end
 -- and accumulates in integer arithmetic: exact through the full int64
 -- range, and past it Lua's integer arithmetic wraps exactly like GHC's
 -- Integer->Int narrowing. Float accumulation instead would round at 2^53
--- (maxBound :: Int came back off by one). On a doubles-only host the
--- identity fallback keeps the documented 2^53 exactness window.
-local __int_limb = math.tointeger or function(x) return x end
-local function __int_to_machine(x)
-    local acc = 0
-    for i = #x, 2, -1 do acc = acc * __INT_B + __int_limb(x[i]) end
-    if x[1] < 0 then return -acc end
-    return acc
-end
--- The Number target accumulates in floats: a huge Integer approximates to
--- the nearest double (as GHC's fromInteger to Double does) instead of
--- wrapping at 2^64.
-local function __int_to_double(x)
-    local acc = 0.0
-    for i = #x, 2, -1 do acc = acc * __INT_B + x[i] end
-    if x[1] < 0 then return -acc end
-    return acc
+-- (maxBound :: Int came back off by one). A doubles-only host has no
+-- machine integer to wrap in: its Int IS a double, so the value it can
+-- hold is the nearest double — the documented 2^53 exactness window, and
+-- beyond it the same correctly rounded conversion the Number target
+-- makes (a Horner walk there rounded twice past 2^72, so an Int and a
+-- Number narrowed from one Integer could disagree on the same host).
+local __int_to_machine
+if math.tointeger then
+    __int_to_machine = function(x)
+        local acc = 0
+        for i = #x, 2, -1 do acc = acc * __INT_B + math.tointeger(x[i]) end
+        if x[1] < 0 then return -acc end
+        return acc
+    end
+else
+    __int_to_machine = __int_to_double
 end
 -- fromInteger @Int / @Number: narrow an Integer argument (an explicit
 -- `fromInteger`/`fromIntegral`). A non-table argument is already the machine
@@ -530,7 +576,9 @@ local function __mll_lit_eq(x, n)
             if math.type(x) == "integer" then return x == __int_to_machine(n) end
             return x == __int_to_double(n)
         end
-        return x == __int_to_machine(n) or x == __int_to_double(n)
+        -- A doubles-only host cannot tell an Int scrutinee from a Number
+        -- one, and narrows an Integer to either as the same nearest double.
+        return x == __int_to_double(n)
     end
     -- A float scrutinee is a Number (a Number is never the integer subtype,
     -- an Int never a float): the literal is GHC's `fromInteger` at Double,
