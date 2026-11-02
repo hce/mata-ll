@@ -92,7 +92,40 @@ impl CodeGen {
             Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
             other => other,
         };
+        // A bare `Number` result is normalized inline at the call site
+        // (`ffi_number_result_ast`), not through the decoder: one float
+        // multiply instead of a call per scalar FFI result (`sqrt`).
+        if Self::ffi_bare_number(inner) {
+            return None;
+        }
         self.ffi_decode_desc_inner(inner, &mut Vec::new(), None).map(|d| d.0)
+    }
+
+    /// Is `ty` (an FFI result or constant type, its `IO`/`LuaIO` wrapper
+    /// peeled) the bare scalar `Number`?
+    pub(super) fn ffi_bare_number(ty: &Ty) -> bool {
+        let inner = match ty {
+            Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
+            other => other,
+        };
+        con_name(inner) == Some("Number")
+    }
+
+    /// A bare scalar FFI result (no decode descriptor) as mata-ll reads it:
+    /// a `Number` result is normalized to the float subtype — `(value) *
+    /// 1.0` — because a Number is an IEEE double on every host and a host
+    /// returns numbers in whatever subtype it has (`tonumber "5"` and
+    /// `string.len` are integers on Lua 5.3+); `* 1.0` keeps a -0.0's sign
+    /// where `+ 0.0` would not. Every other scalar passes through as
+    /// before. A non-number host value raises Lua's arithmetic error at the
+    /// call (bare scalar results carry no `chk`, by design — see
+    /// `ffi_decode_desc_inner`).
+    pub(super) fn ffi_number_result_ast(ty: &Ty, value: Expr) -> Expr {
+        if Self::ffi_bare_number(ty) {
+            Expr::paren(Expr::binop("*", value, Expr::lit("1.0")))
+        } else {
+            value
+        }
     }
 
     /// Decode descriptor for a LuaCatch/LuaIOCatch success payload. The declared
@@ -412,6 +445,15 @@ impl CodeGen {
             Some(s) => format!(",w={:?}", s),
             None => String::new(),
         };
+        // A `Number` leaf: checked like a `chk` scalar AND normalized to the
+        // float subtype by the runtime (`num`), since a Number is an IEEE
+        // double on every host and the host may hand over Lua's integer
+        // subtype. Not a conversion of the container (`converts` false): a
+        // validation-only record or tuple keeps the host's table and the
+        // runtime writes the normalized field back into it.
+        if con_name(ty) == Some("Number") {
+            return Some((format!("{{k=\"num\",t={:?}{}}}", self.shown_ty(ty), wlua), false));
+        }
         match self.ffi_shape(ty) {
             // A list always needs converting: the host hands us a Lua array
             // (1-based, possibly empty) which must become a cons list. An empty

@@ -1,13 +1,14 @@
 import LString (strByte, strLen, strSub, strChar)
 import Data.Generics
 
--- JSON value type. Numbers come in two constructors: JNum holds a host
--- number (every value the interpreter represents exactly), and JInt holds
--- an arbitrary-precision Integer for integer syntax beyond the host
--- number's exact range — so no digits are ever lost between parseJSON and
--- encodeJSON. The parser and the ToJSON instances keep the split canonical
--- — a JInt never holds a value that fits a host number exactly — which is
--- what keeps Eq meaningful across an encode/parse round trip.
+-- JSON value type. Numbers come in two constructors: JNum holds a Number
+-- (an IEEE double, on every host — a Number never carries Lua's integer
+-- subtype), and JInt holds an arbitrary-precision Integer for integer
+-- syntax beyond the double's exact window (|n| > 2^53) — so no digits are
+-- ever lost between parseJSON and encodeJSON. The parser and the ToJSON
+-- instances keep the split canonical — a JInt never holds a value that a
+-- double represents exactly — which is what keeps Eq meaningful across an
+-- encode/parse round trip.
 data Json = JNull | JBool Bool | JNum Number | JInt Integer | JStr String | JArr [Json] | JObj [(String, Json)]
     deriving (Eq)
 
@@ -109,14 +110,26 @@ jTypeName (JStr _) = "a string"
 jTypeName (JArr _) = "an array"
 jTypeName (JObj _) = "an object"
 
+-- An Int inside the double's exact window (|n| <= 2^53) is a JNum; beyond
+-- it a JInt carrying the exact value (a double would round it), on every
+-- host — the same split the parser makes (integerIsExactNum). The window
+-- test reads the Int through its double: strictly inside (-2^53, 2^53)
+-- every integer is exact; at the boundary the double 2^53 also stands for
+-- 2^53 + 1, which `numFloor d == n` tells apart. Deciding on the double
+-- rather than the Int keeps the decision what the host computes — the
+-- constant folder would decide an Int comparison on a literal past 2^53
+-- with GHC's exact value, where a doubles-only host holds the rounded one.
 toJSONInt :: Int -> Json
-toJSONInt n = JNum (intToNum n)
+toJSONInt n =
+    let d = intToNum n
+    in if d > -9007199254740992.0 && d < 9007199254740992.0 then JNum d
+       else if (d == 9007199254740992.0 || d == -9007199254740992.0) && numFloor d == n then JNum d
+       else JInt (toInteger n)
 
 -- Decode a number that must be integral. A non-integral number (3.5) and a
 -- number outside the 64-bit Int range are both rejected with a clear error.
--- A JInt within the Int range only occurs on a doubles-only host (where the
--- exact-number window ends at 2^53); narrowing it to the machine type there
--- matches what parsing the same digits into a host number always did.
+-- A JInt within the Int range is integer syntax beyond 2^53 (exact in the
+-- Integer); narrowing it to the machine type is GHC's fromInteger at Int.
 fromJSONInt :: Json -> Either String Int
 fromJSONInt (JNum n) = numToInteger n
 fromJSONInt (JInt i) = if integerFitsInt i
@@ -124,13 +137,9 @@ fromJSONInt (JInt i) = if integerFitsInt i
     else Left ("the number " <> show i <> " is outside the 64-bit Int range")
 fromJSONInt j = Left ("expected an integer, but found " <> jTypeName j)
 
--- A number with Lua's integer subtype is exact and in range by construction
--- (the parser only produces one for in-range integer syntax). Floats go
--- through the integrality and range checks.
+-- A JNum is a double: it goes through the integrality and range checks.
 numToInteger :: Number -> Either String Int
-numToInteger n = if numMathType n == "integer"
-    then Right (numFloor n)
-    else numToIntegerFloat n
+numToInteger n = numToIntegerFloat n
 
 -- The float bounds are strict on BOTH sides: 2^63 and -2^63 are exactly
 -- representable as doubles, and any float equal to one of them may have
@@ -144,30 +153,25 @@ numToInteger n = if numMathType n == "integer"
 -- accepts it because it parses numbers exactly (Scientific), which a Lua
 -- double cannot reproduce.
 numToIntegerFloat :: Number -> Either String Int
-numToIntegerFloat n = case numModf n of
-    (_, frac) -> if frac /= 0.0
-        then Left ("expected an integer, but found the non-integral number " <> encodeNum n)
-        else if n > -9223372036854775808.0 && n < 9223372036854775808.0
-            then Right (numFloor n)
-            else Left ("the number " <> encodeNum n <> " is outside the 64-bit Int range")
+numToIntegerFloat n = if numFmod n 1.0 /= 0.0
+    then Left ("expected an integer, but found the non-integral number " <> encodeNum n)
+    else if n > -9223372036854775808.0 && n < 9223372036854775808.0
+        then Right (numFloor n)
+        else Left ("the number " <> encodeNum n <> " is outside the 64-bit Int range")
 
 -- Whether an Integer fits GHC's 64-bit Int range.
 integerFitsInt :: Integer -> Bool
 integerFitsInt i = i >= 0 - 9223372036854775808 && i <= 9223372036854775807
 
--- The window in which the host number type holds an integer exactly: the
--- full 64-bit range with an integer subtype (Lua 5.3+), and the double's
--- contiguous integer range +/-2^53 on a doubles-only host (LuaJIT).
+-- The window in which a Number (a double) holds an integer exactly: the
+-- double's contiguous integer range +/-2^53, on every host.
 integerIsExactNum :: Integer -> Bool
-integerIsExactNum i = if hasIntegerSubtype
-    then integerFitsInt i
-    else i >= 0 - 9007199254740992 && i <= 9007199254740992
+integerIsExactNum i = i >= 0 - 9007199254740992 && i <= 9007199254740992
 
--- Convert an Integer known to be inside the exact window. With an integer
--- subtype the value goes through Int, so it keeps the subtype and encodeNum
--- prints plain digits; on a doubles-only host it becomes the (exact) double.
+-- Convert an Integer known to be inside the exact window: the (exact)
+-- double. encodeNum prints an integral double as plain digits.
 integerToNum :: Integer -> Number
-integerToNum i = if hasIntegerSubtype then intToNum (fromInteger i) else fromInteger i
+integerToNum i = fromInteger i
 
 -- Encode an Integer of any magnitude. Inside the host number's exact window
 -- it is an ordinary JNum (so encode/parse round-trips the Json value
@@ -411,10 +415,10 @@ parseFalse s pos len = if pos + 4 <= len && strSub s pos (pos + 4) == "false" th
 -- leading zeros, and frac/exp require at least one digit. Enforcing the
 -- grammar here guarantees the matched text is always a valid Lua numeral,
 -- so toNumber can never return garbage. Integer-syntax numbers are exact
--- at any length: inside the host number's window they parse to a JNum
--- (Lua's integer subtype where it exists), beyond it to a JInt bignum.
--- Float syntax parses to a double, so no information is lost that a later
--- integrality check (fromJSONInt) would need.
+-- at any length: inside the double's exact window (|n| <= 2^53) they parse
+-- to a JNum, beyond it to a JInt bignum. Float syntax parses to a double,
+-- so no information is lost that a later integrality check (fromJSONInt)
+-- would need.
 -- ================================================================
 
 parseNumber :: String -> Int -> Int -> JResult
@@ -457,23 +461,24 @@ numExpStart s pos len start = if pos <= len && isDigitByte (strByte s pos) then 
 numExpDigits :: String -> Int -> Int -> Int -> JResult
 numExpDigits s pos len start = if pos <= len && isDigitByte (strByte s pos) then numExpDigits s (pos + 1) len start else numFinish s start pos
 
--- Float syntax (a fraction or an exponent was seen): a host double.
+-- Float syntax (a fraction or an exponent was seen): a double. The `+ 0.0`
+-- normalizes a negative zero to 0.0: aeson parses through Scientific,
+-- which has no negative zero, so `-0` and `-0.0` both decode to 0.0 —
+-- and the two hosts would otherwise disagree on `-0` (Lua 5.3+ reads it
+-- as the integer 0, LuaJIT as -0.0).
 numFinish :: String -> Int -> Int -> JResult
-numFinish s start pos = JOk (JNum (toNumber (strSub s start (pos - 1)))) (skipWS s pos (strLen s))
+numFinish s start pos = JOk (JNum (toNumber (strSub s start (pos - 1)) + 0.0)) (skipWS s pos (strLen s))
 
 -- Integer syntax. Up to 15 characters the value is exactly representable
--- on every host (under both 2^53 and 2^63), so plain tonumber is exact.
--- Longer tokens are read exactly as Integer first and then placed: a JNum
--- while the host number still holds the value exactly, a JInt beyond that.
--- The Integer route also absorbs the one tonumber corner: Lua reads the
--- exact spelling of the minimum 64-bit integer as -(9223372036854775808),
--- whose positive magnitude overflows to a float; integerToNum converts by
--- value instead of respelling, so the entire int64 range stays exact.
+-- as a double (under 2^53), so plain tonumber is exact (the FFI boundary
+-- delivers the Number as a float on every host). Longer tokens are read
+-- exactly as Integer first and then placed: a JNum while a double still
+-- holds the value exactly, a JInt beyond that.
 numFinishInt :: String -> Int -> Int -> JResult
 numFinishInt s start pos = JOk (intToken (strSub s start (pos - 1))) (skipWS s pos (strLen s))
 
 intToken :: String -> Json
-intToken t = if strLen t <= 15 then JNum (toNumber t) else intTokenBig (readInteger t)
+intToken t = if strLen t <= 15 then JNum (toNumber t + 0.0) else intTokenBig (readInteger t)
 
 intTokenBig :: Integer -> Json
 intTokenBig i = if integerIsExactNum i then JNum (integerToNum i) else JInt i
@@ -645,14 +650,19 @@ encodePairs [] = ""
 encodePairs [(k, v)] = encodeStr k <> ":" <> encodeJSON v
 encodePairs ((k, v):rest) = encodeStr k <> ":" <> encodeJSON v <> "," <> encodePairs rest
 
--- Numbers: Lua's integer subtype prints exactly with %d. Floats try %.14g
--- first (shortest common form) and fall back to more digits until the text
--- parses back to the identical double, so encoding never loses precision.
--- NaN and the infinities are not representable in JSON and become null.
+-- Numbers: a JNum is a double. A nonzero integral value below 10^15 prints
+-- as plain digits with %d (exact there, and the common Int case in one
+-- format call; zero stays on the float path so a negative zero keeps its
+-- "-0"). Everything else tries %.14g first (the shortest common form) and
+-- falls back to more digits until the text parses back to the identical
+-- double, so encoding never loses precision. NaN and the infinities are
+-- not representable in JSON and become null.
 encodeNum :: Number -> String
 encodeNum n = if n /= n || n == numHuge || n == 0.0 - numHuge
     then "null"
-    else if numMathType n == "integer" then numFormat "%d" n else encodeFloat n
+    else if n /= 0.0 && n > -1000000000000000.0 && n < 1000000000000000.0 && numFmod n 1.0 == 0.0
+        then numFormat "%d" n
+        else encodeFloat n
 
 encodeFloat :: Number -> String
 encodeFloat n = encodeFloat16 n (numFormat "%.14g" n)
@@ -691,27 +701,30 @@ hexDigitChar :: Int -> String
 hexDigitChar d = if d < 10 then strChar (48 + d) else strChar (87 + d)
 
 -- Local FFI bindings for the codecs (kept local to avoid polluting the
--- merged namespace with an LMath import).
+-- merged namespace with an LMath import). intToNum is the Int -> Number
+-- conversion inside the double's exact window: tonumber hands the machine
+-- integer back and the FFI boundary delivers it as a double.
 intToNum :: Int -> LuaPure "tonumber" Number
-numModf :: Number -> LuaPure "math.modf" (Number, Number)
+numFmod :: Number -> Number -> LuaPure "math.fmod" Number
 numFloor :: Number -> LuaPure "math.floor" Int
 numFormat :: String -> Number -> LuaPure "string.format" String
 -- __mll_math_type is the runtime's portability shim around math.type: native
 -- on Lua 5.3+, and on interpreters without an integer subtype (LuaJIT,
 -- Lua 5.1/5.2) it answers "float" for every number — which is the truth
 -- there, since all numbers are IEEE-754 doubles.
-numMathType :: Number -> LuaPure "__mll_math_type" String
+intMathType :: Int -> LuaPure "__mll_math_type" String
 numHuge :: LuaPure "math.huge" Number
 
 -- True when this interpreter distinguishes integer numbers from floats
--- (Lua 5.3+). Where it is False (LuaJIT), numbers are doubles only, so
--- integers beyond 2^53 are not exactly representable and the strict 64-bit
--- range checks in numToIntegerFloat correctly reject the int64 boundaries.
+-- (Lua 5.3+), so an Int is exact over the full 64-bit range. Where it is
+-- False (LuaJIT), an Int is a double too, so Ints beyond 2^53 are not
+-- exactly representable. The codecs no longer depend on it (a JNum is a
+-- double everywhere, and an Int beyond 2^53 travels as a JInt); it stays
+-- for programs that gate Int exactness expectations on the host.
 -- note: GHC's Int is a true 64-bit integer on every platform, so this Lua
--- interpreter distinction has no GHC counterpart; use it to gate exactness
--- expectations beyond 2^53 (the LuaJIT double-only host limitation).
+-- interpreter distinction has no GHC counterpart.
 hasIntegerSubtype :: Bool
-hasIntegerSubtype = numMathType (intToNum 1) == "integer"
+hasIntegerSubtype = intMathType 1 == "integer"
 
 -- ================================================================
 -- Accessors

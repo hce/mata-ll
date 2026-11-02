@@ -602,6 +602,23 @@ impl Folder {
 
         let TExpr { kind, ty } = expr.map_children(&mut |c| self.fold_expr(c));
         match kind {
+            // A `Number` is an IEEE double on every host, never Lua's integer
+            // subtype. The monomorphizer already lowers an integer-syntax
+            // literal at Number to the double it denotes (`literal_use`);
+            // this arm is the folder's own guarantee of the same invariant
+            // for whatever reaches it typed Number — so the arithmetic,
+            // comparison and negation folds below meet only `Number`
+            // literals at a Number node and fold in f64, and codegen's
+            // `literal_ast` spells every Number literal as a Lua float.
+            TExprKind::Lit(lit @ (TLiteral::Integer(_) | TLiteral::BigInteger(_)))
+                if matches!(&ty, Ty::Con(c) if c == "Number") =>
+            {
+                self.changed = true;
+                TExpr::new(
+                    TExprKind::Lit(crate::mono::Monomorphizer::integer_literal_as_number(lit)),
+                    ty,
+                )
+            }
             TExprKind::Var(name) => {
                 if !self.is_shadowed(&name)
                     && let Some(lit) = self.cafs.get(&name) {

@@ -1435,6 +1435,22 @@ impl Monomorphizer {
         matches!(op, "hmKeys" | "hmValues" | "hmToList")
     }
 
+    /// The hm* operations that key type `Number` routes to the Number
+    /// family (`__mll_hmn_*`): the writes, which stamp the handle with the
+    /// Number flavor, and the key-returning enumerators, which hand the
+    /// keys back as doubles (Lua 5.3+ keeps an integral float key as an
+    /// integer; a Number is a double on every host). `hmLookup`,
+    /// `hmMember` and `hmValues` are value-based on the scalar store and
+    /// stay the scalar functions — including the fused lookup-case slot
+    /// read.
+    fn hm_number_op(op: &str) -> bool {
+        matches!(op, "hmInsert" | "hmDelete" | "hmFromList" | "hmKeys" | "hmToList")
+    }
+
+    fn is_number_ty(ty: &Ty) -> bool {
+        matches!(ty, Ty::Con(c) if c == "Number")
+    }
+
     /// The ONE decision for an hm* use at key type `key_ty` — the HashMap
     /// analog of `dispatch_method`, made by the main walk and the
     /// dictionary rewrite alike. `None` keeps the node as written: the
@@ -1447,6 +1463,8 @@ impl Monomorphizer {
     ///   - a keyless enumerator at a structural shape or an erased key
     ///     takes the threaded wrapper (`hm_threaded_impl`), typed for the
     ///     shape, flavor-from-the-handle for the erased key;
+    ///   - an operation at key type `Number` that the Number flavor owns
+    ///     (`hm_number_op`) takes the wrapper calling the Number family;
     ///   - a keyed operation whose key type needs evidence (a type
     ///     variable or an existential skolem anywhere in it) and has it in
     ///     scope takes the operation's dictionary form applied to the key
@@ -1470,6 +1488,9 @@ impl Monomorphizer {
             let mangled = slf.hm_threaded_impl(op, key_ty, use_ty);
             Some(TExpr::new(TExprKind::Var(mangled), use_ty.clone()))
         };
+        if Self::is_number_ty(key_ty) {
+            return if Self::hm_number_op(op) { wrapper(self) } else { None };
+        }
         if Self::hm_iteration_op(op) {
             if Self::is_structural_key(key_ty) || matches!(key_ty, Ty::Var(_) | Ty::Skolem(..)) {
                 return wrapper(self);
@@ -1566,7 +1587,8 @@ impl Monomorphizer {
         // only ever comes here for an enumerator (see `hm_op_use`): the
         // runtime reads the flavor off the handle.
         let erased = matches!(key_ty, Ty::Var(_) | Ty::Skolem(..));
-        let (enc, cmp) = if erased || Self::hm_iteration_op(op) {
+        let number = Self::is_number_ty(key_ty);
+        let (enc, cmp) = if erased || number || Self::hm_iteration_op(op) {
             (None, None)
         } else if matches!(op, "hmInsert" | "hmFromList") {
             (Some(self.structural_key_enc(key_ty)), self.structural_ord_impl("compare", key_ty))
@@ -1591,7 +1613,7 @@ impl Monomorphizer {
         let body = TExpr::new(
             TExprKind::SpecCall {
                 original: mangled.clone(),
-                specialized: SpecKind::HmOp { op: op.to_string(), enc, cmp, erased },
+                specialized: SpecKind::HmOp { op: op.to_string(), enc, cmp, erased, number },
                 args,
             },
             result_ty.clone(),
@@ -2950,10 +2972,22 @@ impl Monomorphizer {
     /// `fromInteger (n :: Integer)` for an integer literal, `fromRational
     /// (r :: Number)` for a fractional one — through `dispatch_method` at
     /// `Integer -> ty` / `Number -> ty`:
-    ///   * Int/Number: the builtin conversions are the identity
-    ///     passthroughs (`fromInteger_Int`, `fromInteger_Number`,
-    ///     `fromRational_Number`), so the literal stays raw (`Err`) — the
-    ///     documented host representation;
+    ///   * Int: `fromInteger_Int` is the identity on the machine integer,
+    ///     so the literal stays raw (`Err`) — the documented host
+    ///     representation;
+    ///   * Number: `fromInteger` at Double ROUNDS the integer to the
+    ///     nearest double, and a `Number` is an IEEE double on every host
+    ///     (never Lua's integer subtype — the invariant codegen, the
+    ///     folder and the runtime all keep; see COMPILER.md "Number is a
+    ///     double"), so an integer-syntax literal at Number is converted
+    ///     HERE, at compile time, into the `TLiteral::Number` it denotes
+    ///     (`9007199254740993 :: Number` is `9007199254740992.0`, `-0 ::
+    ///     Number` folds to `-0.0`, `4611686018427387904 + 4611686018427387904`
+    ///     folds in double arithmetic to `9.223372036854776e18` instead of
+    ///     wrapping Lua's int64). Downstream — `fold_num_num`, the float
+    ///     spelling `lua_number_literal` — then never sees an integer
+    ///     numeral at Number. A fractional literal is already a Number
+    ///     and stays raw;
     ///   * Integer: `fromInteger_Integer n` (machine -> bignum);
     ///   * a user Num type: `fromInteger_T (fromInteger_Integer n)` — the
     ///     user's `fromInteger` receives an actual Integer, as in GHC;
@@ -2980,7 +3014,8 @@ impl Monomorphizer {
         let use_ty = Ty::arrow(src_ty, ty.clone());
         let conv = match self.dispatch_method(method, &use_ty, ev) {
             MethodUse::Impl(name) => match name.as_str() {
-                "fromInteger_Int" | "fromInteger_Number" | "fromRational_Number" => return Err(lit),
+                "fromInteger_Number" => return Err(Self::integer_literal_as_number(lit)),
+                "fromInteger_Int" | "fromRational_Number" => return Err(lit),
                 _ => TExpr::new(TExprKind::Var(name), Ty::Unit),
             },
             MethodUse::Evidence(kind) => TExpr::new(kind, use_ty),
@@ -3023,6 +3058,22 @@ impl Monomorphizer {
             kind: TExprKind::App(Box::new(conv), Box::new(arg)),
             ty: ty.clone(),
         })
+    }
+
+    /// GHC's `fromInteger` at Double applied at compile time: the integer
+    /// literal's value rounded to the nearest double, as a `Number` literal.
+    /// A decimal-string `BigInteger` parses through Rust's correctly-rounded
+    /// float parser, so a literal of any length lands on the double GHC's
+    /// `integerToDouble` picks (`10000000000000000000000000000000 ::
+    /// Number` is `1.0e31`). Other literal kinds pass through unchanged.
+    pub(crate) fn integer_literal_as_number(lit: TLiteral) -> TLiteral {
+        match lit {
+            TLiteral::Integer(n) => TLiteral::Number(n as f64),
+            TLiteral::BigInteger(s) => TLiteral::Number(
+                s.parse::<f64>().expect("an integer literal is a decimal numeral"),
+            ),
+            other => other,
+        }
     }
 
     /// Resolve the eq function for an element type, generating specialized eq

@@ -188,6 +188,12 @@ mll_test!(dict_partial_self, "dict_partial_self.mll");
 // F23: nullary class methods through parameterized-instance dictforms.
 mll_test!(dict_nullary_method, "dict_nullary_method.mll");
 mll_test!(dict_nullary_field_thunk, "dict_nullary_field_thunk.mll");
+// W47 (N1/H4): a Number is an IEEE double on every host — integer-syntax
+// literals at Number, the folder, read/fromIntegral, the FFI boundary, the
+// JSON parser and Number map keys all deliver the float subtype.
+mll_test!(number_double_invariant, "number_double_invariant.mll");
+mll_test!(number_map_keys, "number_map_keys.mll");
+mll_test!(number_host_boundary, "number_host_boundary.mll");
 // G1: locals shadow dict-passing globals in the dictionary rewrite passes
 // (clause/lambda/let/case/where binders); a function named `f` no longer
 // collides with Prelude parameters of the same name.

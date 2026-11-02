@@ -323,8 +323,9 @@ impl CodeGen {
                         ],
                     ),
                     // The declared result is ONE value: truncate the raw
-                    // host call so extra return values cannot spread.
-                    None => Expr::paren(call),
+                    // host call so extra return values cannot spread; a bare
+                    // Number result is normalized to the float subtype.
+                    None => Self::ffi_number_result_ast(&expr.ty, Expr::paren(call)),
                 }
             }
             ActionShape::HostTry { host, args } => self.ffi_try_call_ast(host, args, &expr.ty),

@@ -814,7 +814,15 @@ pub(crate) fn generate(
     // check covers prelude-internal forces too, not just emitted ones. The
     // glue is part of the prelude scan input so `__force_checked` (and, when
     // the body itself never forces, `__force`) is selected into the subset.
-    let whnf_glue = if whnf_assert { "__force = __force_checked\n" } else { "" };
+    // The same rebind puts the Number subtype checker under the
+    // type-directed `show_Number` (and its showsPrec, which calls through
+    // the variable): a Number that reaches a print as Lua's integer subtype
+    // refutes the "Number is a double" invariant at the site that shows it.
+    let whnf_glue = if whnf_assert {
+        "__force = __force_checked\nshow_Number = __show_Number_checked\n"
+    } else {
+        ""
+    };
     let prelude = ondemand_prelude(&format!("{whnf_glue}{big_lit_defs}{body}"))?;
     // The embedded-source block goes at the very top of the file: extraction
     // takes the earliest marker, so the genuine block must precede anything

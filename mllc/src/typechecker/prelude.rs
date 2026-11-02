@@ -824,9 +824,15 @@ impl Checker {
         for t in &["Int", "Number", "String", "Bool", "ByteString"] {
             // The scalar encoder, and the type's own `compare` (the base
             // Ord instances above): one key type, one encoder, one order.
+            // Number's encoder is the scalar encoding under its own
+            // identity: the dictionary-routed runtime family recognizes it
+            // and takes the Number flavor of the scalar store (keys read
+            // back as doubles), exactly as a specialized body at Number
+            // does (mono's `hm_number_op`).
             let compare = format!("ord_compare__{}", t);
+            let encoder = if *t == "Number" { "__mll_key_number" } else { "__mll_key_scalar" };
             self.register_builtin_instance("Hashable", Ty::Con(t.to_string()), &[
-                ("__hashKey", "__mll_key_scalar"),
+                ("__hashKey", encoder),
                 ("__hashCompare", compare.as_str()),
             ]);
         }

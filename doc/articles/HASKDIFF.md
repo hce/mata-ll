@@ -162,12 +162,28 @@ at a concrete type inlines to bare Lua operators. `fromInteger :: Integer
 -> a`, `toInteger :: Integral a => a -> Integer` and `fromIntegral ::
 (Integral a, Num b) => a -> b` all exist, as in GHC.
 
-`Number` maps to Lua's float type (double-precision IEEE 754).
+`Number` maps to Lua's float type (double-precision IEEE 754) — on
+every host, in every position. Lua 5.3+ has an integer subtype beside
+it; that subtype is `Int`'s, and a `Number` value never carries it: an
+integer-syntax literal at `Number` is lowered at compile time to the
+double GHC's `fromInteger` at Double denotes (`9007199254740993 ::
+Number` is `9007199254740992.0`, `-0 :: Number` is `-0.0`, and constant
+folding at `Number` is double arithmetic), `read` at `Number` reads
+integer syntax as a double (`read "-0"` is `-0.0`), `fromInteger`/
+`fromIntegral` at `Number` round to the nearest double, every host→Number
+FFI boundary converts (an FFI result, a record field, a JSON number), and
+a `Number` map key reads back as the double it was stored as. So `Number`
+arithmetic agrees with GHC's Double bit for bit on both hosts (`(2 ::
+Number) ^ 64` is `1.8446744073709552e19`, never a wrapped int64), and
+the type-directed `show` prints `3.0` for `3 :: Number` everywhere.
 
 JSON round-trips `Integer` exactly at any magnitude: encoding emits the
 bare decimal digits aeson emits, and the parser keeps integer-syntax
 digits without loss (`Json` carries a `JInt Integer` constructor for
-values beyond the host number's exact window). The one decode divergence:
+integer syntax beyond the double's exact window, |n| > 2^53, on every
+host; an `Int` beyond it encodes through `JInt` too, so its digits are
+exact). A negative-zero numeral (`-0`, `-0.0`) decodes to `0.0`, as
+aeson's `Scientific` has no negative zero. The one decode divergence:
 aeson parses every number exactly (`Scientific`), so it also decodes
 exponent syntax like `1e30` into an `Integer`; mata-ll's parser holds
 float/exponent syntax as a host double, and `FromJSON Integer` rejects it
@@ -408,6 +424,14 @@ function compiled with dictionary passing (see the performance note
 below) reads and writes a map exactly as a specialized one does; a map
 also carries its own key order, so the enumerating operations need no
 constraint, as `Data.Map.keys` needs none.
+
+A `Number` key reads back as the double it was stored as — `M.keys`,
+`M.toList`, `M.foldrWithKey` and `show` on a `Map Number v` hand out
+doubles on every host (Lua 5.3+ stores an integral float key as an
+integer; the map carries its key flavor and converts on the way out),
+so `map negate (M.keys m)` keeps the sign of zero and `k * k` is double
+arithmetic. The one residual is the pinned `negative_zero_keys`
+divergence below: a scalar key written as `-0.0` reads back as `0.0`.
 
 A NaN `Number` key behaves as it does under `Data.Map` — `compare nan _`
 is `GT` and `nan == nan` is `False`, so an insert under a NaN key lands

@@ -244,8 +244,11 @@ fn ffi_wrapper_keeps_truncating_paren() {
     let lua = compile(ffi_source, dir, &[])
         .expect("ffi probe must compile")
         .lua_code;
+    // The probe's result is a Number, which the boundary normalizes to the
+    // float subtype (`* 1.0`, see ffi_number_result_ast): the truncating
+    // paren sits around the raw host call, as the multiply's operand.
     assert!(
-        lua.contains("return (math.modf(__ffi0))"),
+        lua.contains("return (math.modf(__ffi0)) * 1.0"),
         "FFI wrapper must keep the truncating paren around the raw host call: {lua}"
     );
     // A literal argument splices the wrapper's SpecCall to the call site;
@@ -258,7 +261,7 @@ fn ffi_wrapper_keeps_truncating_paren() {
         .expect("ffi probe must compile")
         .lua_code;
     assert!(
-        lua2.contains("((math.modf(3.75)))"),
+        lua2.contains("((math.modf(3.75)) * 1.0)"),
         "spliced FFI call must keep the truncating paren around the raw host call: {lua2}"
     );
 }

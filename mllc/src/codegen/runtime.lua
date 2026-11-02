@@ -374,7 +374,19 @@ local function __mll_ffi_decode(desc, v, root, dir)
     -- errors and destroy the laziness the program may rely on.
     if getmetatable(v) == __thunk_mt then return v end
     local k = desc.k
-    if k == "chk" then
+    if k == "num" then
+        -- A `Number` leaf (inside a structure, a LuaTry/LuaCatch payload, an
+        -- exported function's argument, an iterator element). A Number is
+        -- an IEEE double on every host, and a host hands numbers over in
+        -- whatever subtype it has (`tonumber "5"`, `string.len`, `os.time`,
+        -- a record field holding `3` — Lua's integer subtype on 5.3+): the
+        -- value is normalized to the float subtype (`* 1.0` keeps a -0.0's
+        -- sign; `+ 0.0` would not). nil and a non-number fail like `chk`.
+        if type(v) ~= "number" then
+            __mll_ffi_mismatch(desc, v, root, nil, dir)
+        end
+        return v * 1.0
+    elseif k == "chk" then
         -- Scalar leaf inside a structure: the declared type pins down the Lua
         -- runtime type. nil (a missing field/element) also fails here.
         if type(v) ~= desc.lt then
@@ -449,8 +461,12 @@ local function __mll_ffi_decode(desc, v, root, dir)
             r[key] = val
             n = n + 1
         end
-        -- A fresh persistent-map root handle (see the HashMap runtime).
-        return setmetatable({t = r, n = n}, __mll_hm_mt)
+        -- A fresh persistent-map root handle (see the HashMap runtime). A
+        -- map declared with Number keys carries the Number flavor
+        -- (`__mll_hmn_*`): the host's integral keys enumerate as doubles.
+        local h = setmetatable({t = r, n = n}, __mll_hm_mt)
+        if desc.kt == "Number" then h.nk = true end
+        return h
     elseif k == "tuple" then
         if type(v) ~= "table" then
             __mll_ffi_mismatch(desc, v, root,
@@ -465,9 +481,16 @@ local function __mll_ffi_decode(desc, v, root, dir)
             end
             return r
         end
-        -- Validation-only: check the elements, keep the host's array.
+        -- Validation-only: check the elements, keep the host's array. A
+        -- `Number` element is the one thing written back: its normalized
+        -- double replaces the host's integer-subtype value IN the host's
+        -- array (the table, its metatable and any extra slots stay).
         for i = 1, #desc.es do
-            if desc.es[i] then __mll_ffi_decode(desc.es[i], v[i], root, dir) end
+            local d = desc.es[i]
+            if d then
+                local r = __mll_ffi_decode(d, v[i], root, dir)
+                if d.k == "num" then v[i] = r end
+            end
         end
         return v
     elseif k == "record" then
@@ -486,10 +509,17 @@ local function __mll_ffi_decode(desc, v, root, dir)
             return r
         end
         -- Validation-only: check the declared fields, keep the host's table
-        -- (its metatable and any undeclared fields stay intact).
+        -- (its metatable and any undeclared fields stay intact). A `Number`
+        -- field is the one write: its normalized double replaces the
+        -- host's integer-subtype value in the host's own table, so every
+        -- later read of the field — a typed read, a structural show or
+        -- compare — meets a double.
         for i = 1, #desc.fs do
             local f = desc.fs[i]
-            if f.d then __mll_ffi_decode(f.d, v[f.n], root, dir) end
+            if f.d then
+                local r = __mll_ffi_decode(f.d, v[f.n], root, dir)
+                if f.d.k == "num" then v[f.n] = r end
+            end
         end
         return v
     elseif k == "any" then
@@ -1402,7 +1432,13 @@ local function __mll_read_number(s)
         or string.match(s, "^%-?%d+%.%d+[eE][%+%-]?%d+$")) then
         error("Prelude.read: no parse")
     end
-    return tonumber(s) + 0.0
+    -- A Number is a double on every host. Integer syntax goes through the
+    -- float lexer rather than `tonumber` + a conversion: "-0" reads as
+    -- -0.0 (GHC: `read "-0" :: Double` is -0.0; the integer 0 has no sign
+    -- to keep) and a long numeral rounds straight to the nearest double
+    -- instead of being read as a wrapping int64 first.
+    if string.match(s, "^%-?%d+$") then s = s .. ".0" end
+    return tonumber(s)
 end
 local function __mll_read_bool(s)
     s = __mll_read_trim(__force(s))
@@ -1411,9 +1447,9 @@ local function __mll_read_bool(s)
     error("Prelude.read: no parse")
 end
 local function show_Int(x) return __mll_show_integer(__force(x)) end
--- Type-directed Double show: a Number-typed value may be held as a native
--- integer (integer-valued arithmetic on Lua 5.3+, every LuaJIT number), so
--- the double formatter is called unconditionally — GHC shows 3 :: Double
+-- Type-directed Double show: a Number is a double on every host (the
+-- producers keep it off Lua's integer subtype), and on LuaJIT every number
+-- is one, so the double formatter is called unconditionally — GHC shows 3 :: Double
 -- as "3.0".
 local function show_Number(x) return __mll_show_double(__force(x)) end
 local function show_String(x) return __mll_show_string(__force(x)) end
@@ -2014,7 +2050,10 @@ local function show_HashMap(m)
     if getmetatable(m) == __mll_hme_mt then
         for i = 1, #vs do local e = vs[i]; parts[#parts+1] = show(e[1]) .. " -> " .. show(e[2]) end
     else
-        for i = 1, #ks do local k, v = ks[i], vs[i]; if rawequal(v, __mll_hm_nilv) then v = nil end; if type(k) == "table" then k = k[1] end; parts[#parts+1] = show(k) .. " -> " .. show(v) end
+        -- A Number-flavored handle (`nk`) knows its key type: the keys take
+        -- the type-directed Double show (a doubles-only host cannot tell
+        -- 2 from 2.0 in the erased `show`); the values stay type-erased.
+        for i = 1, #ks do local k, v = ks[i], vs[i]; if rawequal(v, __mll_hm_nilv) then v = nil end; if type(k) == "table" then k = k[1] end; parts[#parts+1] = (m.nk and show_Number(k * 1.0) or show(k)) .. " -> " .. show(v) end
     end
     table.sort(parts)
     return "{" .. table.concat(parts, ", ") .. "}"
@@ -2060,6 +2099,11 @@ local function __mll_key_scalar(x)
     if x == 0 then return "n0" end
     return "n" .. string.format("%.17g", x)
 end
+-- The Number key type's encoder: the scalar encoder's value-based encoding
+-- under an identity of its own, which is what the dictionary-routed family
+-- dispatches on — a Number-keyed map takes the scalar store with the
+-- Number flavor (`__mll_hmn_*` below), not the plain scalar functions.
+local function __mll_key_number(x) return __mll_key_scalar(x) end
 local function __mll_key_list(enc, l) l = __force(l); local parts = {} local cur = l while cur ~= nil do parts[#parts+1] = enc(__force(cur[1])) cur = __mll_tail(cur) end return "[" .. table.concat(parts, ",") .. "]" end
 local function __mll_key_maybe(enc, x) x = __force(x); if x == nil then return "N" end return "J(" .. enc(x[1]) .. ")" end
 -- The flavor tag lives on the HANDLE (roots and diffs both carry it:
@@ -2131,6 +2175,27 @@ local function __mll_hme_keys(m) local es = __mll_hme_sorted(m) local r = nil fo
 local function __mll_hme_values(m) local es = __mll_hme_sorted(m) local r = nil for i = #es, 1, -1 do r = __mll_cons(es[i][2], r) end return r end
 local function __mll_hme_toList(m) local es = __mll_hme_sorted(m) local r = nil for i = #es, 1, -1 do r = __mll_cons({es[i][1], es[i][2]}, r) end return r end
 local function hashmap_toList(m) m = __force(m); local t = __mll_hm_reroot(m) local r = nil local ks = {} for k in pairs(t) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do local k = ks[i] local v = t[k] if rawequal(v, __mll_hm_nilv) then v = nil end if type(k) == "table" then k = k[1] end r = __mll_cons({k, v}, r) end return r end
+-- Number-keyed maps: the scalar store (a Number key is a Lua number, and
+-- a read finds it by value) under the Number FLAVOR. Lua 5.3+ normalizes a
+-- float table key with an integral value to the integer subtype, so a key
+-- stored as 3.0 enumerates as the integer 3 — and a Number is an IEEE
+-- double on every host (arithmetic on the leaked integer wrapped at 2^63
+-- and `negate 0` lost its sign). The writes stamp the handle `nk` (reroot
+-- moves stores between handles and never creates one, so a stamp lives
+-- for the handle's life; the shared empty map has no keys to convert),
+-- and the enumerators of a stamped handle — these, the dictionary-routed
+-- __mll_hmd_keys/toList and show_HashMap — hand every key back as a
+-- double (`* 1.0`; a NaN box unboxes as before). The store holds the zero
+-- key as +0 on every host, so -0.0 and 0.0 are one key that reads back as
+-- 0.0 — the documented deviation from Data.Map, which keeps the spelling
+-- inserted last. A specialized body at key type Number calls these
+-- directly (mono's hm_op_use); lookup, member and the fused slot read stay
+-- the plain scalar functions.
+local function __mll_hmn_insert(k, v, m) local h = hashmap_insert(k, v, m) h.nk = true return h end
+local function __mll_hmn_delete(k, m) local h = hashmap_delete(k, m) if h ~= m then h.nk = true end return h end
+local function __mll_hmn_fromList(xs) local h = hashmap_fromList(xs) h.nk = true return h end
+local function __mll_hmn_keys(m) m = __force(m); local t = __mll_hm_reroot(m) local r = nil local ks = {} for k in pairs(t) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do local k = ks[i] if type(k) == "table" then k = k[1] else k = k * 1.0 end r = __mll_cons(k, r) end return r end
+local function __mll_hmn_toList(m) m = __force(m); local t = __mll_hm_reroot(m) local r = nil local ks = {} for k in pairs(t) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do local k = ks[i] local v = t[k] if rawequal(v, __mll_hm_nilv) then v = nil end if type(k) == "table" then k = k[1] else k = k * 1.0 end r = __mll_cons({k, v}, r) end return r end
 -- The dictionary-routed family: a Hashable-constrained body compiled with
 -- dictionary passing (the Data.Map/Data.Set wrappers past the
 -- specialization limit, a function over an existential key) serves every
@@ -2139,18 +2204,20 @@ local function hashmap_toList(m) m = __force(m); local t = __mll_hm_reroot(m) lo
 -- run time, by ONE rule: a key whose encoder is the scalar encoder is a
 -- scalar key and takes the scalar store, byte-for-byte the path a
 -- specialized body takes (so maps built here interoperate with
--- statically-specialized accessors); any other encoder is a structural
--- shape's and takes the encoded store with that same typed encoder. The
--- keyless enumerators have no key type to ask and need none: the handle
--- carries the flavor and the compare.
-local function __mll_hmd_insert(enc, cmp, k, v, m) if enc == __mll_key_scalar then return hashmap_insert(k, v, m) end return __mll_hme_insert(enc, cmp, k, v, m) end
-local function __mll_hmd_lookup(enc, k, m) if enc == __mll_key_scalar then return hashmap_lookup(k, m) end return __mll_hme_lookup(enc, k, m) end
-local function __mll_hmd_delete(enc, k, m) if enc == __mll_key_scalar then return hashmap_delete(k, m) end return __mll_hme_delete(enc, k, m) end
-local function __mll_hmd_member(enc, k, m) if enc == __mll_key_scalar then return hashmap_member(k, m) end return __mll_hme_member(enc, k, m) end
-local function __mll_hmd_fromList(enc, cmp, xs) if enc == __mll_key_scalar then return hashmap_fromList(xs) end return __mll_hme_fromList(enc, cmp, xs) end
-local function __mll_hmd_keys(m) m = __force(m) if getmetatable(m) == __mll_hme_mt then return __mll_hme_keys(m) end return hashmap_keys(m) end
+-- statically-specialized accessors); the Number encoder takes the scalar
+-- store under the Number flavor (above), again what a specialized body at
+-- Number does; any other encoder is a structural shape's and takes the
+-- encoded store with that same typed encoder. The keyless enumerators
+-- have no key type to ask and need none: the handle carries the flavor
+-- and the compare.
+local function __mll_hmd_insert(enc, cmp, k, v, m) if enc == __mll_key_scalar then return hashmap_insert(k, v, m) end if enc == __mll_key_number then return __mll_hmn_insert(k, v, m) end return __mll_hme_insert(enc, cmp, k, v, m) end
+local function __mll_hmd_lookup(enc, k, m) if enc == __mll_key_scalar or enc == __mll_key_number then return hashmap_lookup(k, m) end return __mll_hme_lookup(enc, k, m) end
+local function __mll_hmd_delete(enc, k, m) if enc == __mll_key_scalar then return hashmap_delete(k, m) end if enc == __mll_key_number then return __mll_hmn_delete(k, m) end return __mll_hme_delete(enc, k, m) end
+local function __mll_hmd_member(enc, k, m) if enc == __mll_key_scalar or enc == __mll_key_number then return hashmap_member(k, m) end return __mll_hme_member(enc, k, m) end
+local function __mll_hmd_fromList(enc, cmp, xs) if enc == __mll_key_scalar then return hashmap_fromList(xs) end if enc == __mll_key_number then return __mll_hmn_fromList(xs) end return __mll_hme_fromList(enc, cmp, xs) end
+local function __mll_hmd_keys(m) m = __force(m) if getmetatable(m) == __mll_hme_mt then return __mll_hme_keys(m) end if m.nk then return __mll_hmn_keys(m) end return hashmap_keys(m) end
 local function __mll_hmd_values(m) m = __force(m) if getmetatable(m) == __mll_hme_mt then return __mll_hme_values(m) end return hashmap_values(m) end
-local function __mll_hmd_toList(m) m = __force(m) if getmetatable(m) == __mll_hme_mt then return __mll_hme_toList(m) end return hashmap_toList(m) end
+local function __mll_hmd_toList(m) m = __force(m) if getmetatable(m) == __mll_hme_mt then return __mll_hme_toList(m) end if m.nk then return __mll_hmn_toList(m) end return hashmap_toList(m) end
 
 
 
@@ -2787,6 +2854,20 @@ local function __assert_whnf(x)
         error("WHNF claim refuted: a claimed forced position holds an unforced thunk", 2)
     end
     return x
+end
+local function __show_Number_checked(x)
+    -- TEST-ONLY invariant checker (rebound over show_Number by the
+    -- WHNF-refutation build, like __force below): a Number is an IEEE
+    -- double on every host and never carries Lua's integer subtype — every
+    -- producer (a literal, the folder, fromInteger, read, an FFI result, a
+    -- map key read back) delivers the float subtype. A leak shows up where
+    -- it is printed, so the type-directed show is the probe; a doubles-only
+    -- host (no math.type) has nothing to refute.
+    x = __force(x)
+    if math.type ~= nil and math.type(x) == "integer" then
+        error("Number subtype invariant refuted: a Number value holds Lua's integer subtype", 2)
+    end
+    return __mll_show_double(x)
 end
 local function __assert_purebare(x)
     -- TEST-ONLY claim checker for pure_value_bare_is_safe: a pure value may

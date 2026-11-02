@@ -350,7 +350,10 @@ constant folding (§7) can then recognize them.
   instantiated type, so either operand may carry the class variable), a
   first-class operator or section (`OpFunc`), prefix negation
   (`Negate`, the `negate` method at `t -> t`) and an overloaded literal
-  (`fromInteger`/`fromRational` at `Integer -> t` / `Number -> t`). A
+  (`fromInteger`/`fromRational` at `Integer -> t` / `Number -> t`; at
+  `Number` the integer literal is converted right there into the
+  `TLiteral::Number` GHC's `fromInteger` at Double denotes — see "A
+  Number is a double" below). A
   binding that needs no evidence (`needs_evidence`: concrete, or a head
   whose instance demands nothing of the variable parts) resolves through
   `resolve_at_type`; a binding over type variables or existential
@@ -379,8 +382,51 @@ constant folding (§7) can then recognize them.
   operation's dictionary form (`hm_dictform`) applied to the key's
   Hashable dictionary, whose encoder decides the store flavor at run
   time (`__mll_hmd_*` in runtime.lua: the scalar encoder means the
-  scalar store); the enumerators read the key order off the handle and
-  need no evidence.
+  scalar store, `Hashable Number`'s own `__mll_key_number` the scalar
+  store under the Number flavor); the enumerators read the key order
+  off the handle and need no evidence. At key type `Number` the writes
+  and the key-returning enumerators (`hm_number_op`) take the wrapper
+  calling the Number family `__mll_hmn_*`: the writes stamp the handle
+  (`nk`), the enumerators hand keys back as doubles (Lua 5.3+ stores an
+  integral float key as an integer), lookup/member stay the scalar
+  functions.
+
+- **A Number is a double.** `Number` is an IEEE double on every host and
+  never carries Lua's integer subtype (that subtype is `Int`'s): a
+  Number that holds a Lua integer does int64 arithmetic that wraps at
+  2^63, has no sign of zero, compares exactly where GHC rounds, and shows
+  integer-style through the erased `show`. One invariant, kept at every
+  producer:
+  - an integer-syntax literal at `Number` becomes `TLiteral::Number`
+    in `literal_use` (the nearest double: `n as f64`, a `BigInteger`
+    through Rust's correctly rounded parser), so `fold.rs` folds
+    arithmetic, comparison and negation at Number in f64 (`-0` is
+    `-0.0`) and `literal_ast` spells it as a Lua float
+    (`lua_number_literal`); the folder's own `Lit` arm normalizes any
+    Integer literal still typed Number — the second line of the same
+    defense; a literal PATTERN at Number is spelled as the rounded
+    float by `collect_pattern_conditions` (and `__mll_lit_eq` compares a
+    float scrutinee against the rounded literal);
+  - the runtime: `fromInteger_Number` (the dictionary-routed literal
+    `dict.fromInteger(5)`, `fromIntegral`) returns `x * 1.0` for a
+    machine number (`* 1.0`, not `+ 0.0`: the sum would lose a `-0.0`),
+    `__int_to_double` for a bignum; `__mll_read_number` parses integer
+    syntax through the float lexer (`"-0"` → `-0.0`);
+  - the FFI boundary: `ffi_decode_desc_inner` gives a `Number` leaf the
+    `num` descriptor (checked and normalized by `__mll_ffi_decode`, and
+    written back into a validation-only record/tuple so the host's table
+    holds the double); a BARE `Number` result is `(call) * 1.0` inline at
+    every result site (`ffi_number_result_ast`: pure/IO/method calls and
+    `Const` reads) — one multiply, no decoder call on the `sqrt` path.
+    The arg direction needs nothing (a Number leaving is a double);
+  - the HashMap Number flavor above (keys enumerate as doubles);
+  - lib/JSON.mll: `JNum` is a double, integer syntax and Ints beyond 2^53
+    travel as `JInt`.
+  Checkable two ways: `compile_with_whnf_refutation` rebinds
+  `show_Number` to `__show_Number_checked`, which raises on the integer
+  subtype at the point a Number is shown (every corpus case runs under
+  it), and the backend fuzzer's `Number` vocabulary compares against a
+  strict IEEE reference with GHC's `show` layout.
 - **First-class operators** (`opfunc_value`): a first-class `(op)` is
   the value of whatever `op` denotes, decided once in the monomorphizer
   (the main walk and the dictionary rewrite call it from their `OpFunc`
@@ -553,6 +599,9 @@ Post-mono TIR→TIR pass. Folds compile-time-known arithmetic, comparisons,
 boolean logic, string concatenation, and literal negation. Recognizes both
 built-in operators and the now-resolved monomorphic typeclass methods. Pure
 peephole-style reduction; safe to extend with more recognized patterns.
+A fold at a `Number`-typed node is double arithmetic: the `Lit` arm turns
+any integer literal typed Number into the `TLiteral::Number` it denotes
+before the operator folds see it (see "A Number is a double" in §4).
 
 ---
 

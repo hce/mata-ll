@@ -101,7 +101,7 @@ cases/hm_lookup_case_fused	HashMap builtins (Lua tables)
 cases/hm_lookup_lazy_operands	HashMap builtins (Lua tables)
 cases/import_dual_forms	qualified import: twin module resolution gap (Q77 seam)
 cases/import_merge	qualified import: twin module resolution gap (Q77 seam)
-cases/int_subtype_keys	ffi_tonumber_float integer-subtype leak (Lua-only number subtype)
+cases/int_subtype_keys	FFI declarations (ffi_tonumber_float)
 cases/integer_json	Generics substrate + JSON FFI library
 cases/json_codec	JSON FFI library
 cases/lbit_64bit_boundary	LBit (Lua bit-op semantics, deliberately not Data.Bits)
@@ -124,6 +124,7 @@ cases/luadict	LuaDict FFI
 cases/names_generic_metadata	mata-ll Generics substrate (Data.Generics is not GHC's)
 cases/names_lua_globals	imports LString (Lua string FFI)
 cases/newtypes	'newtype Age = Int' implicit-constructor sugar is not Haskell
+cases/number_host_boundary	FFI declarations, HashMap builtins, JSON FFI library
 cases/poly_recursion_user_class	contains a LuaPure FFI declaration
 cases/pure_scalar_bare_escape	ByteString builtins (Lua byte strings)
 cases/purehashmap	LuaPure hash FFI

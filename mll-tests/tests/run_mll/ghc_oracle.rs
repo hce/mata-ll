@@ -316,6 +316,8 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_bounded_tuple_int, "cases", "bounded_tuple_int.mll"),
         (ghc_oracle_prelude_enum_bounded_instances, "cases", "prelude_enum_bounded_instances.mll"),
         (ghc_oracle_dict_nullary_field_thunk, "cases", "dict_nullary_field_thunk.mll"),
+        (ghc_oracle_number_double_invariant, "cases", "number_double_invariant.mll"),
+        (ghc_oracle_number_map_keys, "cases", "number_map_keys.mll"),
         (ghc_oracle_ord_bool, "cases", "ord_bool.mll"),
         (ghc_oracle_num_sign_edges, "cases", "num_sign_edges.mll"),
         (ghc_oracle_diamond_import, "cases", "diamond_import.mll"),

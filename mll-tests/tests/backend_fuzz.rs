@@ -35,6 +35,15 @@
 //! (guard chains, where-binds, eta-padded definitions, and a polymorphic
 //! where-bind instantiated at several types — the A19 generalization), and
 //! do-blocks with `let` statements and pattern binds through `return`.
+//! `Number` (GHC's Double) joins with the shapes that leaked Lua's integer
+//! subtype into it: integer-syntax literals (small, `-0`, 2^53+1, 2^62,
+//! 3037000500 — whose square passes 2^63), `fromIntegral` of an Int, `/`,
+//! `^`, products of big literals, `negate`/`abs`/`signum`, `sum`, Number
+//! map keys read back through hmKeys/hmToList, and GHC's `show` layout for
+//! doubles. The fragment never reaches an infinity or a NaN: every Number
+//! production bounds its magnitude (products and powers take literal
+//! operands, division takes a nonzero literal divisor), so IEEE arithmetic
+//! in the strict reference is bit-identical to the host's.
 //!
 //! Everything is deterministic and offline: each program derives from
 //! (BATCH_SEED, index) through SplitMix64, so any failure reproduces by
@@ -73,6 +82,9 @@ impl Rng {
 enum Ty {
     Int,
     Integer,
+    /// `Number` — GHC's Double. An IEEE double on every host, never Lua's
+    /// integer subtype (the invariant this vocabulary probes).
+    Number,
     Bool,
     Str,
     Ordering,
@@ -107,6 +119,7 @@ impl Ty {
         match self {
             Ty::Int => "Int".into(),
             Ty::Integer => "Integer".into(),
+            Ty::Number => "Number".into(),
             Ty::Bool => "Bool".into(),
             Ty::Str => "String".into(),
             Ty::Ordering => "Ordering".into(),
@@ -123,19 +136,20 @@ impl Ty {
     /// scalar), so this doubles as the comparability gate.
     fn showable(&self) -> bool {
         match self {
-            Ty::Int | Ty::Integer | Ty::Bool | Ty::Str | Ty::Ordering => true,
+            Ty::Int | Ty::Integer | Ty::Number | Ty::Bool | Ty::Str | Ty::Ordering => true,
             Ty::List(t) | Ty::Maybe(t) => t.showable(),
             Ty::Pair(a, b) => a.showable() && b.showable(),
             Ty::Fun(..) | Ty::Hm(..) => false,
         }
     }
     /// May this type key a HashMap? Scalars Int/Bool/String take the
-    /// direct table-index path; list/pair/Maybe composites take the A17
-    /// encoded-entry path. Integer has no Hashable instance (a limb table
-    /// is not a scalar — the typechecker rejects it), and Ordering none.
+    /// direct table-index path, Number the same store under the Number
+    /// flavor (keys come back as doubles); list/pair/Maybe composites take
+    /// the A17 encoded-entry path. Integer has no Hashable instance (a limb
+    /// table is not a scalar — the typechecker rejects it), and Ordering none.
     fn keyable(&self) -> bool {
         match self {
-            Ty::Int | Ty::Bool | Ty::Str => true,
+            Ty::Int | Ty::Number | Ty::Bool | Ty::Str => true,
             Ty::List(t) | Ty::Maybe(t) => t.keyable(),
             Ty::Pair(a, b) => a.keyable() && b.keyable(),
             Ty::Integer | Ty::Ordering | Ty::Fun(..) | Ty::Hm(..) => false,
@@ -147,24 +161,26 @@ impl Ty {
 /// types appear only where `fun_ok` (printed positions exclude them).
 fn gen_ty(r: &mut Rng, depth: usize, fun_ok: bool) -> Ty {
     if depth == 0 {
-        return match r.below(12) {
+        return match r.below(14) {
             0..=3 => Ty::Int,
             4 | 5 => Ty::Bool,
             6 | 7 => Ty::Str,
             8 | 9 => Ty::Integer,
             10 => Ty::Ordering,
+            11 | 12 => Ty::Number,
             _ => Ty::Int,
         };
     }
-    match r.below(if fun_ok { 12 } else { 10 }) {
+    match r.below(if fun_ok { 13 } else { 11 }) {
         0 | 1 => Ty::Int,
         2 => Ty::Integer,
         3 => Ty::Bool,
         4 => Ty::Str,
         5 => Ty::Ordering,
-        6 | 7 => Ty::list(gen_ty(r, depth - 1, false)),
-        8 => Ty::pair(gen_ty(r, depth - 1, false), gen_ty(r, depth - 1, false)),
-        9 => Ty::Maybe(Box::new(gen_ty(r, depth - 1, false))),
+        6 => Ty::Number,
+        7 | 8 => Ty::list(gen_ty(r, depth - 1, false)),
+        9 => Ty::pair(gen_ty(r, depth - 1, false), gen_ty(r, depth - 1, false)),
+        10 => Ty::Maybe(Box::new(gen_ty(r, depth - 1, false))),
         _ => Ty::fun(gen_ty(r, depth - 1, false), gen_ty(r, depth - 1, fun_ok)),
     }
 }
@@ -172,9 +188,10 @@ fn gen_ty(r: &mut Rng, depth: usize, fun_ok: bool) -> Ty {
 /// A random HashMap KEY type (see Ty::keyable).
 fn gen_key_ty(r: &mut Rng, depth: usize) -> Ty {
     if depth == 0 || r.chance(1, 2) {
-        return match r.below(4) {
+        return match r.below(5) {
             0 | 1 => Ty::Int,
             2 => Ty::Bool,
+            3 => Ty::Number,
             _ => Ty::Str,
         };
     }
@@ -194,6 +211,9 @@ enum Bin {
     Add,
     Sub,
     Mul,
+    /// `/` — Number only, with a nonzero LITERAL divisor (no infinity, no
+    /// NaN in the fragment).
+    Div,
     Eq,
     Ne,
     Lt,
@@ -247,6 +267,13 @@ enum P {
     AbsI,
     Even,
     Odd,
+    // --- Number (GHC's Double) ---
+    SumN,          // sum :: [Number] -> Number
+    NegateN,
+    AbsN,
+    SignumN,
+    FromIntegralN, // fromIntegral :: Int -> Number (always pinned)
+    PowN,          // (x ^ n) — rendered infix; literal base, exponent 0..3
     // --- HashMap (A17/A20); maps are first-class Ty::Hm values (never in
     // a printed position — the map value needs no Show), observed through
     // the Ord-sorted iteration ops and lookup/member/size ---
@@ -269,6 +296,11 @@ enum P {
 enum Expr {
     IntLit(i64),
     IntegerLit(i128),
+    /// A Number literal: its source spelling (integer syntax — `9007199254740993`,
+    /// `-0` — or decimal/exponent syntax) and the double it denotes (GHC's
+    /// `fromInteger`/`fromRational` at Double: the nearest double, so the
+    /// spelling and the value can differ past 2^53).
+    NumLit { text: &'static str, value: f64 },
     BoolLit(bool),
     StrLit(String),
     OrdLit(std::cmp::Ordering),
@@ -375,6 +407,13 @@ fn render(e: &Expr) -> String {
                 n.to_string()
             }
         }
+        Expr::NumLit { text, .. } => {
+            if text.starts_with('-') {
+                format!("({})", text)
+            } else {
+                text.to_string()
+            }
+        }
         Expr::BoolLit(v) => if *v { "True" } else { "False" }.into(),
         Expr::StrLit(s) => escape_str(s),
         Expr::OrdLit(o) => ord_name(*o).into(),
@@ -385,6 +424,7 @@ fn render(e: &Expr) -> String {
                 Bin::Add => "+",
                 Bin::Sub => "-",
                 Bin::Mul => "*",
+                Bin::Div => "/",
                 Bin::Eq => "==",
                 Bin::Ne => "/=",
                 Bin::Lt => "<",
@@ -459,6 +499,7 @@ fn render(e: &Expr) -> String {
                 }
                 P::Seq => format!("(seq {} {})", rendered[0], rendered[1]),
                 P::Append => format!("({} <> {})", rendered[0], rendered[1]),
+                P::PowN => format!("({} ^ {})", rendered[0], rendered[1]),
                 _ => {
                     let mut s = format!("({}", p_name(p));
                     for a in &rendered {
@@ -513,6 +554,12 @@ fn p_name(p: &P) -> &'static str {
         P::AbsI => "abs",
         P::Even => "even",
         P::Odd => "odd",
+        P::SumN => "sum",
+        P::NegateN => "negate",
+        P::AbsN => "abs",
+        P::SignumN => "signum",
+        P::FromIntegralN => "fromIntegral",
+        P::PowN => "(^)", // never a FunRef; Call renders infix
         // hm ops are only ever rendered saturated (never as a FunRef)
         P::HmToList => "hmToList",
         P::HmKeys => "hmKeys",
@@ -541,6 +588,10 @@ enum Value {
     /// production level ≤ ×9), so checked arithmetic never trips; if it
     /// ever does, that is a generator-budget bug and the panic says so.
     Integer(i128),
+    /// A Number: IEEE double arithmetic, as the host's. The generator keeps
+    /// every reachable magnitude far below the double's range (see the
+    /// module header), so no infinity or NaN ever arises.
+    Number(f64),
     Bool(bool),
     Str(String),
     Ord3(std::cmp::Ordering),
@@ -589,6 +640,12 @@ fn as_int(v: &Value) -> i64 {
         _ => panic!("evaluator: expected Int, got {v:?}"),
     }
 }
+fn as_number(v: &Value) -> f64 {
+    match v {
+        Value::Number(x) => *x,
+        _ => panic!("evaluator: expected Number, got {v:?}"),
+    }
+}
 fn as_bool(v: &Value) -> bool {
     match v {
         Value::Bool(x) => *x,
@@ -609,14 +666,18 @@ fn as_list(v: &Value) -> Vec<Value> {
 }
 
 /// GHC's derived/structural `compare` over the fragment's values: numeric
-/// order for Int/Integer, False < True, byte order for String (ASCII, so
-/// Char order and Lua's C-locale order agree), LT < EQ < GT, lexicographic
-/// lists and pairs, Nothing < Just.
+/// order for Int/Integer/Number (IEEE order; -0.0 and 0.0 compare EQ, and
+/// the fragment has no NaN), False < True, byte order for String (ASCII,
+/// so Char order and Lua's C-locale order agree), LT < EQ < GT,
+/// lexicographic lists and pairs, Nothing < Just.
 fn ghc_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => x.cmp(y),
         (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
+        (Value::Number(x), Value::Number(y)) => {
+            x.partial_cmp(y).expect("backend_fuzz: a NaN reached compare (generator budget bug)")
+        }
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
         (Value::Str(x), Value::Str(y)) => x.as_bytes().cmp(y.as_bytes()),
         (Value::Ord3(x), Value::Ord3(y)) => x.cmp(y),
@@ -645,13 +706,21 @@ fn ghc_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
 
 /// Numeric ops dispatch on the value: Int is the host machine integer
 /// (wrapping, like the Lua 5.4 emission), Integer is exact (checked —
-/// the generator's budget keeps it in range; see Value::Integer).
+/// the generator's budget keeps it in range; see Value::Integer), Number
+/// is IEEE double arithmetic (`/` only here).
 fn num_bin(op: Bin, l: &Value, r: &Value) -> Value {
     match (l, r) {
         (Value::Int(a), Value::Int(b)) => Value::Int(match op {
             Bin::Add => a.wrapping_add(*b),
             Bin::Sub => a.wrapping_sub(*b),
             Bin::Mul => a.wrapping_mul(*b),
+            _ => unreachable!(),
+        }),
+        (Value::Number(a), Value::Number(b)) => Value::Number(match op {
+            Bin::Add => a + b,
+            Bin::Sub => a - b,
+            Bin::Mul => a * b,
+            Bin::Div => a / b,
             _ => unreachable!(),
         }),
         (Value::Integer(a), Value::Integer(b)) => Value::Integer(
@@ -714,6 +783,11 @@ fn p_arity(p: &P) -> usize {
         | P::AbsI
         | P::Even
         | P::Odd
+        | P::SumN
+        | P::NegateN
+        | P::AbsN
+        | P::SignumN
+        | P::FromIntegralN
         | P::HmToList
         | P::HmKeys
         | P::HmValues
@@ -735,6 +809,7 @@ fn p_arity(p: &P) -> usize {
         | P::HmLookup
         | P::HmMember
         | P::HmDelete
+        | P::PowN
         | P::AppendList => 2,
         P::Foldr | P::Foldl | P::ZipWith | P::Flip | P::Twice | P::CompApp | P::HmInsert => 3,
     }
@@ -756,16 +831,28 @@ fn build_hm(entries: &Value) -> Vec<(Value, Value)> {
             Value::Pair(k, v) => (*k, *v),
             other => panic!("hm entry is not a pair: {other:?}"),
         };
-        if let Some(slot) = m
-            .iter_mut()
-            .find(|(ek, _)| ghc_cmp(ek, &k) == std::cmp::Ordering::Equal)
-        {
-            slot.1 = v;
-        } else {
-            m.push((k, v));
-        }
+        hm_insert(&mut m, k, v);
     }
     m
+}
+
+/// Data.Map's `insert`: an entry whose key compares EQ is replaced — KEY
+/// and value both (GHC stores the new key's spelling; observable only for
+/// a key type whose equal values differ, which in this fragment is the
+/// Number zero inside a structural key: the encoded store replaces the
+/// stored key too). A scalar Number key is never generated as a negative
+/// zero (see `hm_key_expr`): there mata-ll's table-indexed store keeps the
+/// one spelling Lua normalizes to, the pinned `negative_zero_keys`
+/// divergence.
+fn hm_insert(m: &mut Vec<(Value, Value)>, k: Value, v: Value) {
+    if let Some(slot) = m
+        .iter_mut()
+        .find(|(ek, _)| ghc_cmp(ek, &k) == std::cmp::Ordering::Equal)
+    {
+        *slot = (k, v);
+    } else {
+        m.push((k, v));
+    }
 }
 
 /// hm iteration order: A16 structural compare on the keys = Ord order.
@@ -944,6 +1031,33 @@ fn call_builtin(p: &P, mut args: Vec<Value>) -> Value {
             Value::Integer(n) => Value::Integer(n.abs()),
             v => panic!("abs at Integer on {v:?}"),
         },
+        // --- Number: GHC's Num/Fractional at Double ---
+        P::SumN => Value::Number(
+            // GHC's list `sum` is a strict left fold from 0 (base 4.16+);
+            // mata-ll's `sum`/the fused loop add in the same order, so the
+            // rounding sequence is identical.
+            as_list(&args[0]).iter().fold(0.0f64, |a, v| a + as_number(v)),
+        ),
+        P::NegateN => Value::Number(-as_number(&args[0])),
+        P::AbsN => Value::Number(as_number(&args[0]).abs()),
+        // GHC.Float: signum x | x > 0 = 1 | x < 0 = -1 | otherwise = x — so
+        // signum (-0.0) is -0.0 (Rust's f64::signum would say -1.0).
+        P::SignumN => {
+            let x = as_number(&args[0]);
+            Value::Number(if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { x })
+        }
+        // int2Double: round to nearest, as the host's integer->float
+        // conversion and Rust's `as` do.
+        P::FromIntegralN => Value::Number(as_int(&args[0]) as f64),
+        // GHC.Real's (^) by repeated squaring (powImpl/powImplAcc). The
+        // multiplication order matters for a double: mata-ll's `powAcc`
+        // multiplies the same pairs (commuted), so the products agree
+        // bit for bit.
+        P::PowN => {
+            let x = as_number(&args[0]);
+            let n = as_int(&args[1]);
+            Value::Number(ghc_pow(x, n))
+        }
         P::Even | P::Odd => {
             let even = match &args[0] {
                 Value::Int(n) => n % 2 == 0,
@@ -983,14 +1097,7 @@ fn call_builtin(p: &P, mut args: Vec<Value>) -> Value {
             let v = args.pop().unwrap();
             let k = args.pop().unwrap();
             let mut m = as_hm(&m);
-            if let Some(slot) = m
-                .iter_mut()
-                .find(|(ek, _)| ghc_cmp(ek, &k) == std::cmp::Ordering::Equal)
-            {
-                slot.1 = v;
-            } else {
-                m.push((k, v));
-            }
+            hm_insert(&mut m, k, v);
             Value::Hm(m)
         }
         P::HmFromList => Value::Hm(build_hm(&args[0])),
@@ -1002,6 +1109,7 @@ fn eval(e: &Expr, env: &Env) -> Value {
     match e {
         Expr::IntLit(n) => Value::Int(*n),
         Expr::IntegerLit(n) => Value::Integer(*n),
+        Expr::NumLit { value, .. } => Value::Number(*value),
         Expr::BoolLit(v) => Value::Bool(*v),
         Expr::StrLit(s) => Value::Str(s.clone()),
         Expr::OrdLit(o) => Value::Ord3(*o),
@@ -1011,7 +1119,7 @@ fn eval(e: &Expr, env: &Env) -> Value {
             let lv = eval(l, env);
             let rv = eval(r, env);
             match op {
-                Bin::Add | Bin::Sub | Bin::Mul => num_bin(*op, &lv, &rv),
+                Bin::Add | Bin::Sub | Bin::Mul | Bin::Div => num_bin(*op, &lv, &rv),
                 Bin::Eq => Value::Bool(ghc_cmp(&lv, &rv) == std::cmp::Ordering::Equal),
                 Bin::Ne => Value::Bool(ghc_cmp(&lv, &rv) != std::cmp::Ordering::Equal),
                 Bin::Lt => Value::Bool(ghc_cmp(&lv, &rv) == std::cmp::Ordering::Less),
@@ -1103,6 +1211,68 @@ fn b2(v: Value) -> Box<Value> {
     Box::new(v)
 }
 
+/// GHC.Real's `(^)` at Double, exactly: `x ^ 0 = 1`; otherwise powImpl.
+fn ghc_pow(x: f64, n: i64) -> f64 {
+    assert!(n >= 0, "backend_fuzz: negative exponent (generator bug)");
+    if n == 0 {
+        return 1.0;
+    }
+    fn pow_impl(x: f64, y: i64) -> f64 {
+        if y % 2 == 0 {
+            pow_impl(x * x, y / 2)
+        } else if y == 1 {
+            x
+        } else {
+            pow_acc(x * x, y / 2, x)
+        }
+    }
+    fn pow_acc(x: f64, y: i64, z: f64) -> f64 {
+        if y % 2 == 0 {
+            pow_acc(x * x, y / 2, z)
+        } else if y == 1 {
+            x * z
+        } else {
+            pow_acc(x * x, y / 2, x * z)
+        }
+    }
+    pow_impl(x, n)
+}
+
+/// GHC's `show` at Double (`showFloat`: `floatToDigits` — the shortest
+/// digit string that reads back to the same double, which Rust's `{:e}`
+/// also produces — laid out by `formatRealFloat FFGeneric`: fixed notation
+/// for 0.1 <= |x| < 10^7, `d.ddde<n>` otherwise, always at least one digit
+/// after the point). The sign of a negative zero prints ("-0.0").
+fn ghc_show_double(x: f64) -> String {
+    assert!(x.is_finite(), "backend_fuzz: a non-finite Number (generator budget bug)");
+    let sign = if x.is_sign_negative() { "-" } else { "" };
+    let mag = x.abs();
+    if mag == 0.0 {
+        return format!("{sign}0.0");
+    }
+    // `{:e}` prints `d[.ddd]e<exp>` with the shortest round-trip digits.
+    let sci = format!("{mag:e}");
+    let (mant, exp) = sci.split_once('e').expect("Rust's {:e} always has an exponent");
+    let exp: i32 = exp.parse().expect("integer exponent");
+    let digits: String = mant.chars().filter(|c| *c != '.').collect();
+    // x = 0.d1 d2 ... × 10^e in floatToDigits' convention.
+    let e = exp + 1;
+    if e < 0 || e > 7 {
+        let (head, tail) = digits.split_at(1);
+        let frac = if tail.is_empty() { "0" } else { tail };
+        return format!("{sign}{head}.{frac}e{}", e - 1);
+    }
+    if e <= 0 {
+        return format!("{sign}0.{}{digits}", "0".repeat((-e) as usize));
+    }
+    let e = e as usize;
+    if digits.len() <= e {
+        return format!("{sign}{digits}{}.0", "0".repeat(e - digits.len()));
+    }
+    let (int_part, frac_part) = digits.split_at(e);
+    format!("{sign}{int_part}.{frac_part}")
+}
+
 /// GHC `show` (the derived instances' rendering, which mata-ll's show is
 /// byte-oracled against). `prec11` renders a constructor ARGUMENT: negative
 /// numbers and saturated `Just` get parens, everything else is atomic.
@@ -1110,6 +1280,7 @@ fn show_val(v: &Value) -> String {
     match v {
         Value::Int(n) => n.to_string(),
         Value::Integer(n) => n.to_string(),
+        Value::Number(x) => ghc_show_double(*x),
         Value::Bool(x) => if *x { "True" } else { "False" }.into(),
         Value::Str(s) => escape_str(s),
         Value::Ord3(o) => ord_name(*o).into(),
@@ -1128,6 +1299,8 @@ fn show_prec11(v: &Value) -> String {
     match v {
         Value::Int(n) if *n < 0 => format!("({})", n),
         Value::Integer(n) if *n < 0 => format!("({})", n),
+        // showSignedFloat: parenthesized when x < 0 or isNegativeZero x.
+        Value::Number(x) if x.is_sign_negative() => format!("({})", show_val(v)),
         Value::Maybe(Some(_)) => format!("({})", show_val(v)),
         _ => show_val(v),
     }
@@ -1181,9 +1354,67 @@ impl Gen {
         Expr::Annot(b(e), ty.clone())
     }
 
-    /// A pinned `[(k, v)]` entries expression for a HashMap composite.
+    /// A pinned `[(k, v)]` entries expression for a HashMap composite. At
+    /// a scalar Number key the entries are an explicit literal list over
+    /// `hm_key_expr` (never a negative-zero key); every other key type
+    /// takes the general list generator.
     fn hm_entries(&mut self, k: &Ty, v: &Ty, depth: usize) -> Expr {
-        self.pinned(&Ty::list(Ty::pair(k.clone(), v.clone())), depth)
+        let pair = Ty::pair(k.clone(), v.clone());
+        if *k == Ty::Number {
+            let n = self.r.below(4);
+            let entries = (0..n)
+                .map(|_| {
+                    let key = self.hm_key_expr(k, depth.saturating_sub(1));
+                    let val = self.expr(v, depth.saturating_sub(1));
+                    Expr::MkPair(b(key), b(val))
+                })
+                .collect();
+            return Expr::Annot(b(Expr::ListLit(entries)), Ty::list(pair));
+        }
+        self.pinned(&Ty::list(pair), depth)
+    }
+
+    /// A key expression for a WRITE (hmInsert, a fromList entry). At the
+    /// scalar key type Number it never evaluates to a negative zero —
+    /// `abs` of a Number expression, `fromIntegral` of an Int expression,
+    /// or a literal that is not `-0` — because GHC's Data.Map stores the
+    /// spelling of the key inserted last and mata-ll's table-indexed store
+    /// cannot (the pinned `negative_zero_keys` divergence); the reads
+    /// (lookup, member, delete) take any key, -0.0 included, since both
+    /// sides find the entry by value. Other key types take `expr`.
+    fn hm_key_expr(&mut self, k: &Ty, depth: usize) -> Expr {
+        if *k != Ty::Number {
+            return self.expr(k, depth);
+        }
+        if depth == 0 {
+            return self.number_key_atom();
+        }
+        match self.r.below(4) {
+            0 => Expr::Call(P::AbsN, vec![self.expr(&Ty::Number, depth - 1)]),
+            1 => Expr::Annot(
+                b(Expr::Call(P::FromIntegralN, vec![self.expr(&Ty::Int, depth - 1)])),
+                Ty::Number,
+            ),
+            _ => self.number_key_atom(),
+        }
+    }
+
+    /// A Number literal that is not a negative zero (a map-key atom).
+    fn number_key_atom(&mut self) -> Expr {
+        const KEYS: &[(&str, f64)] = &[
+            ("0", 0.0),
+            ("1", 1.0),
+            ("2", 2.0),
+            ("3", 3.0),
+            ("7", 7.0),
+            ("2.5", 2.5),
+            ("0.5", 0.5),
+            ("3037000500", 3037000500.0),
+            ("4611686018427387904", 4611686018427387904.0),
+            ("1000000000000000", 1e15),
+        ];
+        let (text, value) = KEYS[self.r.below(KEYS.len())];
+        Expr::NumLit { text, value }
     }
 
     /// An expression of type `ty`, at most `depth` productions deep.
@@ -1366,6 +1597,7 @@ impl Gen {
         match ty {
             Ty::Int => self.int_expr(depth),
             Ty::Integer => self.integer_expr(depth),
+            Ty::Number => self.number_expr(depth),
             Ty::Bool => self.bool_expr(depth),
             Ty::Str => self.str_expr(depth),
             Ty::Ordering => self.ordering_expr(depth),
@@ -1393,7 +1625,7 @@ impl Gen {
         let mty = Ty::hm(k.clone(), v.clone());
         match self.r.below(8) {
             0 | 1 => {
-                let key = self.expr(k, depth - 1);
+                let key = self.hm_key_expr(k, depth - 1);
                 let val = self.expr(v, depth - 1);
                 let m = self.expr(&mty, depth - 1);
                 Expr::Call(P::HmInsert, vec![key, val, m])
@@ -1437,6 +1669,7 @@ impl Gen {
         match ty {
             Ty::Int => Expr::IntLit(self.r.below(21) as i64 - 5),
             Ty::Integer => self.integer_atom(),
+            Ty::Number => self.number_atom(),
             Ty::Bool => Expr::BoolLit(self.r.chance(1, 2)),
             Ty::Str => self.str_atom(),
             Ty::Ordering => Expr::OrdLit(match self.r.below(3) {
@@ -1468,7 +1701,16 @@ impl Gen {
                 }
                 let pair = Ty::pair((**k).clone(), (**v).clone());
                 let n = self.r.below(4);
-                let entries = (0..n).map(|_| self.atom(&pair)).collect();
+                let entries = (0..n)
+                    .map(|_| {
+                        if **k == Ty::Number {
+                            // never a negative-zero scalar key (hm_key_expr)
+                            Expr::MkPair(b(self.number_key_atom()), b(self.atom(v)))
+                        } else {
+                            self.atom(&pair)
+                        }
+                    })
+                    .collect();
                 Expr::Call(
                     P::HmFromList,
                     vec![Expr::Annot(
@@ -1489,6 +1731,130 @@ impl Gen {
                 self.scope.pop();
                 Expr::Lam(vec![p], b(body))
             }
+        }
+    }
+
+    /// A Number literal. Mostly integer syntax — the spelling whose
+    /// lowering at Number used to keep Lua's integer subtype — including
+    /// `-0` (a negative zero), 2^53 + 1 (rounds to 2^53), 2^62 (whose
+    /// double is twice itself exactly, and whose int64 double wraps) and
+    /// 3037000500 (the smallest integer whose square passes 2^63); some
+    /// decimal/exponent syntax. Every magnitude stays below 2^63 so the
+    /// growth budget (see `number_expr`) holds.
+    fn number_atom(&mut self) -> Expr {
+        const LITS: &[(&str, f64)] = &[
+            ("0", 0.0),
+            ("-0", -0.0),
+            ("1", 1.0),
+            ("2", 2.0),
+            ("3", 3.0),
+            ("-1", -1.0),
+            ("-3", -3.0),
+            ("7", 7.0),
+            ("10", 10.0),
+            ("0.5", 0.5),
+            ("2.5", 2.5),
+            ("-1.5", -1.5),
+            ("0.1", 0.1),
+            ("1e-3", 1e-3),
+            ("1.5e3", 1.5e3),
+            ("3037000500", 3037000500.0),
+            ("9007199254740993", 9007199254740992.0),
+            ("4611686018427387904", 4611686018427387904.0),
+            ("1000000000000000", 1e15),
+            ("12345678", 12345678.0),
+        ];
+        if self.r.chance(2, 3) {
+            // small integer syntax, the common case
+            let n = self.r.below(21) as i64 - 5;
+            const SMALL: &[&str] = &[
+                "-5", "-4", "-3", "-2", "-1", "0", "1", "2", "3", "4", "5", "6", "7",
+                "8", "9", "10", "11", "12", "13", "14", "15",
+            ];
+            return Expr::NumLit { text: SMALL[(n + 5) as usize], value: n as f64 };
+        }
+        let (text, value) = LITS[self.r.below(LITS.len())];
+        Expr::NumLit { text, value }
+    }
+
+    /// A Number expression. The magnitude budget: an atom is below 2^63;
+    /// `+`/`-` at most double a level's magnitude; `*` takes a small
+    /// literal factor (|k| <= 9), or multiplies two literal atoms (below
+    /// 2^126); `^` takes a literal base and an exponent up to 3 (below
+    /// 2^189); `/` takes a nonzero literal divisor of magnitude >= 1/4;
+    /// `sum` adds a short list. Depth is bounded, so no value reaches the
+    /// double's range — no infinity, no NaN, and the IEEE results in the
+    /// reference are the host's bit for bit.
+    fn number_expr(&mut self, depth: usize) -> Expr {
+        match self.r.below(16) {
+            0 | 1 | 2 => {
+                let op = if self.r.chance(1, 2) { Bin::Add } else { Bin::Sub };
+                Expr::Bin(
+                    op,
+                    b(self.expr(&Ty::Number, depth - 1)),
+                    b(self.expr(&Ty::Number, depth - 1)),
+                )
+            }
+            3 | 4 => {
+                const FACTORS: &[(&str, f64)] = &[
+                    ("-9", -9.0), ("-3", -3.0), ("-1", -1.0), ("0", 0.0), ("2", 2.0),
+                    ("3", 3.0), ("9", 9.0), ("0.5", 0.5), ("-2.5", -2.5), ("1.5", 1.5),
+                ];
+                let (text, value) = FACTORS[self.r.below(FACTORS.len())];
+                let lit = Expr::NumLit { text, value };
+                let x = self.expr(&Ty::Number, depth - 1);
+                if self.r.chance(1, 2) {
+                    Expr::Bin(Bin::Mul, b(x), b(lit))
+                } else {
+                    Expr::Bin(Bin::Mul, b(lit), b(x))
+                }
+            }
+            5 => {
+                // product of two literal atoms: the 2^63 wrap probe
+                Expr::Bin(Bin::Mul, b(self.number_atom()), b(self.number_atom()))
+            }
+            6 => {
+                const DIVISORS: &[(&str, f64)] = &[
+                    ("2", 2.0), ("-2", -2.0), ("0.5", 0.5), ("4", 4.0), ("-0.25", -0.25),
+                    ("3", 3.0), ("7", 7.0), ("1000000000000000", 1e15),
+                ];
+                let (text, value) = DIVISORS[self.r.below(DIVISORS.len())];
+                Expr::Bin(
+                    Bin::Div,
+                    b(self.expr(&Ty::Number, depth - 1)),
+                    b(Expr::NumLit { text, value }),
+                )
+            }
+            7 => Expr::Call(
+                P::PowN,
+                vec![self.number_atom(), Expr::IntLit(self.r.below(4) as i64)],
+            ),
+            8 => {
+                let p = [P::NegateN, P::AbsN, P::SignumN][self.r.below(3)].clone();
+                Expr::Call(p, vec![self.expr(&Ty::Number, depth - 1)])
+            }
+            9 => Expr::Annot(
+                b(Expr::Call(P::FromIntegralN, vec![self.expr(&Ty::Int, depth - 1)])),
+                Ty::Number,
+            ),
+            10 => Expr::Call(P::SumN, vec![self.expr(&Ty::list(Ty::Number), depth - 1)]),
+            11 => {
+                // head with syntactic-cons evidence.
+                let h = self.expr(&Ty::Number, depth - 1);
+                let t = self.expr(&Ty::list(Ty::Number), depth - 1);
+                Expr::Call(P::Head, vec![Expr::Cons(b(h), b(t))])
+            }
+            12 => {
+                let p = if self.r.chance(1, 2) { P::Foldr } else { P::Foldl };
+                let f = self.pinned(
+                    &Ty::fun(Ty::Number, Ty::fun(Ty::Number, Ty::Number)),
+                    depth - 1,
+                );
+                let z = self.expr(&Ty::Number, depth - 1);
+                let xs = self.expr(&Ty::list(Ty::Number), depth - 1);
+                Expr::Call(p, vec![f, z, xs])
+            }
+            _ => self.atom(&Ty::Number),
         }
     }
 
@@ -2297,6 +2663,11 @@ fn fuzz_run(count: u64) {
                 // A panic inside program_for (a generator/evaluator bug)
                 // carries no index; the trace names the one in flight.
                 eprintln!("fuzz index {i}");
+            }
+            if std::env::var_os("MLL_FUZZ_DUMP").is_some() {
+                // The generated source, for eyeballing what the vocabulary
+                // produces (`-- --nocapture`).
+                eprintln!("---- fuzz program {i} ----\n{}", program_for(BATCH_SEED, i).0);
             }
             run_one(BATCH_SEED, i);
         }

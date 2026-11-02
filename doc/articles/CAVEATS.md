@@ -78,6 +78,10 @@ it can be hard to track down.
 and earlier — 5.3 is where Lua gained the integer subtype). Overflow wraps
 silently — there is no checked arithmetic
 at runtime. If you need to detect overflow, check the bounds manually.
+The integer subtype is `Int`'s alone: a `Number` is a double on every
+host (an integer-syntax literal at `Number` is the double it denotes,
+and every host→Number boundary — an FFI result, a JSON number, a map key
+read back — converts), so `Number` arithmetic never wraps.
 On LuaJIT, integers are represented as doubles, so precision is lost beyond
 2^53. `minBound :: Int` itself is a double (-2^63 is a power of two), and
 the compiler spells it so every host reads it exactly — a constant-folded

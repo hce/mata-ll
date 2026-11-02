@@ -2442,15 +2442,18 @@ impl CodeGen {
                 }
                 Expr::binop("..", acc, Expr::lit("\")\""))
             }
-            SpecKind::HmOp { op, enc, cmp, erased } => {
+            SpecKind::HmOp { op, enc, cmp, erased, number } => {
                 let suffix = op.strip_prefix("hm").expect("hm op name");
                 // The encoded family (`__mll_hme_*`) at a structural key
                 // type, threading the encoder and (for the writes) the
-                // compare; the dictionary-routed family's keyless
-                // enumerators (`__mll_hmd_*`) at an erased key type, which
-                // read the flavor off the handle.
+                // compare; the Number family (`__mll_hmn_*`) at key type
+                // Number — the scalar store under the flavor whose
+                // enumerators hand keys back as doubles; the
+                // dictionary-routed family's keyless enumerators
+                // (`__mll_hmd_*`) at an erased key type, which read the
+                // flavor off the handle.
                 let runtime = format!("__mll_hm{}_{}{}",
-                    if *erased { "d" } else { "e" },
+                    if *number { "n" } else if *erased { "d" } else { "e" },
                     suffix[..1].to_lowercase(), &suffix[1..]);
                 let mut cargs = Vec::new();
                 for name in enc.iter().chain(cmp.iter()) {
@@ -2558,7 +2561,7 @@ impl CodeGen {
                             Expr::raw(format!("{:?}", Self::ffi_root_name(lua_name))),
                         ],
                     ),
-                    None => name,
+                    None => Self::ffi_number_result_ast(&expr.ty, name),
                 }
             }
             SpecKind::TupGet(idx) => {
@@ -2711,7 +2714,7 @@ impl CodeGen {
                     // The declared result is ONE value (multi-return IO uses the
                     // IoTup arm): truncate the raw host call so extra
                     // return values cannot spread.
-                    None => Expr::paren(call),
+                    None => Self::ffi_number_result_ast(&expr.ty, Expr::paren(call)),
                 };
                 Expr::inline_fn0(inner)
             }
@@ -2749,7 +2752,7 @@ impl CodeGen {
                 let method = &host[1..];
                 let recv = self.forced_prefix_ast(&args[0]);
                 let margs = self.ffi_args_ast(&args[1..]);
-                Expr::paren(Expr::method(recv, method, margs))
+                Self::ffi_number_result_ast(&expr.ty, Expr::paren(Expr::method(recv, method, margs)))
             }
             SpecKind::Host(host) => {
                 // Regular (pure) FFI: lua_func(arg0, arg1, ...)
@@ -2771,8 +2774,9 @@ impl CodeGen {
                     // TupRet arm): truncate the raw host call so extra
                     // return values cannot spread — this is also what makes
                     // compiled-function references provably single-return for
-                    // the paren-normalization pass (opt.rs).
-                    None => Expr::paren(call),
+                    // the paren-normalization pass (opt.rs). A bare Number
+                    // result is normalized to the float subtype on top.
+                    None => Self::ffi_number_result_ast(&expr.ty, Expr::paren(call)),
                 }
             }
         }

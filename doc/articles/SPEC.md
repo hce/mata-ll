@@ -975,7 +975,16 @@ Lua→MATA-LL. The allowed *value* set, in both directions and
 recursively, is:
 
   - scalars — `Int`, `Number`, `Bool`, `String`, `ByteString` (and
-    the FFI aliases `Int`/`Double`/`Float`/`Char`) — and `()`;
+    the FFI aliases `Int`/`Double`/`Float`/`Char`) — and `()`. A host
+    number crossing IN at `Number` is delivered as a double whatever
+    subtype the host used (`tonumber "5"`, `string.len`, `os.time` and
+    a table field holding `3` are Lua integers on 5.3+): a bare result
+    is normalized at the call, a nested one (a list element, a tuple
+    or `LuaDict` field, a map value, a `Maybe` payload, a `LuaTry`/
+    `LuaCatch` payload, an exported function's argument) by the decoder
+    — and for a validation-only record or tuple, which stays the host's
+    own table, the normalized double is written back into that table's
+    field, the one write the pass-through makes;
   - the opaque `LuaUserData` interop handle;
   - `[a]` iff `a` is allowed; tuples iff every element is allowed;
   - `HashMap k v` iff `k` is a scalar Lua key and `v` is allowed;
@@ -1285,10 +1294,17 @@ literal), and a decimal literal has type `Fractional a => a` (it is
     42    :: Num a => a
     3.14  :: Fractional a => a
 
-At a concrete `Int` or `Number` type `fromInteger`/`fromRational`
-is the identity and is erased, so `(42 :: Int)` and
-`(3.14 :: Number)` still compile to the bare Lua values `42` and
-`3.14`.
+At a concrete `Int` type `fromInteger` is the identity and is erased,
+so `(42 :: Int)` compiles to the bare Lua integer `42`; a decimal
+literal at `Number` compiles to the bare Lua float `3.14`. An integer
+literal at `Number` is GHC's `fromInteger` at Double, applied at
+compile time: the nearest double, spelled as a Lua float (`(42 ::
+Number)` is `42.0`, `9007199254740993 :: Number` is `9007199254740992.0`,
+`-0 :: Number` is `-0.0`). A `Number` is an IEEE double on every host —
+it never carries Lua's integer subtype, so `Number` arithmetic never
+wraps at 2^63 and a Number's sign of zero survives; `Int` is the
+integer subtype where the host has one (see CAVEATS "Int overflow
+wraps silently").
 
 An integer literal in a *pattern* is Haskell 2010 §3.17.2's: it
 matches a value `v` of type `a` exactly when `v == fromInteger k`,

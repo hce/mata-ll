@@ -723,11 +723,16 @@ pub enum SpecKind {
     /// key order); the sorted iteration operations thread nothing and
     /// read the handle's. `erased` marks an iteration operation at a key
     /// type nobody knows (a type variable in a body no evidence reaches):
-    /// the runtime picks the flavor from the handle's tag.
+    /// the runtime picks the flavor from the handle's tag. `number` marks
+    /// an operation at key type `Number`: the scalar store under the
+    /// Number flavor (`__mll_hmn_*`), whose writes stamp the handle and
+    /// whose enumerators hand keys back as doubles — Lua 5.3+ stores an
+    /// integral float key as an integer, and a Number is a double on every
+    /// host (neither `enc` nor `cmp` is threaded; the scalar order holds).
     KeyEncList(String),
     KeyEncMaybe(String),
     KeyEncTuple(Vec<String>),
-    HmOp { op: String, enc: Option<String>, cmp: Option<String>, erased: bool },
+    HmOp { op: String, enc: Option<String>, cmp: Option<String>, erased: bool, number: bool },
     /// An Ord operator/selector derived from a structural `compare`:
     /// `op` is the method as written ("<", "<=", ">", ">=", "max", "min"),
     /// `cmp` the generated compare's name. Ordering is its constructor

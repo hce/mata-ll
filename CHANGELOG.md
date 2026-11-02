@@ -44,6 +44,49 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A `Number` is an IEEE double on every host — it never carries Lua's
+  integer subtype, whose arithmetic wraps at 2^63.** On Lua 5.3+ an
+  integer-syntax literal at `Number` was emitted as a bare integer numeral
+  and folded in integer arithmetic, so `fact 25 :: Number` printed
+  `7.034535277573964e18` (GHC `1.5511210043330986e25`), `(2 :: Number) ^
+  64` printed `0.0`, `4611686018427387904 + 4611686018427387904` printed
+  `-0.0e-324`, `(9007199254740993 :: Number) == 9007199254740992` was
+  `False` (both literals round to one double), and `-0 :: Number` printed
+  `0.0` on every host (the integer 0 has no sign to keep). A Number key
+  read back from a map (`M.keys`, `M.toList`) came back as Lua's integer
+  (Lua stores an integral float key as an integer), so `map negate (M.keys
+  m)` lost the sign of zero and `k * k` wrapped. Every host→Number
+  boundary leaked the subtype too: `tonumber`-typed FFI results (and so
+  every JSON number), `string.len`/`os.time`-style results, a `LuaDict`
+  record's Number field, a `LuaTry` payload, an exported function's
+  Number argument, `fromInteger` of a literal through a `Num` dictionary.
+  One invariant now, kept at every producer: the monomorphizer lowers an
+  integer-syntax literal at `Number` to the double it denotes (GHC's
+  `fromInteger` at Double: the nearest double, so the folder folds in f64,
+  `-0` is `-0.0` and codegen spells every Number literal as a float); the
+  folder normalizes any Number-typed literal the same way; `read` parses
+  integer syntax through the float lexer (`read "-0"` is `-0.0`, as GHC);
+  the dictionary-routed `fromInteger` normalizes; the FFI decoder gets a
+  `num` leaf (a bare Number result is `(call) * 1.0` inline, a nested one is
+  checked and normalized — written back into a validation-only record or
+  tuple, so the host's own table then holds the double); a Number-keyed map
+  carries a Number flavor (its writes stamp the handle, its enumerators and
+  `show` hand keys back as doubles, the `Hashable Number` encoder has its
+  own identity so a dictionary-routed body takes the same path); the JSON
+  library's `JNum` is a double on every host, with Ints and integer syntax
+  beyond 2^53 travelling as `JInt` (the window is no longer
+  host-dependent), and `-0`/`-0.0` decode to `0.0` as aeson's Scientific
+  does. The invariant is written down (COMPILER.md "A Number is a double")
+  and checked: the WHNF-refutation build rebinds `show_Number` to a twin
+  that refuses the integer subtype, and the backend fuzzer's vocabulary now
+  has `Number` — integer-syntax literals (`-0`, 2^53+1, 2^62, 3037000500),
+  `/`, `^`, `fromIntegral`, `sum`, Number map keys, GHC's `show` layout for
+  doubles. Alongside: an `Int` that is a doubles-only host's `-0.0`
+  (`negate 0` through a dictionary, `truncate (-0.5)` on LuaJIT) showed as
+  `-0`; it shows as `0`. Found by the 2026-10 fresh-eyes review (N1, H4).
+  (GHC-goldened cases `number_double_invariant` and `number_map_keys`;
+  self-asserting `number_host_boundary` for the FFI, map-builtin and JSON
+  boundaries on both hosts.)
 - **GHC's Prelude instances for `()`, `Number` and tuples that mata-ll
   lacked — `Enum ()`, `Bounded ()`, `Enum Number` and `Bounded (a, b, …)`
   up to the 15-tuple — exist now, with GHC's definitions** (`[() ..]`,

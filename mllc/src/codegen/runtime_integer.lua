@@ -495,10 +495,18 @@ local function fromInteger_Int(x)
     if type(x) == "table" then return __int_to_machine(x) end
     return x
 end
+-- At Number a non-table argument is the literal of a dictionary-routed
+-- `fromInteger` (`dict.fromInteger(5)` inside a Num-constrained body
+-- compiled with dictionary passing — a specialized body never gets here,
+-- its literals are lowered at compile time), a machine number that is
+-- normalized to the double it denotes: a Number is an IEEE double on every
+-- host, never Lua's integer subtype (`* 1.0`, not `+ 0.0`: the sum would
+-- turn a -0.0 into +0.0; the product keeps the sign and rounds an integer
+-- past 2^53 to the nearest double, as GHC's fromInteger at Double does).
 local function fromInteger_Number(x)
     x = __force(x)
     if type(x) == "table" then return __int_to_double(x) end
-    return x
+    return x * 1.0
 end
 -- Numeric-literal pattern equality at a type the compiler could not name: a
 -- local binding left polymorphic, whose one closure serves every type it is
@@ -524,5 +532,10 @@ local function __mll_lit_eq(x, n)
         end
         return x == __int_to_machine(n) or x == __int_to_double(n)
     end
+    -- A float scrutinee is a Number (a Number is never the integer subtype,
+    -- an Int never a float): the literal is GHC's `fromInteger` at Double,
+    -- the nearest double, not the exact integer Lua's mixed compare would
+    -- use (`9007199254740993` matches `9007199254740992.0`).
+    if math.type ~= nil and math.type(x) == "float" then return x == n * 1.0 end
     return x == n
 end

@@ -1,12 +1,12 @@
--- An FFI-produced Number can carry Lua's INTEGER subtype (tonumber "2"
--- returns integer 2 on Lua 5.3+, and math-library results re-integerize)
--- while the same value written in source is the float 2.0. They are ==,
--- one value of one type, so a map must treat them as ONE key: the
--- structural encoder now encodes by numeric value (an integral float
--- encodes as the equal integer), where it used to split them ("i2" vs
--- "n2"). The scalar store always got this right from Lua's own key
--- normalization; both paths are probed. Not GHC-twinnable (the subtype
--- does not exist there), so this case self-asserts.
+-- A Number produced by the FFI (tonumber "2" returns the integer 2 on Lua
+-- 5.3+) and the same value written in source (the float 2.0) are one
+-- value of one type, so a map must treat them as ONE key. The FFI
+-- boundary now delivers every Number as a double, so the two arrive
+-- identical; the structural encoder still encodes by numeric value (an
+-- integral float encodes as the equal integer) for the integer-subtype
+-- numbers Lua's own table-key normalization hands back, where it used to
+-- split them ("i2" vs "n2"). Both paths are probed. Not GHC-twinnable
+-- (FFI), so this case self-asserts.
 import qualified Data.Map as M
 
 main :: IO ()
