@@ -55,20 +55,30 @@ impl CodeGen {
             TExprKind::Lit(_) | TExprKind::Con(_)
             | TExprKind::Lambda { .. } | TExprKind::OpFunc(_) => true,
             // A dictionary-parameter method read: dictionaries are total
-            // constructions (method tables of function values, never
-            // thunked — DictCall emits its dict args eagerly on the same
-            // ground), so the field read is WHNF-and-pure. Left lazy, the
-            // thunk wrapper reached runtime helpers that call the method
-            // value directly (`__mll_list_eq(elem_eq, …)` — a table where
-            // a function is expected).
-            TExprKind::DictAccess { .. } => true,
+            // constructions (DictCall emits its dict args eagerly on the
+            // same ground), and the field of a method that takes arguments
+            // is a function value — every method implementation is emitted
+            // as a real Lua function — so that read is WHNF-and-pure. Left
+            // lazy, the thunk wrapper reached runtime helpers that call the
+            // method value directly (`__mll_list_eq(elem_eq, …)` — a table
+            // where a function is expected). The field of a NULLARY method
+            // (`minBound`, `mempty`) holds the method's value instead: a
+            // CAF slot, which is a thunk until something forces it (the
+            // tuple instance's `minBound = (minBound, minBound)` is one).
+            // Such a read is a thunk-or-value like a variable read, and
+            // claiming it WHNF let a callee bind it bare and hand the raw
+            // thunk on (`maxBound \`asTypeOf\` x` inside an existential
+            // match, where `asTypeOf` returns its parameter): the consumer
+            // then indexed the thunk table as the value.
+            TExprKind::DictAccess { nullary, .. } => !nullary,
             // A method read off a dictionary EXPRESSION (a captured
             // existential dictionary in a pattern binder, a composed
             // container dictionary): the dictionary is a total construction
             // — forcing it builds a method table, never ⊥ — so the read is
             // as cheap as the parameter case above, and for the same reason
-            // must not reach a runtime helper wrapped in a thunk.
-            TExprKind::DictMethod { .. } => true,
+            // must not reach a runtime helper wrapped in a thunk. The same
+            // nullary exception applies.
+            TExprKind::DictMethod { nullary, .. } => !nullary,
             // A dictionary construction itself (`{ show = …, == = … }`, or a
             // composed dictionary closed over its sub-dictionaries): a
             // table build with no evaluation of user code.

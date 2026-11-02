@@ -187,6 +187,7 @@ mll_test!(dict_result_position, "dict_result_position.mll");
 mll_test!(dict_partial_self, "dict_partial_self.mll");
 // F23: nullary class methods through parameterized-instance dictforms.
 mll_test!(dict_nullary_method, "dict_nullary_method.mll");
+mll_test!(dict_nullary_field_thunk, "dict_nullary_field_thunk.mll");
 // G1: locals shadow dict-passing globals in the dictionary rewrite passes
 // (clause/lambda/let/case/where binders); a function named `f` no longer
 // collides with Prelude parameters of the same name.
@@ -409,6 +410,8 @@ mll_test!(dash_run_operators, "dash_run_operators.mll");
 mll_test!(underscore_names_no_capture, "underscore_names_no_capture.mll");
 mll_test!(temp_named_bindings, "temp_named_bindings.mll");
 mll_test!(bounded_product, "bounded_product.mll");
+mll_test!(bounded_tuple_int, "bounded_tuple_int.mll");
+mll_test!(prelude_enum_bounded_instances, "prelude_enum_bounded_instances.mll");
 mll_test!(ord_bool, "ord_bool.mll");
 mll_test!(num_sign_edges, "num_sign_edges.mll");
 mll_test!(record_brace_next_line, "record_brace_next_line.mll");

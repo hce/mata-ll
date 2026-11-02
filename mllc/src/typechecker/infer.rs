@@ -1025,8 +1025,11 @@ impl Checker {
         // reached the type-erased runtime show, printing `()`.) A variable
         // a use DOES fix has been substituted away and is not free here.
         let determined: HashSet<TyVar> = type_vars.iter().cloned().collect();
-        for (class, cty) in std::mem::take(&mut self.wanted) {
+        for (class, cty, use_span) in std::mem::take(&mut self.wanted) {
             let rty = cty.apply_subst(&overall_subst).demote_skolems(&demote);
+            // The statement the constraint arose in, when one is known; the
+            // binding's own span otherwise (a clause head, a signature).
+            let span = use_span.unwrap_or(span);
             if !self.has_instance(&class, &rty) {
                 // When the failure is an instance whose declared context is
                 // unsatisfied, say WHICH context constraint failed and at
@@ -1159,7 +1162,7 @@ impl Checker {
             full: Vec<(String, Ty)>,
         }
         let mut groups: HashMap<TyVar, VarInfo> = HashMap::new();
-        for (class, cty) in &self.wanted {
+        for (class, cty, _) in &self.wanted {
             let rty = cty.apply_subst(subst);
             let fvs = rty.free_vars();
             if fvs.is_empty() { continue; }
@@ -1994,7 +1997,7 @@ impl Checker {
                 name, sig.declared, var, name, name
             )));
         }
-        for (class, cty) in &self.wanted {
+        for (class, cty, _) in &self.wanted {
             let t = cty.apply_subst(&probe);
             if let Some(var) = local_skolem(&t) {
                 let id = ids.iter().copied().find(|i| t.contains_skolem(&var, *i)).unwrap_or(0);
@@ -2085,8 +2088,8 @@ impl Checker {
                     // the literal"); the recorded type lets the missing-`Eq`
                     // diagnostic name the pattern as the reason.
                     Literal::Integer(_) | Literal::BigInteger(_) => {
-                        self.wanted.push(("Num".to_string(), expected.clone()));
-                        self.wanted.push(("Eq".to_string(), expected.clone()));
+                        self.wanted.push(("Num".to_string(), expected.clone(), self.stmt_span));
+                        self.wanted.push(("Eq".to_string(), expected.clone(), self.stmt_span));
                         self.lit_pat_eq_wanted.push(expected.clone());
                         // The carried type is the EXPECTED type, resolved by
                         // whatever substitution closes over it later
@@ -2280,7 +2283,9 @@ impl Checker {
             // already claimed it, so the innermost failing statement wins. The
             // marker is erased: the inner expression's typed IR is returned.
             Expr::Spanned(span, inner) => {
+                let outer = self.stmt_span.replace(*span);
                 let r = self.infer_expr(inner, env);
+                self.stmt_span = outer;
                 if r.is_err() && self.error_span.is_none() {
                     self.error_span = Some(*span);
                 }
@@ -2324,7 +2329,7 @@ impl Checker {
                             if let Some(t) = inst_map.iter()
                                 .find(|(v, _)| v.name == c.type_var)
                                 .map(|(_, t)| t.clone()) {
-                                self.wanted.push((c.class_name.clone(), t));
+                                self.wanted.push((c.class_name.clone(), t, self.stmt_span));
                             }
                         }
                     }
@@ -2348,14 +2353,14 @@ impl Checker {
                     Literal::Integer(_) | Literal::BigInteger(_) => {
                         let ty = self.fresh_var("_lit");
                         if let Ty::Var(v) = &ty {
-                            self.wanted.push(("Num".to_string(), Ty::Var(v.clone())));
+                            self.wanted.push(("Num".to_string(), Ty::Var(v.clone()), self.stmt_span));
                         }
                         Ok((TExpr::new(TExprKind::Lit(Self::convert_literal(lit)), ty.clone()), ty, Subst::empty()))
                     }
                     Literal::Number(_) => {
                         let ty = self.fresh_var("_lit");
                         if let Ty::Var(v) = &ty {
-                            self.wanted.push(("Fractional".to_string(), Ty::Var(v.clone())));
+                            self.wanted.push(("Fractional".to_string(), Ty::Var(v.clone()), self.stmt_span));
                         }
                         Ok((TExpr::new(TExprKind::Lit(Self::convert_literal(lit)), ty.clone()), ty, Subst::empty()))
                     }
@@ -2449,7 +2454,7 @@ impl Checker {
                 // `Num Bool`), not crash in the emitted Lua arithmetic.
                 // Same wanted the numeric-literal arms push; an unresolved
                 // inner type flows into numeric defaulting like theirs.
-                self.wanted.push(("Num".to_string(), ty.clone()));
+                self.wanted.push(("Num".to_string(), ty.clone(), self.stmt_span));
                 Ok((TExpr::new(TExprKind::Negate(Box::new(te)), ty.clone()), ty, s))
             }
             Expr::Lambda { params, body } => {
@@ -3434,7 +3439,9 @@ impl Checker {
     pub(super) fn check_expr_typed_inner(&mut self, expr: &Expr, expected: &Ty, env: &TypeEnv) -> Result<(TExpr, Subst), DiagnosticKind> {
         match expr {
             Expr::Spanned(span, inner) => {
+                let outer = self.stmt_span.replace(*span);
                 let r = self.check_expr_typed(inner, expected, env);
+                self.stmt_span = outer;
                 if r.is_err() && self.error_span.is_none() {
                     self.error_span = Some(*span);
                 }

@@ -1047,6 +1047,7 @@ impl Monomorphizer {
                 Some(p) => MethodUse::Evidence(TExprKind::DictAccess {
                     dict_param: p.clone(),
                     method_name: method.to_string(),
+                    nullary: self.method_is_nullary(method),
                 }),
                 None => MethodUse::Deferred,
             };
@@ -4651,6 +4652,7 @@ impl Monomorphizer {
         ev: &DictEnv,
     ) -> TExprKind {
         let binding = self.class_var_binding(method, use_ty);
+        let nullary = self.method_is_nullary(method);
         let access = match binding {
             Some(Ty::Var(v)) => {
                 let param = ev.env
@@ -4661,6 +4663,7 @@ impl Monomorphizer {
                     Some(p) => TExprKind::DictAccess {
                         dict_param: p,
                         method_name: method.to_string(),
+                        nullary,
                     },
                     None => TExprKind::Var(method.to_string()),
                 }
@@ -4673,6 +4676,7 @@ impl Monomorphizer {
                 Some(binder) => TExprKind::DictMethod {
                     dict: Box::new(TExpr::new(TExprKind::Var(binder), Ty::Unit)),
                     method_name: method.to_string(),
+                    nullary,
                 },
                 None => TExprKind::Var(method.to_string()),
             },
@@ -4689,12 +4693,14 @@ impl Monomorphizer {
                     TExprKind::DictAccess {
                         dict_param: param.clone(),
                         method_name: method.to_string(),
+                        nullary,
                     }
                 } else {
                     let dict = self.build_dict_expr(class_name, &bound, ev);
                     TExprKind::DictMethod {
                         dict: Box::new(dict),
                         method_name: method.to_string(),
+                        nullary,
                     }
                 }
             }
@@ -4705,6 +4711,7 @@ impl Monomorphizer {
                     Some(p) => TExprKind::DictAccess {
                         dict_param: p.clone(),
                         method_name: method.to_string(),
+                        nullary,
                     },
                     None => TExprKind::Var(method.to_string()),
                 }
@@ -5117,9 +5124,37 @@ impl Monomorphizer {
             TExprKind::DictAccess {
                 dict_param: dict_param.to_string(),
                 method_name: method.to_string(),
+                // The structural classes' element methods (`==`, `compare`,
+                // `show`, the Hashable encoder and order) all take arguments:
+                // the field is a function.
+                nullary: false,
             },
             Ty::Unit,
         )
+    }
+
+    /// The arity that decides a dictionary field's SHAPE for `method`: its
+    /// class signature's arrow spine plus the method's own dictionary
+    /// parameters (`method_dict_constraints` — a use applies them to the
+    /// field, see `dict_method_use`). Zero means the field holds the
+    /// method's VALUE (`minBound = (minBound, minBound)` is a CAF, possibly
+    /// an unevaluated thunk); anything else means it holds a function.
+    /// `SpecKind::DictCtor` builds the field by this rule and every
+    /// dictionary read (`DictAccess`/`DictMethod::nullary`) reports it, so
+    /// the backend's WHNF judgment of a read matches the field's content.
+    fn method_field_arity(&self, method: &str, method_sig: &Ty) -> usize {
+        let own_dicts = self.method_dict_constraints.get(method).map_or(0, |cs| cs.len());
+        Self::spine_arrow_count(method_sig) + own_dicts
+    }
+
+    /// Does the dictionary field of `method` hold a value rather than a
+    /// function (`method_field_arity` zero)? A name that is no class method
+    /// never reaches a dictionary read; false for it.
+    fn method_is_nullary(&self, method: &str) -> bool {
+        self.method_to_class.get(method)
+            .and_then(|class| self.classes.get(class))
+            .and_then(|info| info.methods.iter().find(|(n, _)| n == method))
+            .is_some_and(|(_, sig)| self.method_field_arity(method, sig) == 0)
     }
 
     /// Field `i` (1-based) of the tuple bound to `var`, for a structural
@@ -5438,9 +5473,9 @@ impl Monomorphizer {
             // as parameters here: a use applies them to the field
             // (`dict_method_use`), so a nullary method with a context of
             // its own is a closure, never a value built from the context
-            // dictionaries alone.
-            let own_dicts = self.method_dict_constraints.get(method).map_or(0, |cs| cs.len());
-            let arity = Self::spine_arrow_count(method_sig) + own_dicts;
+            // dictionaries alone. One rule with the reads' `nullary` flag
+            // (`method_field_arity`).
+            let arity = self.method_field_arity(method, method_sig);
             if !self.poly_fns.contains_key(&base) {
                 // A monomorphic method of a concrete-head instance
                 // (`plain·Bool :: Bool -> String` beside `describeWith·Bool
@@ -5452,6 +5487,7 @@ impl Monomorphizer {
                 // this used to) left the sibling with a dictionary built
                 // from specializations, whose `describeWith` entry took
                 // no Show dictionary and read the caller's as its flag.
+                let own_dicts = self.method_dict_constraints.get(method).map_or(0, |cs| cs.len());
                 if !ctx.is_empty() || own_dicts > 0 {
                     return None;
                 }

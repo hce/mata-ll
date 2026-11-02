@@ -108,13 +108,30 @@ impl Checker {
     /// `check_instance`, and what the monomorphizer's dictionary-passing
     /// fallback builds a method's dictionary parameters from when the
     /// method itself passes the specialization limit (T2).
+    ///
+    /// `type_name` and `fields` feed the instance's deferred checks
+    /// (`DerivedObligation`): the superclass requirement every derived
+    /// instance has, and the per-field requirement of the structural
+    /// derives (`fields` empty for the others). The check itself waits for
+    /// pass 4b (`check_derived_obligations`), when the written instances
+    /// a derived one may lean on are registered too.
     fn register_derived_instance(
         &mut self,
         class_name: String,
         target_type: Ty,
         method_fns: HashMap<String, String>,
         context: Vec<TyConstraint>,
+        type_name: &str,
+        fields: Vec<(String, Ty)>,
     ) {
+        self.derived_obligations.push(DerivedObligation {
+            class: class_name.clone(),
+            target: target_type.clone(),
+            context: context.clone(),
+            type_name: type_name.to_string(),
+            decl_idx: self.cur_decl_idx,
+            fields,
+        });
         if !context.is_empty() {
             let declared: Vec<(String, Ty)> = context.iter().map(|c| (
                 c.class_name.clone(),
@@ -149,6 +166,15 @@ impl Checker {
     /// Nullary as registered (see `derived_field_tys`).
     fn derived_is_nullary(&self, con: &Constructor) -> bool {
         self.derived_field_tys(con).is_empty()
+    }
+
+    /// Every (constructor, field type) a structural derive walks — what
+    /// the derived instance demands the class of (GHC: "arising from the
+    /// first field of 'P' (type 'A')"), checked by `DerivedObligation`.
+    fn derived_field_obligations(&self, constructors: &[Constructor]) -> Vec<(String, Ty)> {
+        constructors.iter()
+            .flat_map(|c| self.derived_field_tys(c).into_iter().map(move |t| (c.name.clone(), t)))
+            .collect()
     }
 
     /// The first constructor a structural derive cannot cover, with the
@@ -501,7 +527,7 @@ impl Checker {
         method_fns.insert("show".to_string(), mangled.clone());
         method_fns.insert("showsPrec".to_string(), shows_prec_mangled);
         let context = self.derived_context("Show", type_vars, constructors);
-        self.register_derived_instance("Show".to_string(), result_type.clone(), method_fns, context);
+        self.register_derived_instance("Show".to_string(), result_type.clone(), method_fns, context, type_name, self.derived_field_obligations(constructors));
 
         vec![TFunction {
             name: mangled,
@@ -653,7 +679,7 @@ impl Checker {
         method_fns.insert("==".to_string(), mangled.clone());
         method_fns.insert("/=".to_string(), ne_mangled);
         let context = self.derived_context("Eq", type_vars, constructors);
-        self.register_derived_instance("Eq".to_string(), result_type.clone(), method_fns, context);
+        self.register_derived_instance("Eq".to_string(), result_type.clone(), method_fns, context, type_name, self.derived_field_obligations(constructors));
 
         vec![TFunction {
             name: mangled,
@@ -998,7 +1024,7 @@ impl Checker {
         method_fns.insert("max".to_string(), minted("ord_max_", type_name));
         method_fns.insert("min".to_string(), minted("ord_min_", type_name));
         let context = self.derived_context("Ord", type_vars, constructors);
-        self.register_derived_instance("Ord".to_string(), result_type, method_fns, context);
+        self.register_derived_instance("Ord".to_string(), result_type, method_fns, context, type_name, self.derived_field_obligations(constructors));
 
         functions
     }
@@ -1447,7 +1473,7 @@ impl Checker {
         method_fns.insert("enumFromTo".to_string(), enum_from_to_name);
         method_fns.insert("enumFromThenTo".to_string(), enum_from_then_to_name);
         // An enumeration has no fields, so the derived context is empty.
-        self.register_derived_instance("Enum".to_string(), result_type, method_fns, vec![]);
+        self.register_derived_instance("Enum".to_string(), result_type, method_fns, vec![], type_name, vec![]);
 
         functions
     }
@@ -1508,7 +1534,7 @@ impl Checker {
             method_fns.insert("minBound".to_string(), minted("minBound", type_name));
             method_fns.insert("maxBound".to_string(), minted("maxBound", type_name));
             let context = self.derived_context("Bounded", type_vars, constructors);
-            self.register_derived_instance("Bounded".to_string(), result_type, method_fns, context);
+            self.register_derived_instance("Bounded".to_string(), result_type, method_fns, context, type_name, field_tys.iter().map(|t| (con_key.clone(), t.clone())).collect());
             return functions;
         }
         if !is_enum || constructors.is_empty() {
@@ -1567,7 +1593,7 @@ impl Checker {
         method_fns.insert("minBound".to_string(), min_name);
         method_fns.insert("maxBound".to_string(), max_name);
         // An enumeration has no fields, so the derived context is empty.
-        self.register_derived_instance("Bounded".to_string(), result_type, method_fns, vec![]);
+        self.register_derived_instance("Bounded".to_string(), result_type, method_fns, vec![], type_name, vec![]);
 
         functions
     }
@@ -1935,7 +1961,7 @@ impl Checker {
         // the derived fmap (a field `f a` over a parameter `f` is not
         // mappable here), so the context is empty — not `Functor b` for
         // every parameter, which the structural rule would have asked.
-        self.register_derived_instance("Functor".to_string(), Ty::Con(type_name.to_string()), method_fns, vec![]);
+        self.register_derived_instance("Functor".to_string(), Ty::Con(type_name.to_string()), method_fns, vec![], type_name, vec![]);
 
         vec![TFunction {
             name: mangled,
@@ -2121,6 +2147,7 @@ impl Checker {
                 (gmethod(self, "datatypeConCount"), dc_fn),
             ]),
             vec![],
+            type_name, vec![],
         );
 
         // Per constructor: gather field info, meta markers, and the C1 rep type.
@@ -2160,6 +2187,7 @@ impl Checker {
                     (gmethod(self, "conIsRecord"), cr_fn),
                 ]),
                 vec![],
+                type_name, vec![],
             );
 
             // Selector metadata markers + instances, and each field's S1(K1 t).
@@ -2175,6 +2203,7 @@ impl Checker {
                     Ty::Con(s_marker.clone()),
                     HashMap::from([(gmethod(self, "selName"), sn_fn)]),
                     vec![],
+                    type_name, vec![],
                 );
                 field_reps.push(s1_t(Ty::Con(s_marker.clone()), k1_t(fty.clone())));
                 s_markers.push(s_marker);
@@ -2298,6 +2327,7 @@ impl Checker {
                 (gmethod(self, "to"), to_fn),
             ]),
             vec![],
+            type_name, vec![],
         );
 
         out_fns
@@ -3146,7 +3176,7 @@ impl Checker {
         // A codec derives for a type without parameters only
         // (`json_derive_preamble`), so the context is empty.
         self.register_derived_instance(
-            self.library_class("JSON", "FromJSON"), result_ty.clone(), method_fns, vec![]);
+            self.library_class("JSON", "FromJSON"), result_ty.clone(), method_fns, vec![], type_name, vec![]);
 
         vec![TFunction {
             name: mangled,
@@ -3377,7 +3407,7 @@ impl Checker {
         // A codec derives for a type without parameters only
         // (`json_derive_preamble`), so the context is empty.
         self.register_derived_instance(
-            self.library_class("JSON", "ToJSON"), result_ty.clone(), method_fns, vec![]);
+            self.library_class("JSON", "ToJSON"), result_ty.clone(), method_fns, vec![], type_name, vec![]);
 
         vec![TFunction {
             name: mangled,

@@ -125,9 +125,10 @@ fn flatten_expr(e: TExpr, binds: &mut Vec<TLocalDef>, ctr: &mut usize) -> TExpr 
         }
         // A constructed dictionary's method: recurse into the dictionary
         // expression but never hoist it (it carries dictionary structure).
-        TExprKind::DictMethod { dict, method_name } => TExprKind::DictMethod {
+        TExprKind::DictMethod { dict, method_name, nullary } => TExprKind::DictMethod {
             dict: Box::new(flatten_expr(*dict, binds, ctr)),
             method_name,
+            nullary,
         },
         TExprKind::Negate(inner) => {
             // Negation forces its operand — a strict position.

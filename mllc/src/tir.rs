@@ -339,9 +339,10 @@ impl TExpr {
             TExprKind::Tuple(elems) => {
                 TExprKind::Tuple(elems.into_iter().map(&mut *f).collect())
             }
-            TExprKind::DictMethod { dict, method_name } => TExprKind::DictMethod {
+            TExprKind::DictMethod { dict, method_name, nullary } => TExprKind::DictMethod {
                 dict: Box::new(f(*dict)),
                 method_name,
+                nullary,
             },
             TExprKind::DictCall { func_name, dict_args, value_args } => TExprKind::DictCall {
                 func_name,
@@ -798,17 +799,32 @@ pub enum TExprKind {
     },
     Tuple(Vec<TExpr>),
     /// Access a method from a typeclass dictionary parameter.
+    ///
+    /// `nullary`: the class declares the method without arguments
+    /// (`minBound :: a`, `mempty :: a`) and without constraints of its own,
+    /// so the dictionary field holds the method's VALUE — a CAF slot, which
+    /// may be an unevaluated thunk — and not a function. A function-valued
+    /// field is WHNF as read (every method implementation is emitted as a
+    /// real Lua function); a value field is a thunk-or-value like any
+    /// variable read, and the backend's WHNF and cheapness judgments
+    /// (`is_cheap_with`, `expr_yields_whnf`) must treat it as one. Decided by
+    /// the monomorphizer from the class signature (`method_is_nullary`), the
+    /// same arity rule that decides the field's shape in a constructed
+    /// dictionary (`SpecKind::DictCtor`).
     DictAccess {
         dict_param: String,
         method_name: String,
+        nullary: bool,
     },
     /// Access a method from a dictionary EXPRESSION (a constructed
     /// dictionary, e.g. the `[a]` dictionary built from the element
     /// dictionary inside a dictionary-passing body). The `dict_param`
     /// form above is the common special case of a plain parameter.
+    /// `nullary` as for `DictAccess`.
     DictMethod {
         dict: Box<TExpr>,
         method_name: String,
+        nullary: bool,
     },
     /// Call a dictionary-passing function with explicit dictionaries.
     DictCall {

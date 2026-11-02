@@ -528,7 +528,17 @@ equivalent: `ToJSON` and `FromJSON` (a JSON encoder/decoder, requiring
 a name-keyed table for a single-constructor record, a plain string for
 an all-nullary enum). There is no `deriving` for `Read`, `Hashable`,
 `NFData`, or arbitrary classes. There is no `GeneralizedNewtypeDeriving`
-or `DeriveAnyClass`.
+or `DeriveAnyClass`. A `newtype` derives `Show`, `Eq` and `Ord` only:
+`newtype N a = N a deriving (Functor)`, which GHC accepts (stock
+`Functor` deriving works on newtypes), is rejected here — write the
+instance by hand.
+
+An instance head must be a named type constructor, a list, a tuple or
+`()`: `instance Show (a -> b)`, legal Haskell 2010 (the head is the
+constructor `(->)` at two distinct variables), is rejected with
+"Cannot define an instance for 'a -> b'". Functions have no instance
+of any class here, and the solver treats a function type as a definite
+"no instance" rather than looking one up.
 
 ## Generics: `Data.Generics`, not `GHC.Generics`
 
@@ -723,6 +733,51 @@ it — and, structurally, the compiler-owned containers: `Ord [a]`
 (`Nothing < Just _`), exactly GHC's derived orderings. `sort` and
 `sortBy` (stable mergesort, GHC's `Data.List` behavior) live in the
 Prelude like the other list functions.
+
+## The Prelude instance table
+
+Every Prelude instance GHC has for a type mata-ll has, mata-ll has, with
+GHC's semantics — the table below is the record of what exists, so a
+missing instance is a documented gap and never a surprise. Types in
+GHC's Prelude that mata-ll lacks (`Char`, `Word`, `Float`, `Double` as
+a separate type, `Ratio`) have no row. mata-ll's extra types (`String`
+as a primitive, `ByteString`, `HashMap`, `IORef`, `Any`) and its extra
+class `Hashable` are mata-ll's own.
+
+| Class | Instances |
+|---|---|
+| `Show` | `Int`, `Integer`, `Number`, `String`, `Bool`, `ByteString`, `()`, `Ordering`, `Maybe a`, `Either a b`, `[a]`, every tuple, and anything that derives it |
+| `Eq` | the same types, plus `IORef a` (reference identity, as GHC) |
+| `Ord` | the same types but `IORef` (see the previous section) |
+| `Read` | `Int`, `Integer`, `Number`, `Bool`, `String` — GHC's grammar per type, no `Maybe`/list/tuple readers (there is no `deriving (Read)`) |
+| `Enum` | `Int`, `Integer`, `Number` (GHC's `Enum Double`: `fromEnum` truncates, the ranges are base's `numericEnumFrom` family), `Bool`, `Ordering`, `()`, and derived enumerations |
+| `Bounded` | `Int`, `Bool`, `Ordering`, `()`, tuples up to the 15-tuple, and derived enumerations and single-constructor products |
+| `Num` | `Int`, `Integer`, `Number` |
+| `Real` | `Int`, `Integer`, `Number` |
+| `Integral` | `Int`, `Integer` |
+| `Fractional` | `Number` |
+| `Semigroup`, `Monoid` | `String`, `[a]` — not `Ordering`, `()`, `Maybe a`, tuples or functions, which GHC has |
+| `Functor`, `Applicative`, `Monad` | `[]`, `Maybe`, `Either e`, `IO`, `ST s`, `LuaIO s` — not `(->) r` or `(,) a`, which GHC has |
+| `MonadFail` | `[]`, `Maybe`, `IO`, `LuaIO s` |
+| `Foldable`, `Traversable` | `[]`, `Maybe`, `Either e` — not `(,) a`, which GHC has |
+| `Hashable` (mata-ll) | `Int`, `Number`, `String`, `Bool`, `ByteString`, and tuples, lists and `Maybe` of them |
+
+`Floating`, `RealFrac` and `RealFloat` do not exist as classes:
+`sqrt`, `floor`, `truncate` and the rest are plain functions on
+`Number` (see "Numeric typeclasses"). `Enum Number`'s `fromEnum` on a
+value outside the Int range or on `NaN`/`Infinity` is whatever
+`truncate` yields for it (GHC's result is implementation-defined too).
+The `Enum ()` error texts (`succ ()`, `pred ()`, `toEnum 1 :: ()`)
+follow mata-ll's derived instances ("succ: already at maxBound for
+()") rather than base's "Prelude.Enum.().succ: bad argument".
+
+A derived instance is checked as GHC checks it: `deriving (Ord)` needs
+an `Eq` instance for the type, and a derived `Show`, `Eq`, `Ord` or
+`Bounded` needs the class at every field type — a written instance
+anywhere in the module, a derived one, or a structural one all count.
+What is missing is reported at the data declaration, naming the
+deriving clause, the constructor, the field type and the instance to
+add.
 
 ## Every builtin class carries GHC's defaults; `showList` is absent
 

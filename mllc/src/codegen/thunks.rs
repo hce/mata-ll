@@ -401,6 +401,11 @@ impl CodeGen {
             | TExprKind::Con(_) | TExprKind::Tuple(_)
             | TExprKind::Lambda { .. } | TExprKind::OpFunc(_) => true,
             TExprKind::Paren(inner) => self.expr_yields_whnf(inner),
+            // A dictionary field read: a function value for a method that
+            // takes arguments, a thunk-or-value for a nullary one (see
+            // `is_cheap_with`'s dictionary arms) — the latter needs the
+            // force a variable read gets.
+            TExprKind::DictAccess { nullary, .. } | TExprKind::DictMethod { nullary, .. } => !nullary,
             TExprKind::InfixApp { op, .. } => Self::infix_yields_whnf(op),
             TExprKind::App(func, _) => {
                 if let TExprKind::Var(name) = &func.kind
@@ -796,7 +801,8 @@ impl CodeGen {
         while let TExprKind::Paren(inner) = &stripped.kind {
             stripped = inner.as_ref();
         }
-        !matches!(&stripped.kind, TExprKind::Tuple(_) | TExprKind::Var(_) | TExprKind::Con(_))
+        !matches!(&stripped.kind, TExprKind::Tuple(_) | TExprKind::Var(_) | TExprKind::Con(_)
+            | TExprKind::DictAccess { .. } | TExprKind::DictMethod { .. })
             && !Self::is_saturated_con_app(stripped)
             && !self.is_builder_call(stripped)
     }
@@ -883,6 +889,13 @@ impl CodeGen {
         }
         if matches!(&stripped.kind, TExprKind::Var(_) | TExprKind::Con(_)) {
             self.lazy_ref_ast(stripped)
+        } else if matches!(&stripped.kind, TExprKind::DictAccess { .. } | TExprKind::DictMethod { .. }) {
+            // A nullary method's dictionary field is a thunk-or-value
+            // exactly like a variable (a function-valued one is cheap and
+            // never reaches here): pass the field raw, the callee forces it
+            // if it reads it. Wrapping a fresh thunk around the read would
+            // only add an allocation.
+            self.expr_ast(stripped)
         } else {
             debug_assert!(self.arg_suspends(expr), "arg_suspends mirrors arg_ast_inner");
             Expr::thunk(self.expr_ast(expr))

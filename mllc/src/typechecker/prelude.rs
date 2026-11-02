@@ -778,6 +778,23 @@ impl Checker {
             ("enumFrom", "enumFrom_Bool"), ("enumFromThen", "enumFromThen_Bool"),
             ("enumFromTo", "enumFromTo_Bool"), ("enumFromThenTo", "enumFromThenTo_Bool"),
         ]);
+        // Enum () and Enum Number (GHC's `Enum ()` and `Enum Double`): the
+        // helpers are mata-ll source in lib/Prelude.mll, next to Bool's,
+        // with base's definitions (see the comments there). Without
+        // `Enum Number`, `[1.0, 1.5 .. 3.0]` had no instance and an
+        // unannotated `[1.5 .. 3]` could not default to Number (T18, Q28).
+        self.register_builtin_instance("Enum", Ty::Unit, &[
+            ("succ", "succ_Unit"), ("pred", "pred_Unit"),
+            ("toEnum", "toEnum_Unit"), ("fromEnum", "fromEnum_Unit"),
+            ("enumFrom", "enumFrom_Unit"), ("enumFromThen", "enumFromThen_Unit"),
+            ("enumFromTo", "enumFromTo_Unit"), ("enumFromThenTo", "enumFromThenTo_Unit"),
+        ]);
+        self.register_builtin_instance("Enum", Ty::Con("Number".to_string()), &[
+            ("succ", "succ_Number"), ("pred", "pred_Number"),
+            ("toEnum", "toEnum_Number"), ("fromEnum", "fromEnum_Number"),
+            ("enumFrom", "enumFrom_Number"), ("enumFromThen", "enumFromThen_Number"),
+            ("enumFromTo", "enumFromTo_Number"), ("enumFromThenTo", "enumFromThenTo_Number"),
+        ]);
 
         // HashMap KEY constraint (round-3 Q54): the runtime map is keyed
         // by the forced key (a scalar directly, a structural key — tuple,
@@ -836,6 +853,12 @@ impl Checker {
         ]);
         self.register_builtin_instance("Bounded", Ty::Con("Bool".to_string()), &[
             ("minBound", "minBound_Bool"), ("maxBound", "maxBound_Bool"),
+        ]);
+        // Bounded () (GHC: `minBound = maxBound = ()`); the tuple instances
+        // (`(Bounded a, Bounded b) => Bounded (a, b)` up to the 15-tuple)
+        // are ordinary instance declarations in lib/Prelude.mll.
+        self.register_builtin_instance("Bounded", Ty::Unit, &[
+            ("minBound", "minBound_Unit"), ("maxBound", "maxBound_Unit"),
         ]);
 
         // Class constraints carried by the built-in class methods (the

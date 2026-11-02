@@ -30,6 +30,15 @@ impl Entailment<'_> {
     }
 }
 
+/// Whose superclass requirement `check_superclasses` is checking: a written
+/// `instance` declaration, or the instance a `deriving` clause produced.
+/// Same rule, different message — a derived instance has no instance text
+/// to point at, so its report names the deriving clause.
+pub(super) enum InstanceOrigin<'a> {
+    Written,
+    Derived { type_name: &'a str },
+}
+
 impl Checker {
     /// Register an instance under its structured head key, derived from the
     /// instance's target type — never from a Display string. Types with no
@@ -440,7 +449,7 @@ impl Checker {
     /// constraint reaches the function boundary as an undetermined one.
     pub(super) fn constraint_bound_vars(&self, subst: &Subst) -> HashSet<TyVar> {
         let mut out = HashSet::new();
-        for (class, cty) in &self.wanted {
+        for (class, cty, _) in &self.wanted {
             let rty = cty.apply_subst(subst);
             if rty.free_vars().is_empty() { continue; }
             self.collect_constraint_bound_vars(class, &rty, &mut out);
@@ -474,13 +483,13 @@ impl Checker {
     pub(super) fn reduce_wanted_over(&mut self, quantified: &HashSet<TyVar>, subst: &Subst) {
         if quantified.is_empty() { return; }
         let wanted = std::mem::take(&mut self.wanted);
-        for (class, cty) in wanted {
+        for (class, cty, use_span) in wanted {
             let rty = cty.apply_subst(subst);
             if !rty.free_vars().iter().any(|v| quantified.contains(v)) {
-                self.wanted.push((class, cty));
+                self.wanted.push((class, cty, use_span));
                 continue;
             }
-            self.residual_wanted(&class, &rty);
+            self.residual_wanted(&class, &rty, use_span);
         }
     }
 
@@ -488,17 +497,17 @@ impl Checker {
     /// where it cannot be decided here (a variable, an undecided shape) or
     /// never holds (the boundary reports it), its demands' residuals where
     /// an instance reduces it, nothing where it is satisfied outright.
-    fn residual_wanted(&mut self, class: &str, ty: &Ty) {
+    fn residual_wanted(&mut self, class: &str, ty: &Ty, use_span: Option<Span>) {
         let step = match self.entail_step(class, ty) {
             Entailment::Deferred | Entailment::Failed => None,
             Entailment::Satisfied => Some(Vec::new()),
             Entailment::Demands { subs, .. } => Some(subs),
         };
         match step {
-            None => self.wanted.push((class.to_string(), ty.clone())),
+            None => self.wanted.push((class.to_string(), ty.clone(), use_span)),
             Some(subs) => {
                 for (c, t) in subs {
-                    self.residual_wanted(&c, &t);
+                    self.residual_wanted(&c, &t, use_span);
                 }
             }
         }
@@ -549,7 +558,7 @@ impl Checker {
                 .find(|(v, _)| v.name == *var_name)
                 .map(|(_, t)| t.clone())
             {
-                self.wanted.push((class_name.clone(), fresh));
+                self.wanted.push((class_name.clone(), fresh, self.stmt_span));
             }
         }
     }
@@ -958,6 +967,205 @@ impl Checker {
         args.iter().all(|arg| matches!(arg, Ty::Var(v) if seen.insert(v.name.clone())))
     }
 
+    /// Haskell 2010 §4.3.2 for one instance (written or derived): every
+    /// superclass constraint `S (T u1 … uk)` of `instance cx => C (T u1 …
+    /// uk)` must be entailed by `cx` together with the instances in scope.
+    /// That is instance resolution under the instance's context as the
+    /// givens — `entailed_under_givens`, the same `entail_step` rules a use
+    /// site resolves by — so a structural superclass instance (`Eq [a]`
+    /// from `Eq a`), a registered one with a context (`Show (Tree a)` from
+    /// `Show a`), a builtin one (`Eq Int`) and a context class that is a
+    /// superclass of the needed one (`Ord a` gives `Eq a`) all count. A
+    /// registry lookup keyed by the bare head (what this used to be)
+    /// refused every list, tuple and Maybe head — those instances are
+    /// synthesized by mono and have no entry — and could not tell
+    /// `instance Eq a => Container [a]` from the context-free spelling
+    /// GHC rejects. Every instance head is registered (`preregister_instance`,
+    /// pass 4a's derives, the prelude) before any instance is checked, so
+    /// a witness declared later in the module is found (T14).
+    ///
+    /// A DERIVED instance takes the same path with its derived context as
+    /// the givens (`deriving (Ord)` on a type without `Eq` is "No instance
+    /// for (Eq T) arising from the superclasses of an instance declaration"
+    /// in GHC); its message names the deriving clause, since there is no
+    /// instance text to point at (T18).
+    pub(super) fn check_superclasses(
+        &mut self,
+        class_name: &str,
+        target_ty: &Ty,
+        ctx: &[TyConstraint],
+        origin: InstanceOrigin<'_>,
+    ) {
+        let Some(class_info) = self.classes.get(class_name).cloned() else { return };
+        let givens: Vec<(String, String)> = ctx.iter()
+            .map(|c| (c.class_name.clone(), c.type_var.clone()))
+            .collect();
+        let paren = crate::types::paren_ty;
+        for superclass in &class_info.superclasses {
+            let Err((need_class, need_ty)) =
+                self.entailed_under_givens(&givens, superclass, target_ty)
+            else {
+                continue;
+            };
+            let head = format!(
+                "{}instance '{} {}' needs '{} {}' for its superclass '{}'",
+                match origin { InstanceOrigin::Written => "", InstanceOrigin::Derived { .. } => "the derived " },
+                class_name, paren(target_ty), superclass, paren(target_ty), superclass
+            );
+            let needed = format!("{} {}", need_class, paren(&need_ty));
+            let msg = if let Ty::Var(_) = need_ty {
+                // The demand bottomed out at one of the head's type
+                // variables: only the instance context can provide it.
+                let unprovided = if ctx.is_empty() {
+                    "and the instance has no context".to_string()
+                } else {
+                    format!(
+                        "and the instance context '({})' does not provide it",
+                        ctx.iter()
+                            .map(|c| format!("{} {}", c.class_name, c.type_var))
+                            .collect::<Vec<_>>().join(", ")
+                    )
+                };
+                format!(
+                    "{}, which needs '{}', {}: add '{}' to the instance context",
+                    head, needed, unprovided, needed
+                )
+            } else if need_class == *superclass && need_ty == *target_ty {
+                format!("{}, and there is no instance '{}'", head, needed)
+            } else {
+                format!(
+                    "{}, which needs '{}', and there is no instance '{}'",
+                    head, needed, needed
+                )
+            };
+            match origin {
+                InstanceOrigin::Written => self.push_error_ctx(
+                    DiagnosticKind::Other(msg),
+                    format!("instance {} {}", class_name, target_ty),
+                ),
+                InstanceOrigin::Derived { type_name } => self.push_error_ctx_note(
+                    DiagnosticKind::Other(format!(
+                        "No instance for '{}' arising from the deriving clause of '{}': {}",
+                        needed, type_name, msg
+                    )),
+                    format!("data {}", type_name),
+                    format!(
+                        "a derived instance is checked like a written one: its superclasses \
+                         must have instances. Add '{}' to the deriving clause of '{}' \
+                         (or write 'instance {}'); GHC rejects this too (\"No instance for \
+                         ({}) arising from the superclasses of an instance declaration\")",
+                        superclass, type_name, needed, needed
+                    ),
+                ),
+            }
+        }
+    }
+
+    /// Does `ty` name a type constructor nothing defines (`type_name_defined`
+    /// is false for it)? Such a reference was already reported where the
+    /// type was written.
+    fn ty_mentions_undefined_type(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Con(name) => !self.type_name_defined(name),
+            Ty::App(f, a) => self.ty_mentions_undefined_type(f) || self.ty_mentions_undefined_type(a),
+            Ty::Arrow(a, b, _) => self.ty_mentions_undefined_type(a) || self.ty_mentions_undefined_type(b),
+            Ty::List(e) | Ty::IO(e) | Ty::LuaIO(_, e) | Ty::Forall(_, e) => self.ty_mentions_undefined_type(e),
+            Ty::Tuple(es) => es.iter().any(|e| self.ty_mentions_undefined_type(e)),
+            Ty::Var(_) | Ty::Unit | Ty::Skolem(..) | Ty::Promoted(_) => false,
+        }
+    }
+
+    /// The deferred checks of pass 4a's derived instances (`DerivedObligation`),
+    /// run in pass 4b once every written instance is preregistered: a
+    /// derived instance may lean on an instance declared anywhere in the
+    /// module — `instance Eq T` written below `data T … deriving (Ord)`, a
+    /// field type whose own deriving clause comes later — exactly as a
+    /// written instance may (T14). Two requirements, both entailed under
+    /// the derived context (H2010 §11: the derived instance's context is
+    /// the class at every field type, simplified; what does not simplify
+    /// to a context constraint must hold outright):
+    ///
+    ///   * the superclasses, as for a written instance (`check_superclasses`);
+    ///   * for the structural derives, the class at every field type —
+    ///     `data P = P A deriving (Eq)` with no `Eq A` is GHC's "No instance
+    ///     for (Eq A) arising from the first field of 'P' (type 'A')".
+    ///
+    /// The monomorphizer's "No instance for '==' on type 'A'" at the
+    /// derived method remains as the backstop; this check is the one that
+    /// names the deriving clause and the missing instance, at the data
+    /// declaration (T18).
+    pub(super) fn check_derived_obligations(&mut self) {
+        let paren = crate::types::paren_ty;
+        for ob in std::mem::take(&mut self.derived_obligations) {
+            if let Some(idx) = ob.decl_idx {
+                self.set_decl_position(idx);
+            }
+            self.check_superclasses(
+                &ob.class, &ob.target, &ob.context,
+                InstanceOrigin::Derived { type_name: &ob.type_name },
+            );
+            let givens: Vec<(String, String)> = ob.context.iter()
+                .map(|c| (c.class_name.clone(), c.type_var.clone()))
+                .collect();
+            // One report per missing instance: a type used by several
+            // fields is reported once, at its first field.
+            let mut reported: HashSet<String> = HashSet::new();
+            for (con, fty) in &ob.fields {
+                // A field naming a type that does not exist was reported at
+                // the data declaration ("Unknown type 'Boolean'"); the
+                // instance it then lacks is a consequence of that error, not
+                // a second one — GHC stops at the scope error too.
+                if self.ty_mentions_undefined_type(fty) {
+                    continue;
+                }
+                let Err((need_class, need_ty)) =
+                    self.entailed_under_givens(&givens, &ob.class, fty)
+                else {
+                    continue;
+                };
+                let needed = format!("{} {}", need_class, paren(&need_ty));
+                if !reported.insert(needed.clone()) {
+                    continue;
+                }
+                let wanted = format!("{} {}", ob.class, paren(fty));
+                let via = if needed == wanted {
+                    String::new()
+                } else {
+                    format!(", which needs '{}'", needed)
+                };
+                let type_name = ob.type_name.clone();
+                let con_name = self.source_name(con).to_string();
+                self.push_error_ctx_note(
+                    DiagnosticKind::Other(format!(
+                        "No instance for '{}' arising from a field of constructor '{}' \
+                         (type '{}') in the deriving clause of '{}': the derived instance \
+                         '{} {}' needs '{}'{}, and there is no instance '{}'",
+                        needed, con_name, fty, type_name,
+                        ob.class, paren(&ob.target), wanted, via, needed
+                    )),
+                    format!("data {}", type_name),
+                    match need_ty {
+                        Ty::Arrow(..) | Ty::IO(_) | Ty::LuaIO(..) | Ty::Forall(..) => format!(
+                            "a derived {} instance works through every field type's own \
+                             instance, and a function or action has none (nothing can \
+                             compare, show or bound one); GHC rejects this too (\"No \
+                             instance for ({}) arising from the first field of '{}'\")",
+                            ob.class, needed, con_name
+                        ),
+                        _ => format!(
+                            "a derived {} instance works through every field type's own \
+                             instance. Give '{}' one — `deriving ({})` on its declaration, \
+                             or a written instance; GHC rejects this too (\"No instance \
+                             for ({}) arising from the first field of '{}'\")",
+                            ob.class, paren(&need_ty), ob.class, needed, con_name
+                        ),
+                    },
+                );
+            }
+        }
+        self.clear_decl_position();
+    }
+
     pub(super) fn check_instance(
         &mut self,
         class_name: &str,
@@ -1125,51 +1333,7 @@ impl Checker {
         // GHC rejects. Every instance head is registered (`preregister_instance`,
         // pass 4a's derives, the prelude) before any instance is checked, so
         // a witness declared later in the module is found (T14).
-        let givens: Vec<(String, String)> = ctx.iter()
-            .map(|c| (c.class_name.clone(), c.type_var.clone()))
-            .collect();
-        let paren = crate::types::paren_ty;
-        for superclass in &class_info.superclasses {
-            let Err((need_class, need_ty)) =
-                self.entailed_under_givens(&givens, superclass, &target_ty)
-            else {
-                continue;
-            };
-            let head = format!(
-                "instance '{} {}' needs '{} {}' for its superclass '{}'",
-                class_name, paren(&target_ty), superclass, paren(&target_ty), superclass
-            );
-            let needed = format!("{} {}", need_class, paren(&need_ty));
-            let msg = if let Ty::Var(_) = need_ty {
-                // The demand bottomed out at one of the head's type
-                // variables: only the instance context can provide it.
-                let unprovided = if ctx.is_empty() {
-                    "and the instance has no context".to_string()
-                } else {
-                    format!(
-                        "and the instance context '({})' does not provide it",
-                        ctx.iter()
-                            .map(|c| format!("{} {}", c.class_name, c.type_var))
-                            .collect::<Vec<_>>().join(", ")
-                    )
-                };
-                format!(
-                    "{}, which needs '{}', {}: add '{}' to the instance context",
-                    head, needed, unprovided, needed
-                )
-            } else if need_class == *superclass && need_ty == target_ty {
-                format!("{}, and there is no instance '{}'", head, needed)
-            } else {
-                format!(
-                    "{}, which needs '{}', and there is no instance '{}'",
-                    head, needed, needed
-                )
-            };
-            self.push_error_ctx(
-                DiagnosticKind::Other(msg),
-                format!("instance {} {}", class_name, ty_str),
-            );
-        }
+        self.check_superclasses(class_name, &target_ty, &ctx, InstanceOrigin::Written);
 
         let mut instance_info = InstanceInfo {
             class_name: class_name.to_string(),

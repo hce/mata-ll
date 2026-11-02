@@ -157,16 +157,25 @@ Order matters because later passes depend on earlier registrations:
 2. **Pass 2** — typeclass declarations + type families.
 3. **Pass 3** — type signatures + FFI info (`LuaPure`/`LuaIO`/`LuaTry` etc.).
 4. **Pass 4a** — `deriving` clauses (must run before 4b so derived instances
-   exist when explicit instances are checked).
+   exist when explicit instances are checked). A derived instance is
+   registered with its obligations (`DerivedObligation`: the superclass
+   requirement, and for Show/Eq/Ord/a Bounded product the class at every
+   field type), which are not decided here — a derived instance may lean
+   on an instance declared anywhere in the module.
 5. **Pass 4b** — explicit instance declarations (+ orphan detection).
    Every instance head is registered first (`preregister_instance`, over
-   all instance decls), then each instance is checked
+   all instance decls); then the derived obligations are checked
+   (`check_derived_obligations`), and then each written instance
    (`check_instance`): head shape, duplicates, orphans, and the
    superclass requirement — H2010 §4.3.2, each superclass constraint at
    the instance head entailed by the instance's context together with
    the instances in scope (`entailed_under_givens`), so a witness
    declared later in the module, a derived one (pass 4a) or a structural
-   one (never registered — mono synthesizes it) all count.
+   one (never registered — mono synthesizes it) all count. The
+   superclass rule is one function for both origins
+   (`check_superclasses`, `InstanceOrigin::Written`/`Derived`); a derived
+   instance's field requirement is the same entailment under the
+   derived context, per (constructor, field type).
 6. **Pass 5** — synthesize FFI functions from sigs that have no body.
 7. **Pass 6** — collect exports + check function definitions (the actual
    inference over bodies).
@@ -186,7 +195,10 @@ Order matters because later passes depend on earlier registrations:
   declaration what the list cannot hold: a constraint on the class
   variable, a compound argument, an unknown class, a variable the type
   does not mention), and `emit_use_constraints` turns each use into a
-  *wanted* at the instantiated type. A builtin class also states GHC's
+  *wanted* at the instantiated type, tagged with the span of the
+  statement it arose in (`stmt_span`, the innermost `Expr::Spanned`
+  marker being inferred), which is where a failure is reported; the
+  binding's span is the fallback outside any statement. A builtin class also states GHC's
   `MINIMAL` formula (`ClassInfo::minimal`, beside its method list) and
   its default methods as mata-ll source snippets
   (`register_builtin_default`, parsed once by
@@ -256,7 +268,9 @@ Order matters because later passes depend on earlier registrations:
   monomorphizer builds the instance's dictionary form from it exactly as
   for `instance Show a => Show (Box a)`. Builtin instances registered
   without a context (`context: None`) keep the structural rule (every
-  type argument needs the class).
+  type argument needs the class). Deriving registers the instance and
+  its `DerivedObligation` (see pass 4a/4b above); the check runs after
+  every instance of the module exists.
 
 ---
 
@@ -415,6 +429,16 @@ constant folding (§7) can then recognize them.
   froze specialization names that a later trip purged (T13: the purge
   rewrite renamed them to the dictionary form, and every call through
   the table was off by one argument); now no table is ever renamed.
+  A dictionary FIELD holds a function for a method with arguments
+  (every implementation is emitted as a Lua function) and the method's
+  VALUE for a nullary one — a CAF slot, a thunk until forced
+  (`SpecKind::DictCtor` builds the field by `method_field_arity`:
+  the class signature's arrow spine plus the method's own dictionary
+  parameters). Every dictionary read (`DictAccess`/`DictMethod`)
+  carries that verdict as `nullary`, and the backend's WHNF and
+  cheapness judgments (`is_cheap_with`, `expr_yields_whnf`) treat a
+  nullary read like a variable read — forced where WHNF is required,
+  passed raw where it is not — and a function-valued read as WHNF.
   A dictionary form's evidence table (`ensure_dictform`) names each
   context constraint after the variable as the method's BODY spells it
   (the checker's `a2114`, a default method's `_inst196`), not as the

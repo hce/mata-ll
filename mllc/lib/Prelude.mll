@@ -674,6 +674,151 @@ enumFromThenToHelper_Integer x step m =
     then if x > m then [] else x : enumFromThenToHelper_Integer (x + step) step m
     else if x < m then [] else x : enumFromThenToHelper_Integer (x + step) step m
 
+-- Enum instance for (): GHC's `instance Enum ()` — the one value is index
+-- 0, `succ`/`pred` fail, `[() ..]` and `[() .. ()]` are `[()]`, and the
+-- stepped forms `[(), () ..]` / `[(), () .. ()]` are the infinite list of
+-- units (base: `let many = ():many in many`). The error texts follow the
+-- derived instances' (`succ_Bool` above), not base's "Prelude.Enum.().succ:
+-- bad argument".
+succ_Unit :: () -> ()
+succ_Unit _ = error "succ: already at maxBound for ()"
+
+pred_Unit :: () -> ()
+pred_Unit _ = error "pred: already at minBound for ()"
+
+toEnum_Unit :: Int -> ()
+toEnum_Unit 0 = ()
+toEnum_Unit _ = error "toEnum: index out of range for ()"
+
+fromEnum_Unit :: () -> Int
+fromEnum_Unit _ = 0
+
+enumFrom_Unit :: () -> [()]
+enumFrom_Unit _ = [()]
+
+enumFromThen_Unit :: () -> () -> [()]
+enumFromThen_Unit a b = a : enumFromThen_Unit a b
+
+enumFromTo_Unit :: () -> () -> [()]
+enumFromTo_Unit _ _ = [()]
+
+enumFromThenTo_Unit :: () -> () -> () -> [()]
+enumFromThenTo_Unit a b c = a : enumFromThenTo_Unit a b c
+
+-- Bounded instance for (): GHC's `minBound = maxBound = ()`.
+minBound_Unit :: ()
+minBound_Unit = ()
+
+maxBound_Unit :: ()
+maxBound_Unit = ()
+
+-- Enum instance for Number: GHC's `instance Enum Double` (base
+-- GHC.Internal.Float / GHC.Internal.Real). `succ`/`pred` add and subtract
+-- one, `toEnum` converts the Int, `fromEnum` truncates toward zero, and
+-- the ranges are base's numericEnumFrom family, element for element:
+--   numericEnumFrom n       = [n + k | k <- [0, 1 ..]]
+--   numericEnumFromThen n m = [n + k * (m - n) | k <- [0, 1 ..]]
+-- — the k-th element is computed from n and k, NOT by repeated addition
+-- (the two differ in the last bits: `[0.1, 0.2 .. 1.0]` ends in 1.0 this
+-- way and 0.9999999999999999 the other) — and the bounded forms stop at
+-- the limit plus half a step: `enumFromTo n m` keeps elements `<= m + 1/2`
+-- (`[1.5 .. 3]` is `[1.5, 2.5, 3.5]`), `enumFromThenTo e1 e2 e3` keeps
+-- `<= e3 + (e2 - e1) / 2` when stepping up and `>= e3 + (e2 - e1) / 2`
+-- when stepping down (a zero step repeats e1 forever, as in GHC).
+succ_Number :: Number -> Number
+succ_Number x = x + 1
+
+pred_Number :: Number -> Number
+pred_Number x = x - 1
+
+toEnum_Number :: Int -> Number
+toEnum_Number n = fromIntegral n
+
+fromEnum_Number :: Number -> Int
+fromEnum_Number x = truncate x
+
+enumFrom_Number :: Number -> [Number]
+enumFrom_Number n = numericEnumFromHelper_Number n 0
+
+numericEnumFromHelper_Number :: Number -> Number -> [Number]
+numericEnumFromHelper_Number n k = (n + k) : numericEnumFromHelper_Number n (k + 1)
+
+enumFromThen_Number :: Number -> Number -> [Number]
+enumFromThen_Number n m = numericEnumFromThenHelper_Number n (m - n) 0
+
+numericEnumFromThenHelper_Number :: Number -> Number -> Number -> [Number]
+numericEnumFromThenHelper_Number n step k =
+    (n + k * step) : numericEnumFromThenHelper_Number n step (k + 1)
+
+enumFromTo_Number :: Number -> Number -> [Number]
+enumFromTo_Number n m = takeWhile (\x -> x <= m + 0.5) (enumFrom_Number n)
+
+enumFromThenTo_Number :: Number -> Number -> Number -> [Number]
+enumFromThenTo_Number e1 e2 e3 =
+    takeWhile predicate (enumFromThen_Number e1 e2)
+  where
+    mid = (e2 - e1) / 2
+    predicate x = if e2 >= e1 then x <= e3 + mid else x >= e3 + mid
+
+-- Bounded instances for tuples: GHC's `instance (Bounded a, Bounded b) =>
+-- Bounded (a, b)` and so on up to the 15-tuple, each bound the tuple of
+-- its components' bounds.
+instance (Bounded a, Bounded b) => Bounded (a, b) where
+    minBound = (minBound, minBound)
+    maxBound = (maxBound, maxBound)
+
+instance (Bounded a, Bounded b, Bounded c) => Bounded (a, b, c) where
+    minBound = (minBound, minBound, minBound)
+    maxBound = (maxBound, maxBound, maxBound)
+
+instance (Bounded a, Bounded b, Bounded c, Bounded d) => Bounded (a, b, c, d) where
+    minBound = (minBound, minBound, minBound, minBound)
+    maxBound = (maxBound, maxBound, maxBound, maxBound)
+
+instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e) => Bounded (a, b, c, d, e) where
+    minBound = (minBound, minBound, minBound, minBound, minBound)
+    maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound)
+
+instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f) => Bounded (a, b, c, d, e, f) where
+    minBound = (minBound, minBound, minBound, minBound, minBound, minBound)
+    maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound)
+
+instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f, Bounded g) => Bounded (a, b, c, d, e, f, g) where
+    minBound = (minBound, minBound, minBound, minBound, minBound, minBound, minBound)
+    maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound)
+
+instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f, Bounded g, Bounded h) => Bounded (a, b, c, d, e, f, g, h) where
+    minBound = (minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound)
+    maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound)
+
+instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f, Bounded g, Bounded h, Bounded i) => Bounded (a, b, c, d, e, f, g, h, i) where
+    minBound = (minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound)
+    maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound)
+
+instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f, Bounded g, Bounded h, Bounded i, Bounded j) => Bounded (a, b, c, d, e, f, g, h, i, j) where
+    minBound = (minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound)
+    maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound)
+
+instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f, Bounded g, Bounded h, Bounded i, Bounded j, Bounded k) => Bounded (a, b, c, d, e, f, g, h, i, j, k) where
+    minBound = (minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound)
+    maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound)
+
+instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f, Bounded g, Bounded h, Bounded i, Bounded j, Bounded k, Bounded l) => Bounded (a, b, c, d, e, f, g, h, i, j, k, l) where
+    minBound = (minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound)
+    maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound)
+
+instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f, Bounded g, Bounded h, Bounded i, Bounded j, Bounded k, Bounded l, Bounded m) => Bounded (a, b, c, d, e, f, g, h, i, j, k, l, m) where
+    minBound = (minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound)
+    maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound)
+
+instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f, Bounded g, Bounded h, Bounded i, Bounded j, Bounded k, Bounded l, Bounded m, Bounded n) => Bounded (a, b, c, d, e, f, g, h, i, j, k, l, m, n) where
+    minBound = (minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound)
+    maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound)
+
+instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f, Bounded g, Bounded h, Bounded i, Bounded j, Bounded k, Bounded l, Bounded m, Bounded n, Bounded o) => Bounded (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o) where
+    minBound = (minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound)
+    maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound)
+
 -- Read instances: validating runtime parsers (GHC's grammar per type;
 -- failure raises "Prelude.read: no parse" exactly like GHC).
 read_Int :: String -> LuaPure "__mll_read_int" Int

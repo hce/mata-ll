@@ -857,7 +857,8 @@ variable.
         -- Instances: Int, Integer, Number, Bool, String
 
     class Enum a where
-        -- Instances: Int, Integer, Bool, Ordering, and derived enums
+        -- Instances: Int, Integer, Number (GHC's Enum Double), Bool,
+        -- Ordering, (), and derived enums
         succ        :: a -> a
         pred        :: a -> a
         toEnum      :: Int -> a
@@ -1753,9 +1754,19 @@ Bounded, Functor, Generic, ToJSON, FromJSON, and LuaDict:
     data Person = Person { pName :: String, pAge :: Int }
         deriving (Show, ToJSON, FromJSON)
 
-The compiler generates the obvious structural instances. Enum and
-Bounded are supported for simple enum types (constructors with no
-fields).
+The compiler generates the obvious structural instances. Enum derives
+for enumerations (constructors with no fields); Bounded for
+enumerations and for a single-constructor product whose fields are all
+Bounded, as in GHC.
+
+A derived instance is checked like a written one: `deriving (Ord)`
+requires an `Eq` instance for the type (its superclass), and a derived
+`Show`, `Eq`, `Ord` or `Bounded` requires the class at every field
+type. The instance may be written anywhere in the module or derived
+itself; what is missing is a compile error at the data declaration,
+naming the deriving clause, the constructor, the field type and the
+instance to add (GHC: "No instance for (Eq A) arising from the first
+field of 'P'").
 
 `show` output matches GHC exactly. Strings are quoted and escaped by
 GHC's rules (`show "a\nb"` is `"\"a\\nb\""`, control characters take

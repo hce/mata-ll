@@ -504,6 +504,28 @@ enum ExConstraintForm {
 }
 
 /// The type checker — validates types and produces typed IR
+/// A derived instance's deferred checks: the superclass requirement
+/// (`deriving (Ord)` needs `Eq T`) and the stock derives' field
+/// requirement (`deriving (Eq)` on `data P = P A` needs `Eq A`), both
+/// entailed under the derived context as a written instance's superclass
+/// is under its declared one (H2010 §4.3.2, §11). Checked by
+/// `check_derived_obligations` once every instance of the module is
+/// registered.
+pub(super) struct DerivedObligation {
+    pub(super) class: String,
+    pub(super) target: Ty,
+    pub(super) context: Vec<TyConstraint>,
+    /// The deriving data type, for the message and the error context.
+    pub(super) type_name: String,
+    /// The data declaration's position, for file attribution.
+    pub(super) decl_idx: Option<usize>,
+    /// (constructor, field type) for every field a structural derive
+    /// walks; empty for a derive with no field requirement (Enum, an
+    /// enumeration's Bounded, Functor, Generic, the JSON codecs — which
+    /// check their fields themselves).
+    pub(super) fields: Vec<(String, Ty)>,
+}
+
 pub struct Checker {
     /// Current recursion depth of expression inference (`infer_expr` /
     /// `check_expr_typed`), bounded by `crate::MAX_NESTING_DEPTH`. The
@@ -677,6 +699,16 @@ pub struct Checker {
     /// attached to each diagnostic by the push helpers so an error inside an
     /// imported module names the file its span's line numbers index.
     cur_file: Option<String>,
+    /// Index into `module.decls` of the declaration currently being
+    /// processed (`set_decl_position`), so a check deferred past the
+    /// declaration's pass (`derived_obligations`) can stand on it again.
+    cur_decl_idx: Option<usize>,
+    /// Derived instances awaiting their superclass and field checks — see
+    /// `check_derived_obligations`. Filled by `register_derived_instance`
+    /// in pass 4a, drained in pass 4b once every written instance is
+    /// preregistered, because a derived instance may lean on an instance
+    /// declared anywhere in the module.
+    derived_obligations: Vec<DerivedObligation>,
     /// File of each successfully checked top-level function, by name — the
     /// monomorphizer's diagnostics (reported per enclosing function, after
     /// the checker is done) are attributed through this in lib.rs.
@@ -698,9 +730,19 @@ pub struct Checker {
     /// constraint on the freshened type so it can be discharged.
     method_constraints: HashMap<String, Vec<TyConstraint>>,
     /// Wanted class constraints collected while checking the current function:
-    /// (class name, the instantiated type the constraint applies to). Discharged
-    /// at the function boundary once unification has resolved the type.
-    wanted: Vec<(String, Ty)>,
+    /// (class name, the instantiated type the constraint applies to, the
+    /// statement the constraint arose in). Discharged at the function
+    /// boundary once unification has resolved the type; a failure is
+    /// reported at the statement (`stmt_span`) when one is known, so a
+    /// "No instance" names the offending line of a do-block rather than
+    /// the clause head (review N14).
+    wanted: Vec<(String, Ty, Option<Span>)>,
+    /// The span of the innermost statement-boundary expression
+    /// (`Expr::Spanned`: a do-statement, a let/where body, a case or
+    /// guard body) being inferred — the location a wanted pushed now is
+    /// attributed to. None outside any statement (a clause head's bare
+    /// body, a signature's constraint).
+    stmt_span: Option<Span>,
     /// The types integer literal patterns were checked at while checking
     /// the current function — the `Eq` wanteds those patterns pushed, so a
     /// missing `Eq` in the signature's context can say it is the pattern's
@@ -819,6 +861,8 @@ impl Checker {
             checking_prelude: false,
             decl_files: Vec::new(),
             cur_file: None,
+            cur_decl_idx: None,
+            derived_obligations: Vec::new(),
             fn_files: HashMap::new(),
             local_classes: HashSet::new(),
             local_types: HashSet::new(),
@@ -826,6 +870,7 @@ impl Checker {
             fn_contexts: HashMap::new(),
             method_constraints: HashMap::new(),
             wanted: Vec::new(),
+            stmt_span: None,
             lit_pat_eq_wanted: Vec::new(),
             binder_types: Vec::new(),
             fromjson_types: HashSet::new(),
@@ -1509,6 +1554,7 @@ impl Checker {
         self.checking_local = decl_idx >= self.local_decl_start;
         self.checking_prelude = decl_idx < self.prelude_decl_count;
         self.cur_file = self.decl_files.get(decl_idx).cloned().flatten();
+        self.cur_decl_idx = Some(decl_idx);
     }
 
     /// Leave decl-processing: clears the position `set_decl_position` set.
@@ -1516,6 +1562,7 @@ impl Checker {
         self.checking_local = false;
         self.checking_prelude = false;
         self.cur_file = None;
+        self.cur_decl_idx = None;
     }
 
     /// Install the per-declaration file map (see `decl_files`). Called by
@@ -3132,6 +3179,10 @@ impl Checker {
                 self.preregister_instance(class_name, target_type, context, methods);
             }
         }
+        // Every instance of the module is registered now — pass 4a's
+        // derived ones and the written heads above — so the derived
+        // instances' superclass and field requirements can be decided.
+        self.check_derived_obligations();
         for (decl_idx, decl) in module.decls.iter().enumerate() {
             self.set_decl_position(decl_idx);
             if let Decl::InstanceDecl { class_name, target_type, context, methods } = decl {

@@ -7882,3 +7882,163 @@ main = do
         "a minimal complete definition must not warn: {:?}",
         result.warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>());
 }
+
+// A derived instance is checked like a written one (T18): `deriving (Ord)`
+// on a type with no `Eq` instance is GHC's "No instance for (Eq T) arising
+// from the superclasses of an instance declaration". derive.rs used to
+// register the instance with no superclass check at all, so the program
+// compiled and ran. The requirement is entailment under the derived
+// context — the same `entailed_under_givens` path `check_instance` takes —
+// and it is decided after every instance of the module is registered, so
+// a written `instance Eq T` below the data declaration satisfies it.
+#[test]
+fn deriving_ord_without_eq_is_rejected() {
+    let source = r#"
+data T = A | B deriving (Ord)
+
+main :: IO ()
+main = print (A < B)
+"#;
+    expect_compile_error(source, &[], &[
+        "No instance for 'Eq T' arising from the deriving clause of 'T'",
+        "the derived instance 'Ord T' needs 'Eq T' for its superclass 'Eq'",
+        "and there is no instance 'Eq T'",
+        "in data T",
+        "note:",
+        "Add 'Eq' to the deriving clause of 'T'",
+        "superclasses of an instance declaration",
+    ]);
+    // Control: the superclass instance written by hand, after the data
+    // declaration, is found.
+    let source = r#"
+data T = A | B deriving (Ord, Show)
+
+instance Eq T where
+    x == y = case (x, y) of
+        (A, A) -> True
+        (B, B) -> True
+        _ -> False
+
+main :: IO ()
+main = print (A < B, compare B A, A == B)
+"#;
+    compile(source, Path::new("."), &[]).expect("a written Eq instance satisfies a derived Ord's superclass");
+    // Control: Eq derived alongside, in either order of the clause.
+    let source = r#"
+data T = A | B deriving (Ord, Eq)
+
+main :: IO ()
+main = print (A < B)
+"#;
+    compile(source, Path::new("."), &[]).expect("deriving (Ord, Eq) is complete");
+}
+
+// The structural derives need the class at every field type (H2010 §11:
+// the derived context is the class at each field, simplified; what does
+// not simplify to a context constraint must hold outright). `data P = P A
+// deriving (Eq)` with no `Eq A` is GHC's "No instance for (Eq A) arising
+// from the first field of 'P' (type 'A')". The check names the field, the
+// constructor and the missing instance at the data declaration; the
+// monomorphizer's "No instance for '==' on type 'A'" at the derived method
+// was the only report before (T18).
+#[test]
+fn deriving_over_field_without_instance_is_rejected() {
+    let source = r#"
+data A = A
+data P = P A deriving (Eq)
+
+main :: IO ()
+main = putStrLn "unreached"
+"#;
+    expect_compile_error(source, &[], &[
+        "No instance for 'Eq A' arising from a field of constructor 'P' (type 'A') in the deriving clause of 'P'",
+        "the derived instance 'Eq P' needs 'Eq A'",
+        "in data P",
+        "note:",
+        "`deriving (Eq)` on its declaration",
+        "arising from the first field of 'P'",
+    ]);
+    // A function-typed field: no instance can ever exist, and the note
+    // says so instead of suggesting a deriving clause.
+    let source = r#"
+data F = F (Int -> Int) deriving (Eq)
+data G a = G (a -> Int) deriving (Show)
+
+main :: IO ()
+main = putStrLn "unreached"
+"#;
+    let msg = expect_compile_error(source, &[], &[
+        "No instance for 'Eq (Int -> Int)' arising from a field of constructor 'F' (type 'Int -> Int')",
+        "a function or action has none",
+        "No instance for 'Show (a -> Int)' arising from a field of constructor 'G' (type 'a -> Int')",
+        "the derived instance 'Show (G a)' needs 'Show (a -> Int)'",
+    ]);
+    assert!(
+        !msg.contains("`deriving (Eq)` on its declaration"),
+        "a function type gets no deriving suggestion: {msg}"
+    );
+    // Controls: a field type whose own deriving clause comes LATER in the
+    // module, a recursive type, a parameter (the derived context covers
+    // it), a phantom parameter (demands nothing), and a Bounded product
+    // over Bounded fields.
+    let source = r#"
+data P = P Q deriving (Eq, Ord, Show)
+data Q = Q deriving (Eq, Ord, Show)
+data L = N | C Int L deriving (Eq, Ord, Show)
+data Box a = Box a deriving (Eq, Ord, Show)
+data Tag t = Tag Int deriving (Eq, Ord, Show)
+data Meters = Meters
+data Pair = MkPair Bool Ordering deriving (Show, Bounded)
+
+main :: IO ()
+main = do
+    print (P Q == P Q, C 1 N < C 2 N, Box (1 :: Int) < Box 2)
+    print (Tag 1 == (Tag 1 :: Tag Meters), minBound :: Pair)
+"#;
+    compile(source, Path::new("."), &[])
+        .expect("derived instances over covered fields must stay legal");
+    // A Bounded product over a field with no Bounded instance.
+    let source = r#"
+data Pair = MkPair Int String deriving (Show, Bounded)
+
+main :: IO ()
+main = print (minBound :: Pair)
+"#;
+    expect_compile_error(source, &[], &[
+        "No instance for 'Bounded String' arising from a field of constructor 'MkPair' (type 'String')",
+        "the derived instance 'Bounded Pair' needs 'Bounded String'",
+    ]);
+}
+
+// A "No instance" from a wanted constraint is reported at the statement
+// the constraint arose in — the do-statement, let/where body, case or
+// guard body (`Expr::Spanned`) — not at the enclosing binding's head
+// (review N14: every such error pointed at `main = do`). The wanted
+// carries the statement span it was emitted under; the binding span is
+// the fallback for a constraint outside any statement.
+#[test]
+fn no_instance_is_reported_at_the_offending_statement() {
+    let source = r#"
+data T = T deriving (Show)
+
+main :: IO ()
+main = do
+    putStrLn "first"
+    print (succ T)
+    putStrLn "last"
+"#;
+    let msg = expect_compile_error(source, &[], &[
+        "No instance for 'Enum T'",
+        "at 7:5,",
+        "7 |     print (succ T)",
+    ]);
+    assert!(!msg.contains("5 | main = do"), "the clause head is not the location: {msg}");
+    // A constraint arising outside any statement keeps the binding's span.
+    let source = r#"
+data T = T deriving (Show)
+
+main :: IO ()
+main = print (succ T)
+"#;
+    expect_compile_error(source, &[], &["No instance for 'Enum T'", "at 5:6,", "5 | main = print (succ T)"]);
+}

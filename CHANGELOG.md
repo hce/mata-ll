@@ -44,6 +44,89 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **GHC's Prelude instances for `()`, `Number` and tuples that mata-ll
+  lacked — `Enum ()`, `Bounded ()`, `Enum Number` and `Bounded (a, b, …)`
+  up to the 15-tuple — exist now, with GHC's definitions** (`[() ..]`,
+  `fromEnum ()`, `minBound :: ((), Bool)`, `[1.0, 1.5 .. 3.0]`,
+  `succ 1.5`, `maxBound :: (Int, Bool)` were all "No instance for …",
+  and the unannotated `print [1.5 .. 3]` was "Ambiguous type" because
+  the `Number` default had no `Enum` instance to satisfy, where GHC
+  defaults to Double and prints `[1.5,2.5,3.5]`.) `Enum Number` is
+  base's `Enum Double` element for element: `succ`/`pred` add and
+  subtract one, `toEnum` converts, `fromEnum` truncates toward zero,
+  and the ranges are base's `numericEnumFrom` family — the k-th element
+  is `n + k * step` (not repeated addition: `[0.1, 0.2 .. 1.0]` ends in
+  `1.0`, the other way in `0.9999999999999999`), a bounded range keeps
+  the elements up to the limit plus half a step (`[1.5 .. 3]` is
+  `[1.5,2.5,3.5]`, `[1.0 .. 5.5]` reaches `6.0`), and a stepped one
+  stops at `e3 + (e2 - e1) / 2` in the step's direction. `Enum ()` and
+  `Bounded ()` are base's (index 0, `[() ..]` is `[()]`, the stepped
+  forms the infinite list of units, `minBound = maxBound = ()`); the
+  tuple instances are Prelude instance declarations (`(Bounded a,
+  Bounded b) => Bounded (a, b)`), resolved through the same head-keyed
+  registry as a user's, in the specialized world and through an
+  existential's captured dictionary alike. The HASKDIFF now carries the
+  Prelude instance table, so the gap between GHC's instances and
+  mata-ll's is on record. Found by the 2026-10 fresh-eyes review (T18,
+  Q28). (GHC-goldened cases `prelude_enum_bounded_instances` and
+  `bounded_tuple_int`.)
+- **A derived instance is checked as a written one is: its superclass
+  instance and its fields' instances must exist, reported at the data
+  declaration** (`data T = A | B deriving (Ord)` with no `Eq T` compiled
+  and ran, where GHC says "No instance for (Eq T) arising from the
+  superclasses of an instance declaration"; `data P = P A deriving (Eq)`
+  with no `Eq A` was refused only by the monomorphizer at the derived
+  method — "No instance for '==' on type 'A'" — naming neither the field
+  nor the fix.) `derive.rs` registered a derived instance with no check
+  at all. Every derived instance now records its obligations
+  (`DerivedObligation`), and pass 4b decides them once every instance of
+  the module is registered: the superclass requirement through the
+  `entailed_under_givens` path `check_instance` takes (one shared
+  `check_superclasses`), and for the structural derives — Show, Eq, Ord,
+  a Bounded product — the class at every field type, under the derived
+  context as the givens (H2010 §11: what does not simplify to a context
+  constraint must hold outright). So a written `instance Eq T` below the
+  data declaration, a field type whose own deriving clause comes later,
+  a recursive type, a parameter and a phantom parameter all count, as
+  in GHC. The message names the deriving clause, the constructor, the
+  field type and the missing instance, and quotes GHC's wording in the
+  note; a function-typed field says no instance can exist. Found by the
+  2026-10 fresh-eyes review (T18). (compile_errors
+  `deriving_ord_without_eq_is_rejected`,
+  `deriving_over_field_without_instance_is_rejected`.)
+- **A "No instance" or "Ambiguous type" from a class constraint is
+  reported at the statement the constraint arose in**, not at the
+  enclosing binding's head (every such error inside a do-block pointed at
+  `main = do`, with the first line of the block as the excerpt, whatever
+  statement it was — review N14.) A wanted constraint now carries the
+  span of the innermost statement-boundary expression it was emitted
+  under (`stmt_span`, maintained by the `Expr::Spanned` markers the
+  parser puts on do-statements, let/where bodies and case/guard bodies),
+  and `discharge_wanted_constraints` reports at it; the binding's span
+  remains the location of a constraint outside any statement. The
+  monomorphizer's own "No instance for '<method>' on type …" reports
+  stay at the clause: TIR expressions carry no spans. (compile_errors
+  `no_instance_is_reported_at_the_offending_statement`.)
+- **A nullary class method read from a dictionary is a thunk-or-value,
+  and the backend treats it as one** (`showBoth (Any x) = show (x, myMin
+  \`asTypeOf\` x)` over an existential whose `MyBounded (a, b)` instance
+  defines `myMin = (myMin, myMin)` crashed with "attempt to perform
+  arithmetic on a function value"; the new Bounded tuple instances are
+  the same shape through `minBound`.) The backend's WHNF and cheapness
+  judgments (`is_cheap_with`, `expr_yields_whnf`) claimed every
+  dictionary read WHNF on the ground that dictionaries are method tables
+  of functions — true of a method with arguments, whose field is an
+  emitted Lua function, not of a nullary one, whose field holds the
+  method's CAF slot, a thunk until forced. A callee fed by such a read
+  therefore had its parameter judged always-cheap, bound it bare and
+  returned the raw thunk (`asTypeOf`), and the structural show indexed
+  the thunk table as the tuple. The monomorphizer now marks every
+  dictionary read with the class method's field arity
+  (`DictAccess`/`DictMethod::nullary`, by the same `method_field_arity`
+  rule that shapes a constructed dictionary's fields), and a nullary
+  read is judged like a variable read: forced where WHNF is required,
+  passed raw where it is not. Found writing the dictionary-world cases
+  of the T18 entry above. (GHC-goldened case `dict_nullary_field_thunk`.)
 - **A clause's GADT refinement is local to that clause, so a constrained
   GADT function may put its refining clause first** (`describe :: Show a
   => G a -> a -> String; describe GI x = "int " <> show (x + 1); describe

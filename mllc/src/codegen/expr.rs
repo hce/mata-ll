@@ -605,10 +605,10 @@ impl CodeGen {
                 }
                 Expr::Table(items)
             }
-            TExprKind::DictAccess { dict_param, method_name } => {
+            TExprKind::DictAccess { dict_param, method_name, .. } => {
                 Expr::name(format!("{}.{}", sanitize_name(dict_param), self.dict_field(method_name)))
             }
-            TExprKind::DictMethod { dict, method_name } => {
+            TExprKind::DictMethod { dict, method_name, .. } => {
                 // A method of a CONSTRUCTED dictionary (e.g. the `[a]`
                 // dictionary built from the element dictionary), or of a
                 // captured existential dictionary read through its pattern

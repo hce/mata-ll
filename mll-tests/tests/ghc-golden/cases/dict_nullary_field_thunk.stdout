@@ -1,0 +1,5 @@
+(9,True)
+(False,(0,0))
+((1,True),(0,False),(9,True))
+((False,(2,3)),(False,(0,0)),(True,(9,9)))
+((0,False),False)
