@@ -44,6 +44,41 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **`sortBy` calls the comparator with the caller's argument order, and
+  `sort`/`sortBy` are GHC's algorithm, so a comparator that is no total
+  order orders as under GHC.** The Prelude's merge asked `cmp y x` and
+  tested for LT, so every comparator ran with its arguments swapped:
+  `sortBy (\_ _ -> GT) [1, 2, 3]` printed `[1,2,3]` where GHC prints
+  `[3,2,1]`, `sortBy (\_ _ -> LT)` reversed its input, and a comparator
+  answering LT on `<=` ordered equal keys backwards; with `import
+  Data.List` in scope a second `sortBy` with the right argument order won
+  through the flat namespace, so one program printed differently with and
+  without the import. Both were bottom-up merge sorts of singleton runs,
+  not base's, and a mergesort's permutation is independent of the
+  algorithm only for a total order: `sort [3.0, 0.0, 0.0, 0.0, 1.0, nan,
+  0.0]` printed `[0.0,0.0,0.0,0.0,1.0,3.0,NaN]` where GHC prints
+  `[0.0,0.0,0.0,1.0,3.0,NaN,0.0]`. `sort` and `sortBy` are now GHC
+  9.14.1's `Data.OldList` implementation (base 4.22: the natural
+  mergesort of GHC issue #24280 — monotone-run detection, the fused
+  three- and four-way merges, `sort = actualSort (>)`, `sortBy cmp =
+  actualSort (\x y -> cmp x y == GT)`), ported clause for clause into the
+  Prelude, which Data.List re-exports. `sort` goes through `(>)` as
+  base's does, not through `compare`: at `Number` the two differ on a NaN
+  (`>` is never true of one, `compare` says GT), so `sort` and `sortBy
+  compare` of a NaN-bearing list print GHC's two different answers. Base's
+  difference-list run collector is a consed accumulator reversed at the
+  end (the same list from the same comparisons; the nested application
+  would be one Lua call per element of an already sorted input) and its
+  bang patterns are `seq`. Sorting got faster (`length (sort [300000,
+  299999 .. 1])` 4.0s -> 0.4s on Lua 5.5, scrambled input 10.1s -> 4.4s)
+  and no size that sorted before overflows now (10^5 and 3*10^5
+  elements — sorted, reversed, scrambled, alternating — on both hosts).
+  Found by the 2026-10 fresh-eyes review (M7, N8). (GHC-goldened cases
+  `sort_ghc_algorithm` and `sort_ghc_algorithm_data_list`; the backend
+  fuzzer sorts generated lists under lawful, flipped, never-EQ and
+  constant comparators, and NaN-bearing `Number` lists, against a port of
+  base's algorithm.)
+
 - **The list-pipeline fusion fires for the `foldl'` consumer again: a
   `foldl' f z (map g (filter p [a .. b]))` — the `list_pipeline` benchmark
   among them — is one loop, not the lazy walk.** Every `foldl'` pipeline

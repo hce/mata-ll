@@ -322,32 +322,115 @@ minimum t = case foldr (\x xs -> x : xs) [] t of
     []     -> error "minimum: empty structure"
     (x:xs) -> foldl' (\m y -> if y < m then y else m) x xs
 
--- Stable sort (GHC's Data.List.sort/sortBy; mata-ll puts them in the
--- Prelude like the other list functions). Bottom-up mergesort:
--- singleton runs merged pairwise until one remains. `mergeTwo` takes the
--- LEFT element unless the right is STRICTLY smaller, which is what makes
--- the sort stable, exactly as GHC's.
+-- GHC 9.14.1's Data.List.sort/sortBy (base 4.22, GHC.Internal.Data.OldList:
+-- the natural mergesort with the four-way merge of GHC issue #24280),
+-- clause for clause; mata-ll puts them in the Prelude like the other list
+-- functions. Both are `sort_gt` under a "greater than" predicate: `sort`
+-- under `(>)` and `sortBy cmp` under `cmp x y == GT` — base's spellings,
+-- and they differ: at Number a NaN is never `>` anything but `compare` on
+-- a NaN is GT, so `sort` and `sortBy compare` order a NaN-bearing list
+-- differently under GHC, and here. The input is cut into monotone runs
+-- (a strictly descending run is reversed as it is collected, an ascending
+-- one kept), lists of up to four elements and the merge passes go through
+-- the fused three- and four-way merges, and `merge` takes from the LEFT
+-- run unless its head is greater, which keeps equal elements in input
+-- order. Every predicate call is base's, with base's argument order, in
+-- base's sequence, so a comparator that is no total order — NaN, a
+-- comparator that is never EQ, `\_ _ -> GT` — yields GHC's permutation;
+-- a stable sort of any other shape agrees with GHC only on total orders.
+--
+-- Two spellings differ from base without changing a single predicate call
+-- or result: base collects an ascending run in a difference list
+-- (`ascending b (\ys -> as (a:ys)) bs`) whose application nests one call
+-- per element, a Lua call per element when the run is built, so an
+-- already sorted input of 10^5 elements would overflow the host's stack;
+-- here the run is a consed accumulator reversed at the end — the same
+-- list. And base's bang patterns (`let !x = merge4 a b c d`) are `seq`.
 sortBy :: (a -> a -> Ordering) -> [a] -> [a]
-sortBy cmp xs = mergeRuns (map (\x -> [x]) xs)
-  where
-    mergeRuns [] = []
-    mergeRuns [r] = r
-    mergeRuns rs = mergeRuns (mergePairs rs)
-    mergePairs (r1 : r2 : rest) = mergeTwo r1 r2 : mergePairs rest
-    mergePairs rs = rs
-    mergeTwo [] ys = ys
-    mergeTwo ys [] = ys
-    mergeTwo (x : xs') (y : ys') = case cmp y x of
-        LT -> y : mergeTwo (x : xs') ys'
-        _  -> x : mergeTwo xs' (y : ys')
+sortBy cmp = sort_gt (\x y -> cmp x y == GT)
 
--- Built on (<=) rather than `compare`: a user module may shadow the Ord
--- CLASS itself (see superclass.mll) with a compare of a different type,
--- and the Prelude must keep compiling under it. For a lawful Ord instance
--- the two are the same function; mergesort only ever asks "strictly
--- smaller?" anyway.
 sort :: Ord a => [a] -> [a]
-sort = sortBy (\x y -> if x <= y then (if y <= x then EQ else LT) else GT)
+sort = sort_gt (\x y -> x > y)
+
+-- base's `actualSort`.
+sort_gt :: (a -> a -> Bool) -> [a] -> [a]
+sort_gt gt ns = case ns of
+    []           -> []
+    [a]          -> [a]
+    [a, b]       -> merge [a] [b]
+    [a, b, c]    -> merge3 [a] [b] [c]
+    [a, b, c, d] -> merge4 [a] [b] [c] [d]
+    _            -> merge_all (sequences ns)
+  where
+    sequences (a : b : xs)
+        | gt a b    = descending b [a] xs
+        | otherwise = ascending b [a] xs
+    sequences xs = [xs]
+
+    descending a acc (b : bs)
+        | gt a b = descending b (a : acc) bs
+    descending a acc bs = (a : acc) : sequences bs
+
+    ascending a acc (b : bs)
+        | not (gt a b) = ascending b (a : acc) bs
+    ascending a acc bs = let x = reverse (a : acc) in seq x (x : sequences bs)
+
+    merge_all [x] = x
+    merge_all xs = merge_all (reduce_once xs)
+
+    reduce_once [] = []
+    reduce_once [a] = [a]
+    reduce_once [a, b] = [merge a b]
+    reduce_once [a, b, c] = [merge3 a b c]
+    reduce_once [a, b, c, d, e] = [merge a b, merge3 c d e]
+    reduce_once [a, b, c, d, e, f] = [merge3 a b c, merge3 d e f]
+    reduce_once (a : b : c : d : xs) = let x = merge4 a b c d in seq x (x : reduce_once xs)
+
+    merge l@(a : l') r@(b : r')
+        | gt a b    = b : merge l r'
+        | otherwise = a : merge l' r
+    merge [] r = r
+    merge l [] = l
+
+    -- merge3 l r cs is merge (merge l r) cs, fused
+    merge3 l@(a : l') r@(b : r') cs
+        | gt a b    = merge3X b l r' cs
+        | otherwise = merge3X a l' r cs
+    merge3 [] r cs = merge r cs
+    merge3 l [] cs = merge l cs
+
+    merge3X x l r cs@(c : cs')
+        | gt x c    = c : merge3X x l r cs'
+        | otherwise = x : merge3 l r cs
+    merge3X x l r [] = x : merge l r
+
+    merge3Y l@(a : l') y r cs
+        | gt a y    = y : merge3 l r cs
+        | otherwise = a : merge3Y l' y r cs
+    merge3Y [] x r cs = x : merge r cs
+
+    -- merge4 l r cs ds is merge (merge l r) (merge cs ds), fused
+    merge4 l@(a : l') r@(b : r') cs ds
+        | gt a b    = merge4X b l r' cs ds
+        | otherwise = merge4X a l' r cs ds
+    merge4 [] r cs ds = merge3 r cs ds
+    merge4 l [] cs ds = merge3 l cs ds
+
+    merge4X x l r cs@(c : cs') ds@(d : ds')
+        | gt c d    = merge4XY x l r d cs ds'
+        | otherwise = merge4XY x l r c cs' ds
+    merge4X x l r [] ds = merge3X x l r ds
+    merge4X x l r cs [] = merge3X x l r cs
+
+    merge4Y l@(a : l') r@(b : r') y cs ds
+        | gt a b    = merge4XY b l r' y cs ds
+        | otherwise = merge4XY a l' r y cs ds
+    merge4Y l [] y cs ds = merge3Y l y cs ds
+    merge4Y [] r y cs ds = merge3Y r y cs ds
+
+    merge4XY x l r y cs ds
+        | gt x y    = y : merge4X x l r cs ds
+        | otherwise = x : merge4Y l r y cs ds
 
 -- Map each element to a monoid and combine the results.
 -- Monoid instances: String (concatenation, mempty "") and lists

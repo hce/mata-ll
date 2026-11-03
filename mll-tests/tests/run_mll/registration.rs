@@ -739,6 +739,8 @@ mll_test!(existential_nested_dicts, "existential_nested_dicts.mll");
 // GHC's Ord defaults on the builtin class: compare-only and (<=)-only
 // instances, with the other methods (and sort/maximum) following.
 mll_test!(ord_minimal_instance, "ord_minimal_instance.mll");
+mll_test!(sort_ghc_algorithm, "sort_ghc_algorithm.mll");
+mll_lib_test!(sort_ghc_algorithm_data_list, "sort_ghc_algorithm_data_list.mll");
 // GHC's Eq and Show defaults on the builtin classes: a `/=`-only Eq
 // instance, a showsPrec-only Show instance with showParen precedence,
 // and show-only instances left unparenthesized inside derived fields/Just.

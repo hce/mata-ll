@@ -786,8 +786,15 @@ type-checks and stays sound. Differences from GHC:
 it — and, structurally, the compiler-owned containers: `Ord [a]`
 (lexicographic), `Ord (a, b, …)` (element-wise), and `Ord (Maybe a)`
 (`Nothing < Just _`), exactly GHC's derived orderings. `sort` and
-`sortBy` (stable mergesort, GHC's `Data.List` behavior) live in the
-Prelude like the other list functions.
+`sortBy` are GHC 9.14.1's `Data.List` implementation (base 4.22's
+`Data.OldList.sortBy`: the natural mergesort with the four-way merge,
+ported clause for clause — `sort` under `(>)`, `sortBy cmp` under
+`cmp x y == GT`, as base spells them), so a comparator that is no total
+order yields GHC's permutation: `sort` of a NaN-bearing `[Number]`, where
+`>` is never true of a NaN, and `sortBy compare` of the same list, where
+`compare` says GT, print GHC's two different answers, and a comparator
+that never answers EQ sorts as under GHC. They live in the Prelude like
+the other list functions.
 
 ## The Prelude instance table
 

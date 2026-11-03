@@ -72,6 +72,20 @@
 //! Text.Read.Lex reader on the other, so the two grammars are held
 //! together on machine-generated values.
 //!
+//! `sort` and `sortBy` are oracled against a port of base 4.22's own
+//! algorithm (GHC 9.14.1's `Data.OldList.sortBy`: run detection, the
+//! `reduce_once` grouping, the three- and four-way merges), not against a
+//! library sort: a mergesort's permutation is independent of the algorithm
+//! only for a total order, and the probe's comparators are not one — a
+//! flipped `compare`, `if a < b then GT else LT`, `if a == b then GT else
+//! compare a b`, the constants `\_ _ -> GT`/`LT`/`EQ` over generated lists
+//! at every showable type, and `sort`/`sortBy compare` over `Number`
+//! lists carrying `0 / 0`. The NaN never leaves the sort: the list is a
+//! literal built for the probe and the sorted result is printed, so the
+//! no-NaN budget of every other Number production stands (GHC's `compare`
+//! at Double says GT of a NaN, `>` says False, and `show` prints `NaN`;
+//! the reference does the same).
+//!
 //! Everything is deterministic and offline: each program derives from
 //! (BATCH_SEED, index) through SplitMix64, so any failure reproduces by
 //! seed alone, and the failure message carries the source and both outputs.
@@ -278,6 +292,9 @@ enum P {
     DollarApp, // (f $ x)
     // --- structural Eq/Ord surface (A16) ---
     Sort,
+    /// `sortBy` under a generated comparator, lawful or not (see the
+    /// module header); only ever saturated, from the sort probe.
+    SortBy,
     Elem,
     MaxP,
     MinP,
@@ -605,6 +622,7 @@ fn p_name(p: &P) -> &'static str {
         P::CompApp => ".",
         P::DollarApp => "$",
         P::Sort => "sort",
+        P::SortBy => "sortBy",
         P::Elem => "elem",
         P::MaxP => "max",
         P::MinP => "min",
@@ -739,17 +757,26 @@ fn as_list(v: &Value) -> Vec<Value> {
 }
 
 /// GHC's derived/structural `compare` over the fragment's values: numeric
-/// order for Int/Integer/Number (IEEE order; -0.0 and 0.0 compare EQ, and
-/// the fragment has no NaN), False < True, byte order for String (ASCII,
-/// so Char order and Lua's C-locale order agree), LT < EQ < GT,
-/// lexicographic lists and pairs, Nothing < Just.
+/// order for Int/Integer/Number (IEEE order; -0.0 and 0.0 compare EQ; a
+/// NaN — which only the sort probe's lists carry — compares GT to
+/// everything, itself included, as GHC's `compare` at Double does: `<`,
+/// then `==`, else GT; so `<`, `<=`, `==` and `/=` derived from it answer
+/// False, False, False, True on a NaN, GHC's answers), False < True, byte
+/// order for String (ASCII, so Char order and Lua's C-locale order
+/// agree), LT < EQ < GT, lexicographic lists and pairs, Nothing < Just.
 fn ghc_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => x.cmp(y),
         (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
         (Value::Number(x), Value::Number(y)) => {
-            x.partial_cmp(y).expect("backend_fuzz: a NaN reached compare (generator budget bug)")
+            if x < y {
+                Less
+            } else if x == y {
+                Equal
+            } else {
+                Greater
+            }
         }
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
         (Value::Str(x), Value::Str(y)) => x.as_bytes().cmp(y.as_bytes()),
@@ -785,6 +812,233 @@ fn ghc_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
 /// with m < 2^53 and e >= 11, and the low 64 bits of that product are `m
 /// << e` (nothing survives a shift of 64 or more) — a route independent
 /// of the runtime's fmod-based wrap, so the two can disagree.
+/// GHC's `(>)`: at Double the IEEE comparison, False when either side is
+/// a NaN — where `compare` says GT. `sort` is `actualSort (>)` in base, so
+/// this and not `ghc_cmp == Greater` is `sort`'s predicate; the two agree
+/// everywhere but on a NaN.
+fn ghc_gt(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => x > y,
+        _ => ghc_cmp(a, b) == std::cmp::Ordering::Greater,
+    }
+}
+
+/// base 4.22's `actualSort` (GHC.Internal.Data.OldList in GHC 9.14.1)
+/// over a "greater than" predicate — the algorithm itself, clause for
+/// clause, not a library sort: for a predicate that is no strict weak
+/// order (a NaN under `compare`, `\\_ _ -> GT`) different mergesorts yield
+/// different permutations, and this probe pins GHC's. Runs are cut as
+/// base's `sequences`/`descending`/`ascending` cut them (a trailing empty
+/// run included), the lists of up to four elements take base's direct
+/// merges, the merge passes group as `reduce_once` groups them, and the
+/// fused `merge3`/`merge4` families are ported literally, because they
+/// are NOT the compositions `merge (merge a b) c` and `merge (merge a b)
+/// (merge c d)` they were derived from once the predicate is no total
+/// order: when one of the first two runs is exhausted, `merge4Y` hands
+/// the pending element of the OTHER pair to `merge3Y`, which falls to
+/// `merge3 as cs ds` — the remaining three runs merge as `(as `merge` cs)
+/// `merge` ds`, a different association from the composition's. The
+/// batch found exactly that on `sortBy (flip compare)` over a NaN-bearing
+/// list before this port was literal.
+fn ghc_sort_gt(gt: &mut dyn FnMut(&Value, &Value) -> bool, ns: Vec<Value>) -> Vec<Value> {
+    /// The merge family as a state machine: each state is one of base's
+    /// functions with its arguments (runs as slices, pending elements by
+    /// reference), each `x : f …` is a push and a state change, each
+    /// plain call a state change, so the port is the clause list itself
+    /// and no recursion depth is spent on output length.
+    enum St<'a> {
+        Merge(&'a [Value], &'a [Value]),
+        Merge3(&'a [Value], &'a [Value], &'a [Value]),
+        Merge3X(&'a Value, &'a [Value], &'a [Value], &'a [Value]),
+        Merge3Y(&'a [Value], &'a Value, &'a [Value], &'a [Value]),
+        Merge4(&'a [Value], &'a [Value], &'a [Value], &'a [Value]),
+        Merge4X(&'a Value, &'a [Value], &'a [Value], &'a [Value], &'a [Value]),
+        Merge4Y(&'a [Value], &'a [Value], &'a Value, &'a [Value], &'a [Value]),
+        Merge4XY(&'a Value, &'a [Value], &'a [Value], &'a Value, &'a [Value], &'a [Value]),
+    }
+    fn run(gt: &mut dyn FnMut(&Value, &Value) -> bool, mut st: St<'_>) -> Vec<Value> {
+        let mut out = Vec::new();
+        loop {
+            st = match st {
+                St::Merge(l, r) => match (l.split_first(), r.split_first()) {
+                    (Some((a, l2)), Some((b, r2))) => {
+                        if gt(a, b) {
+                            out.push(b.clone());
+                            St::Merge(l, r2)
+                        } else {
+                            out.push(a.clone());
+                            St::Merge(l2, r)
+                        }
+                    }
+                    (None, _) => {
+                        out.extend(r.iter().cloned());
+                        return out;
+                    }
+                    (_, None) => {
+                        out.extend(l.iter().cloned());
+                        return out;
+                    }
+                },
+                St::Merge3(l, r, cs) => match (l.split_first(), r.split_first()) {
+                    (Some((a, l2)), Some((b, r2))) => {
+                        if gt(a, b) {
+                            St::Merge3X(b, l, r2, cs)
+                        } else {
+                            St::Merge3X(a, l2, r, cs)
+                        }
+                    }
+                    (None, _) => St::Merge(r, cs),
+                    (_, None) => St::Merge(l, cs),
+                },
+                St::Merge3X(x, l, r, cs) => match cs.split_first() {
+                    Some((c, cs2)) => {
+                        if gt(x, c) {
+                            out.push(c.clone());
+                            St::Merge3X(x, l, r, cs2)
+                        } else {
+                            out.push(x.clone());
+                            St::Merge3(l, r, cs)
+                        }
+                    }
+                    None => {
+                        out.push(x.clone());
+                        St::Merge(l, r)
+                    }
+                },
+                St::Merge3Y(l, y, r, cs) => match l.split_first() {
+                    Some((a, l2)) => {
+                        if gt(a, y) {
+                            out.push(y.clone());
+                            St::Merge3(l, r, cs)
+                        } else {
+                            out.push(a.clone());
+                            St::Merge3Y(l2, y, r, cs)
+                        }
+                    }
+                    None => {
+                        out.push(y.clone());
+                        St::Merge(r, cs)
+                    }
+                },
+                St::Merge4(l, r, cs, ds) => match (l.split_first(), r.split_first()) {
+                    (Some((a, l2)), Some((b, r2))) => {
+                        if gt(a, b) {
+                            St::Merge4X(b, l, r2, cs, ds)
+                        } else {
+                            St::Merge4X(a, l2, r, cs, ds)
+                        }
+                    }
+                    (None, _) => St::Merge3(r, cs, ds),
+                    (_, None) => St::Merge3(l, cs, ds),
+                },
+                St::Merge4X(x, l, r, cs, ds) => match (cs.split_first(), ds.split_first()) {
+                    (Some((c, cs2)), Some((d, ds2))) => {
+                        if gt(c, d) {
+                            St::Merge4XY(x, l, r, d, cs, ds2)
+                        } else {
+                            St::Merge4XY(x, l, r, c, cs2, ds)
+                        }
+                    }
+                    (None, _) => St::Merge3X(x, l, r, ds),
+                    (_, None) => St::Merge3X(x, l, r, cs),
+                },
+                // base tries `merge4Y as [] …` before `merge4Y [] bs …`.
+                St::Merge4Y(l, r, y, cs, ds) => match (l.split_first(), r.split_first()) {
+                    (Some((a, l2)), Some((b, r2))) => {
+                        if gt(a, b) {
+                            St::Merge4XY(b, l, r2, y, cs, ds)
+                        } else {
+                            St::Merge4XY(a, l2, r, y, cs, ds)
+                        }
+                    }
+                    (_, None) => St::Merge3Y(l, y, cs, ds),
+                    (None, _) => St::Merge3Y(r, y, cs, ds),
+                },
+                St::Merge4XY(x, l, r, y, cs, ds) => {
+                    if gt(x, y) {
+                        out.push(y.clone());
+                        St::Merge4X(x, l, r, cs, ds)
+                    } else {
+                        out.push(x.clone());
+                        St::Merge4Y(l, r, y, cs, ds)
+                    }
+                }
+            };
+        }
+    }
+    fn merge(gt: &mut dyn FnMut(&Value, &Value) -> bool, l: &[Value], r: &[Value]) -> Vec<Value> {
+        run(gt, St::Merge(l, r))
+    }
+    fn merge3(gt: &mut dyn FnMut(&Value, &Value) -> bool, a: &[Value], b: &[Value], c: &[Value]) -> Vec<Value> {
+        run(gt, St::Merge3(a, b, c))
+    }
+    fn merge4(
+        gt: &mut dyn FnMut(&Value, &Value) -> bool,
+        a: &[Value],
+        b: &[Value],
+        c: &[Value],
+        d: &[Value],
+    ) -> Vec<Value> {
+        run(gt, St::Merge4(a, b, c, d))
+    }
+    fn sequences(gt: &mut dyn FnMut(&Value, &Value) -> bool, xs: &[Value]) -> Vec<Vec<Value>> {
+        let mut runs = Vec::new();
+        let mut i = 0;
+        loop {
+            if xs.len() - i < 2 {
+                // `sequences xs = [xs]` — the one- or zero-element rest,
+                // so a list ending on a run boundary ends with `[]`.
+                runs.push(xs[i..].to_vec());
+                return runs;
+            }
+            let descending = gt(&xs[i], &xs[i + 1]);
+            let mut acc = vec![xs[i].clone()];
+            let mut cur = i + 1;
+            i += 2;
+            // `descending a as (b:bs) | a `gt` b` extends while the head
+            // is greater than the next; `ascending` while it is not.
+            while i < xs.len() && gt(&xs[cur], &xs[i]) == descending {
+                acc.push(xs[cur].clone());
+                cur = i;
+                i += 1;
+            }
+            acc.push(xs[cur].clone());
+            if descending {
+                acc.reverse();
+            }
+            runs.push(acc);
+        }
+    }
+    fn reduce_once(gt: &mut dyn FnMut(&Value, &Value) -> bool, xs: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+        match xs.len() {
+            0 | 1 => xs,
+            2 => vec![merge(gt, &xs[0], &xs[1])],
+            3 => vec![merge3(gt, &xs[0], &xs[1], &xs[2])],
+            5 => vec![merge(gt, &xs[0], &xs[1]), merge3(gt, &xs[2], &xs[3], &xs[4])],
+            6 => vec![merge3(gt, &xs[0], &xs[1], &xs[2]), merge3(gt, &xs[3], &xs[4], &xs[5])],
+            _ => {
+                let x = merge4(gt, &xs[0], &xs[1], &xs[2], &xs[3]);
+                let mut out = vec![x];
+                out.extend(reduce_once(gt, xs[4..].to_vec()));
+                out
+            }
+        }
+    }
+    match ns.len() {
+        0 | 1 => ns,
+        2 => merge(gt, &ns[0..1], &ns[1..2]),
+        3 => merge3(gt, &ns[0..1], &ns[1..2], &ns[2..3]),
+        4 => merge4(gt, &ns[0..1], &ns[1..2], &ns[2..3], &ns[3..4]),
+        _ => {
+            let mut runs = sequences(gt, &ns);
+            while runs.len() != 1 {
+                runs = reduce_once(gt, runs);
+            }
+            runs.pop().unwrap()
+        }
+    }
+}
+
 fn double_to_int_ghc(x: f64) -> i64 {
     if !x.is_finite() {
         return 0;
@@ -867,6 +1121,7 @@ fn apply(f: Value, arg: Value) -> Value {
 /// shallowest saturating call the evaluator implements).
 fn p_arity(p: &P) -> usize {
     match p {
+        P::SortBy => 2,
         P::Reverse
         | P::Length
         | P::Sum
@@ -1082,9 +1337,21 @@ fn call_builtin(p: &P, mut args: Vec<Value>) -> Value {
             apply(f, x)
         }
         P::Sort => {
-            let mut xs = as_list(&args[0]);
-            xs.sort_by(ghc_cmp); // Vec::sort_by is stable, like GHC's sort
-            Value::List(xs)
+            // base: `sort = actualSort (>)`
+            let xs = as_list(&args[0]);
+            Value::List(ghc_sort_gt(&mut ghc_gt, xs))
+        }
+        P::SortBy => {
+            // base: `sortBy cmp = actualSort (\x y -> cmp x y == GT)`
+            let xs = as_list(&args[1]);
+            let cmp = args[0].clone();
+            let mut gt = |a: &Value, b: &Value| {
+                matches!(
+                    apply(apply(cmp.clone(), a.clone()), b.clone()),
+                    Value::Ord3(std::cmp::Ordering::Greater)
+                )
+            };
+            Value::List(ghc_sort_gt(&mut gt, xs))
         }
         P::Elem => {
             let xs = as_list(&args[1]);
@@ -1488,7 +1755,12 @@ fn ghc_pow(x: f64, n: i64) -> f64 {
 /// for 0.1 <= |x| < 10^7, `d.ddde<n>` otherwise, always at least one digit
 /// after the point). The sign of a negative zero prints ("-0.0").
 fn ghc_show_double(x: f64) -> String {
-    assert!(x.is_finite(), "backend_fuzz: a non-finite Number (generator budget bug)");
+    if x.is_nan() {
+        // The sort probe's lists carry `0 / 0`; an infinity is still a
+        // generator-budget bug.
+        return "NaN".into();
+    }
+    assert!(x.is_finite(), "backend_fuzz: an infinite Number (generator budget bug)");
     let sign = if x.is_sign_negative() { "-" } else { "" };
     let mag = x.abs();
     if mag == 0.0 {
@@ -1543,8 +1815,10 @@ fn show_prec11(v: &Value) -> String {
     match v {
         Value::Int(n) if *n < 0 => format!("({})", n),
         Value::Integer(n) if *n < 0 => format!("({})", n),
-        // showSignedFloat: parenthesized when x < 0 or isNegativeZero x.
-        Value::Number(x) if x.is_sign_negative() => format!("({})", show_val(v)),
+        // showSignedFloat: parenthesized when x < 0 or isNegativeZero x —
+        // never a NaN, whatever its sign bit (`0 / 0` sets it on some
+        // hosts).
+        Value::Number(x) if !x.is_nan() && x.is_sign_negative() => format!("({})", show_val(v)),
         Value::Maybe(Some(_)) => format!("({})", show_val(v)),
         _ => show_val(v),
     }
@@ -2566,6 +2840,71 @@ impl Gen {
         }
     }
 
+    /// The sort probe (see the module header): `sort` or `sortBy` under a
+    /// comparator that may be no total order — `compare`, its flip, `if a
+    /// < b then GT else LT` (never EQ, and LT both ways on equals), `if a
+    /// == b then GT else compare a b` (GT both ways on equals), and the
+    /// constants — over a generated list at a showable element type, or
+    /// over a literal `Number` list carrying `0 / 0` among ordinary
+    /// atoms, where `sort`'s `>` and `sortBy compare`'s `compare` disagree
+    /// on every NaN pair. Returns the expression and its (list) type; the
+    /// caller prints it, so the NaN reaches nothing but the sort and show.
+    fn sort_probe(&mut self, depth: usize) -> (Expr, Ty) {
+        let nan_list = self.r.chance(1, 2);
+        let elem = if nan_list {
+            Ty::Number
+        } else {
+            loop {
+                let t = gen_ty(&mut self.r, 1, false);
+                if t.showable() {
+                    break t;
+                }
+            }
+        };
+        let xs = if nan_list {
+            let n = 2 + self.r.below(12);
+            let items = (0..n)
+                .map(|_| {
+                    if self.r.chance(1, 3) {
+                        Expr::NumLit { text: "(0 / 0)", value: f64::NAN }
+                    } else {
+                        self.number_atom()
+                    }
+                })
+                .collect();
+            Expr::ListLit(items)
+        } else {
+            self.expr(&Ty::list(elem.clone()), depth)
+        };
+        let ty = Ty::list(elem);
+        let pa = self.fresh_var();
+        let pb = self.fresh_var();
+        let va = || Expr::Var(pa.clone());
+        let vb = || Expr::Var(pb.clone());
+        let compare = |x: Expr, y: Expr| Expr::App(b(Expr::FunRef(P::Cmp)), vec![x, y]);
+        let lam = |body: Expr| Expr::Lam(vec![pa.clone(), pb.clone()], b(body));
+        use std::cmp::Ordering::*;
+        let cmp = match self.r.below(8) {
+            0 => return (Expr::Call(P::Sort, vec![xs]), ty),
+            1 => Expr::FunRef(P::Cmp),
+            2 => lam(compare(vb(), va())),
+            3 => lam(Expr::If(
+                b(Expr::Bin(Bin::Lt, b(va()), b(vb()))),
+                b(Expr::OrdLit(Greater)),
+                b(Expr::OrdLit(Less)),
+            )),
+            4 => lam(Expr::If(
+                b(Expr::Bin(Bin::Eq, b(va()), b(vb()))),
+                b(Expr::OrdLit(Greater)),
+                b(compare(va(), vb())),
+            )),
+            5 => lam(Expr::OrdLit(Greater)),
+            6 => lam(Expr::OrdLit(Less)),
+            _ => lam(Expr::OrdLit(Equal)),
+        };
+        (Expr::Call(P::SortBy, vec![cmp, xs]), ty)
+    }
+
     fn maybe_expr(&mut self, t: &Ty, depth: usize) -> Expr {
         match self.r.below(8) {
             0 => {
@@ -2961,8 +3300,15 @@ fn program_for(seed: u64, index: u64) -> (String, Vec<String>) {
 /// One printing statement: `print (e :: T)` at a random fun-free type, or
 /// `putStrLn` when the type came up String (the raw-output path, no show).
 fn emit_print(g: &mut Gen, body: &mut String, expected: &mut Vec<String>, env: &Env) {
-    let ty = gen_ty(&mut g.r, 2, false);
     let depth = 3 + g.r.below(3);
+    if g.r.chance(1, 5) {
+        let (e, ty) = g.sort_probe(depth);
+        let v = eval(&e, env);
+        body.push_str(&format!("    print ({} :: {})\n", render(&e), ty.render()));
+        expected.push(show_val(&v));
+        return;
+    }
+    let ty = gen_ty(&mut g.r, 2, false);
     let e = g.expr(&ty, depth);
     let v = eval(&e, env);
     if ty == Ty::Str && g.r.chance(1, 2) {
