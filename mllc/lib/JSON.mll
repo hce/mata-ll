@@ -701,10 +701,11 @@ hexDigitChar :: Int -> String
 hexDigitChar d = if d < 10 then strChar (48 + d) else strChar (87 + d)
 
 -- Local FFI bindings for the codecs (kept local to avoid polluting the
--- merged namespace with an LMath import). intToNum is the Int -> Number
--- conversion inside the double's exact window: tonumber hands the machine
--- integer back and the FFI boundary delivers it as a double.
-intToNum :: Int -> LuaPure "tonumber" Number
+-- merged namespace with an LMath import). intToNum is the runtime's
+-- Int -> Number conversion (GHC's int2Double): on Lua 5.3+ the machine
+-- integer becomes the double it denotes, on a doubles-only host the Int
+-- is canonicalized (`negate 0 :: Int` is -0.0 there, and encodes as 0).
+intToNum :: Int -> LuaPure "__mll_int_to_number" Number
 numFmod :: Number -> Number -> LuaPure "math.fmod" Number
 numFloor :: Number -> LuaPure "math.floor" Int
 numFormat :: String -> Number -> LuaPure "string.format" String

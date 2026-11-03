@@ -447,6 +447,48 @@ constant folding (§7) can then recognize them.
   subtype at the point a Number is shown (every corpus case runs under
   it), and the backend fuzzer's `Number` vocabulary compares against a
   strict IEEE reference with GHC's `show` layout.
+- **An Int has no sign of zero.** GHC's `Int` is an integer with one
+  zero. On Lua 5.3+ so is mata-ll's (the integer subtype); on a
+  doubles-only host (LuaJIT) an `Int` is a double, and `negate 0`,
+  `0 * (-5)`, the floor division of 0 by a negative and `math.ceil(-0.5)`
+  compute -0.0 — in the runtime's `negate_Int`/`div_Int` and in the
+  inline arithmetic codegen emits for Int alike. The producers stay as
+  they are (Int is the performance escape hatch; `negate`, `*`, `div` are
+  hot and partly inlined), because every Int OPERATION is blind to the
+  sign: `==`, `<`, `+`, `%`, table indexing (Lua stores -0.0 under the
+  key 0) all treat the two zeros as one value. The sign is visible only
+  where the value leaves Int, and each such observer canonicalizes
+  through `__mll_int_to_number(x) = x + 0.0` (IEEE: the sum of
+  opposite-signed zeros is +0 under round-to-nearest; every other double
+  is unchanged; LuaJIT's trace compiler does not fold `x + 0.0` away, for
+  exactly this reason; on Lua 5.3+ the same expression is `int2Double`):
+  - text: `__mll_show_integer` (behind `show_Int`, `showsPrec_Int`, every
+    derived and structural show at Int, Data.Map's key show) formats the
+    canonical double with `%.0f`; the erased `show`'s number branch calls
+    `__mll_show_integer` for every number it cannot prove a Double, so a
+    whole double on LuaJIT prints as an Int there (a `-0.0` Number that
+    reaches the erased path prints as `0`, the documented erased-show
+    limit). `__mll_shows_prec` and `__mll_show_arg` parenthesize on the
+    string's leading `-`, so `(-0)` cannot arise once the string is `0`;
+  - the Number conversions: `fromIntegral`/`fromInteger . toInteger` and
+    `toEnum` at Int -> Number lift through the Integer box
+    (`fromInteger_Integer` maps every zero to the one `__int_zero`, and
+    `__int_to_double` of it is +0.0), and the JSON library's `intToNum`
+    IS `__mll_int_to_number` (its old `tonumber` binding handed the sign
+    through, so `toJSON (negate 0 :: Int)` encoded as `-0`);
+  - `read`: `__mll_read_item_int` applies the sign as `0 - v`, so
+    `read "-0" :: Int` is +0 and `read . show` is the identity;
+  - map keys: `__mll_key_scalar` encodes a doubles-only -0.0 as the key
+    `0` by hand, and the scalar store's Lua table indexes -0.0 as 0;
+  - `string.format("%d")` (the Integer renderer's groups, JSON's integral
+    double path) prints `0` for -0.0 on both hosts.
+  Not canonicalized: an Int crossing the FFI boundary to the host (an
+  argument, an exported function's result, a LuaDict field) is the Lua
+  number as it is; the host can print `-0` with `tostring` (CAVEATS, "Int
+  overflow wraps silently"). On Lua 5.3+ nothing changes: an Int is never
+  a -0.0 there, and a float-subtype Int zero formatted as `"0"` either
+  way. Pinned by the GHC-goldened `int_sign_of_zero` (identical lines on
+  both hosts) and the self-asserting `int_sign_of_zero_boundary`.
 - **First-class operators** (`opfunc_value`): a first-class `(op)` is
   the value of whatever `op` denotes, decided once in the monomorphizer
   (the main walk and the dictionary rewrite call it from their `OpFunc`

@@ -101,6 +101,7 @@ cases/hm_lookup_case_fused	HashMap builtins (Lua tables)
 cases/hm_lookup_lazy_operands	HashMap builtins (Lua tables)
 cases/import_dual_forms	qualified import: twin module resolution gap (Q77 seam)
 cases/import_merge	qualified import: twin module resolution gap (Q77 seam)
+cases/int_sign_of_zero_boundary	HashMap builtins, JSON FFI library
 cases/int_subtype_keys	FFI declarations (ffi_tonumber_float)
 cases/integer_json	Generics substrate + JSON FFI library
 cases/json_codec	JSON FFI library

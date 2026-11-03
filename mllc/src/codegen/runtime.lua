@@ -1220,15 +1220,33 @@ do
     end
 end
 
+-- The Int -> Number conversion of a machine number (GHC's int2Double),
+-- and the canonical double of an Int on a doubles-only host. An Int has
+-- no sign of zero (GHC's Int is an integer), but on LuaJIT an Int is a
+-- double and its zero has two spellings: `negate 0`, `0 * (-5)`,
+-- `0 `div` (-5)`, `truncate (-0.5)` all compute -0.0 (the producers stay
+-- as they are — Int arithmetic is inlined and hot). Every Int operation is
+-- blind to the difference (==, compare, +, table indexing), so the sign
+-- shows only where the value leaves Int: text formatting (%.0f and
+-- tostring print "-0") and the Number it converts to (1 / -0.0 is
+-- -Infinity). Those observers go through this function first: adding +0.0
+-- turns -0.0 into +0.0 (IEEE 754: the sum of opposite-signed zeros is +0
+-- under round-to-nearest; LuaJIT's trace compiler does not fold `x + 0.0`
+-- away, precisely because of -0.0) and leaves every other double as it
+-- is. On Lua 5.3+ the same expression is the integer-to-float conversion
+-- (exact below 2^53, the nearest double beyond it, as GHC's int2Double).
+local function __mll_int_to_number(x) return x + 0.0 end
 -- Int-position number show. On Lua 5.3+ an Int value is a native
 -- integer and tostring is exact; a whole float (LuaJIT has only doubles)
--- prints via %.0f so large magnitudes never fall into e-notation.
+-- prints via %.0f so large magnitudes never fall into e-notation, from
+-- its canonical double (GHC prints every zero Int as "0"). The erased
+-- `show` below takes this route for every number it cannot prove a Double.
 local function __mll_show_integer(x)
     if math.type ~= nil and math.type(x) == "integer" then return tostring(x) end
     if x ~= x or x == math.huge or x == -math.huge or x % 1 ~= 0 then
         return __mll_show_double(x)
     end
-    return string.format("%.0f", x)
+    return string.format("%.0f", __mll_int_to_number(x))
 end
 
 -- Primitives that require Lua runtime dispatch
@@ -1278,17 +1296,11 @@ local function show(x)
     if type(x) == "number" then
         -- Type-erased dispatch: a native integer (Lua 5.3+) is an Int,
         -- a float a Double. On LuaJIT (doubles only) a whole number prints
-        -- integer-style — the erased path cannot distinguish 1 :: Int
-        -- from 1.0 :: Double there; the type-directed show_Number path can
-        -- and does.
-        if math.type ~= nil then
-            if math.type(x) == "integer" then return tostring(x) end
-            return __mll_show_double(x)
-        end
-        if x ~= x or x == math.huge or x == -math.huge or x % 1 ~= 0 then
-            return __mll_show_double(x)
-        end
-        return string.format("%.0f", x)
+        -- integer-style through the Int show — the erased path cannot
+        -- distinguish 1 :: Int from 1.0 :: Double there (a -0.0 prints as
+        -- the Int 0); the type-directed show_Number path can and does.
+        if math.type ~= nil and math.type(x) == "float" then return __mll_show_double(x) end
+        return __mll_show_integer(x)
     elseif type(x) == "string" then return __mll_show_string(x)
     elseif type(x) == "boolean" then
         if x then return "True" else return "False" end

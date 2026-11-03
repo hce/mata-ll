@@ -89,6 +89,19 @@ the compiler spells it so every host reads it exactly — a constant-folded
 compare correctly on LuaJIT; `minBound + 1`, `maxBound` and the wrap of
 `negate minBound` are where the 2^53 limit shows.
 
+A doubles-only host also has two spellings of the `Int` zero: `negate 0`,
+`0 * (-5)`, ``0 `div` (-5)``, `ceiling (-0.5)` and `truncate (-0.5)`
+compute IEEE's -0.0 there (Lua 5.3+ computes the integer 0). It is the
+`Int` 0 — `==`, `compare`, arithmetic and table indexing cannot tell the
+two apart, and neither can a program: `show` prints `0` (GHC's `Int` has
+one zero), `fromIntegral`/`toEnum` at `Number` give `0.0` (so `1 /
+fromIntegral x` is `Infinity`), `read . show` is the identity, the JSON
+library encodes `0`, a `Data.Map`/`HashMap` key reads back as `0`. The one
+place the spelling survives is the FFI boundary: an `Int` argument or
+result handed to the host is the Lua number as it is, so a host-side
+`tostring` or `..` of such a value prints `-0` on LuaJIT (the host's
+`string.format("%d", x)` prints `0`, and a host table indexes it as 0).
+
 A second consequence of LuaJIT's doubles-only representation: the
 LAST-RESORT type-erased `show` — the runtime dispatch used only when the
 compiler cannot resolve a type at all (a genuinely polymorphic position

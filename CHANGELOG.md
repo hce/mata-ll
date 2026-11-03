@@ -44,6 +44,43 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **An `Int` has no sign of zero on a doubles-only host either: a `-0.0`
+  `Int` shows as `0` and converts to the `Number` `0.0`.** On LuaJIT an
+  `Int` is a double, and `negate 0`, `0 * (-5)`, ``0 `div` (-5)``,
+  `ceiling (-0.5)` and `truncate (-0.5)` compute -0.0 there (`math.ceil`
+  returns it; Lua 5.3+ returns the integer 0). GHC's `Int` is an integer
+  with one zero and every spelling prints `0`; mata-ll printed `-0`
+  through every show route — `print (negate z)` with `z = length []`,
+  `[negate z, 1]` as `[-0,1]`, a derived-Show field `rx = -0`, `Just
+  (-0)`, `showsPrec 7` parenthesizing it as `(-0)`, a range `[negate z ..
+  2]` as `[-0,1,2]`, a Data.Map key, `show (negate z) == "0"` as `False`
+  — and the JSON library's Int encoder wrote `-0` (its `intToNum` was a
+  bare `tonumber`, so `toJSON (negate 0 :: Int)` encoded as `-0`, alone,
+  in a list, under `Maybe` and in a derived encoder; aeson writes `0`).
+  The producers stay as they are (Int arithmetic is inlined and hot); the
+  observers canonicalize through one runtime helper,
+  `__mll_int_to_number` — `x + 0.0`: the sum of opposite-signed zeros is
+  +0 under IEEE round-to-nearest and every other double is unchanged, and
+  on Lua 5.3+ the same expression is the integer-to-float conversion,
+  GHC's `int2Double` — which is now the JSON library's Int -> Number
+  conversion and the double `__mll_show_integer` formats; the erased
+  `show`'s number branch, which duplicated that formatter, calls it. The
+  other observers already answered as GHC: `fromIntegral`/`toEnum` at
+  Int -> Number lift through the Integer box (`1 / fromIntegral (truncate
+  (-0.5))` was `Infinity`), `read "-0" :: Int` applies its sign as `0 -
+  v`, the structural key encoder spells -0.0 as the key `0` and a Lua
+  table indexes -0.0 and 0.0 as one slot, `==`/`compare`/`signum`/
+  `toInteger`/`even` are sign-blind, and `%d` prints `0`. An Int crossing
+  the FFI to the host stays the Lua number it is — a host-side `tostring`
+  of such a value prints `-0` on LuaJIT (documented in CAVEATS under "Int
+  overflow wraps silently"). Lua 5.3+ output is byte-identical: its Int is
+  the integer subtype and never a -0.0. Found by the 2026-10 fresh-eyes
+  review (N9, M10). (GHC-goldened case `int_sign_of_zero`, the same lines
+  on both hosts; self-asserting `int_sign_of_zero_boundary` for the
+  HashMap builtins and the JSON routes; the backend fuzzer's Int
+  vocabulary has `negate`/`abs`/`signum`, `div`/`mod` by a negative
+  literal and `truncate`/`ceiling`/`floor`/`round` of a literal — the
+  -0.0 producers — oracled against GHC's definitions.)
 - **`read` at `Int`, `Integer`, `Number`, `Bool` and `String` is GHC's
   grammar, read by one shared lexer.** The five readers were hand-written
   pattern sets that disagreed with GHC in both directions: `read
@@ -183,9 +220,7 @@ API of the `mllc` library crate.)
   that refuses the integer subtype, and the backend fuzzer's vocabulary now
   has `Number` — integer-syntax literals (`-0`, 2^53+1, 2^62, 3037000500),
   `/`, `^`, `fromIntegral`, `sum`, Number map keys, GHC's `show` layout for
-  doubles. Alongside: an `Int` that is a doubles-only host's `-0.0`
-  (`negate 0` through a dictionary, `truncate (-0.5)` on LuaJIT) showed as
-  `-0`; it shows as `0`. Found by the 2026-10 fresh-eyes review (N1, H4).
+  doubles. Found by the 2026-10 fresh-eyes review (N1, H4).
   (GHC-goldened cases `number_double_invariant` and `number_map_keys`;
   self-asserting `number_host_boundary` for the FFI, map-builtin and JSON
   boundaries on both hosts.)

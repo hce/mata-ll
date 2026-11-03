@@ -192,6 +192,8 @@ mll_test!(dict_nullary_field_thunk, "dict_nullary_field_thunk.mll");
 // literals at Number, the folder, read/fromIntegral, the FFI boundary, the
 // JSON parser and Number map keys all deliver the float subtype.
 mll_test!(number_double_invariant, "number_double_invariant.mll");
+mll_test!(int_sign_of_zero, "int_sign_of_zero.mll");
+mll_test!(int_sign_of_zero_boundary, "int_sign_of_zero_boundary.mll");
 mll_test!(number_map_keys, "number_map_keys.mll");
 mll_test!(number_host_boundary, "number_host_boundary.mll");
 // G1: locals shadow dict-passing globals in the dictionary rewrite passes

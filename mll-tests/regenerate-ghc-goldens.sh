@@ -52,6 +52,7 @@ excluded_reason() {
         # -- FFI / Lua-runtime surfaces: not expressible under GHC ------------
         cases/any_type)                  echo "builtin Any (Lua dynamic value carrier)";;
         cases/int_subtype_keys)          echo "FFI declarations (ffi_tonumber_float)";;
+        cases/int_sign_of_zero_boundary) echo "HashMap builtins, JSON FFI library";;
         cases/number_host_boundary)      echo "FFI declarations, HashMap builtins, JSON FFI library";;
         cases/any_ffi_marshal)           echo "LuaPure FFI declarations marshalling the builtin Any";;
         cases/bytestring)                echo "ByteString builtins (Lua byte strings)";;

@@ -149,7 +149,12 @@ in GHC, which warns); on a doubles-only host that value is exact when it
 is a double (`minBound` is) and rounds past 2^53 like every other `Int`
 there. On such a host `fromInteger`/`fromIntegral` at `Int` narrows an
 `Integer` past 2^53 to the nearest double — the same correctly rounded
-value the `Number` target gets — rather than wrapping.
+value the `Number` target gets — rather than wrapping. Its `Int`
+arithmetic can also compute IEEE's -0.0 (`negate 0`, `0 * (-5)`,
+`truncate (-0.5)`); that value is the `Int` 0 exactly as in GHC — it
+shows as `0`, converts to `0.0`, reads back from a map as `0` — and only
+a host that receives it across the FFI can see the sign (CAVEATS.md,
+"Int overflow wraps silently").
 
 Numeric defaulting is GHC's implicit `default (Integer, Number)` (`Number`
 is GHC's `Double`), so an unannotated literal used only in integer

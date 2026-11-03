@@ -52,6 +52,13 @@
 //! third of them with a zero step) are oracled against base's own
 //! `eftInt`/`efdtInt`/`enumDeltaToInteger`, so the direction rule
 //! (upward iff `b >= a`) has a standing probe beside the hand corpus.
+//! At Int, `negate`/`abs`/`signum`, `div`/`mod` by a negative literal and
+//! `truncate`/`ceiling`/`floor`/`round` of a Number literal are the shapes
+//! that compute a -0.0 Int on a doubles-only host (N9); the batch itself
+//! runs in-process under mlua's Lua 5.4, whose Int is the integer subtype,
+//! so here they oracle the wrapping negate, the floor division's sign rule
+//! and GHC's half-to-even `round` — the sign-of-zero half is pinned by the
+//! corpus case `int_sign_of_zero` under lua-compat.sh on LuaJIT.
 //! `read (show e) :: T` at every scalar type (Int, Integer, Number, Bool,
 //! String — negative numbers, exponent-form doubles, escaped strings) is
 //! the identity on the reference side and runs mata-ll's `show` and its
@@ -280,6 +287,17 @@ enum P {
     AbsI,
     Even,
     Odd,
+    // --- Int: the shapes that compute a -0.0 Int on a doubles-only host
+    // (negate of a zero, the sign-dependent `signum`/`abs`, and the
+    // Number -> Int roundings of a small negative; the floor division of
+    // zero by a negative literal lives in DivMod) ---
+    NegateInt,
+    AbsInt,
+    SignumInt,
+    Truncate, // truncate/ceiling/floor/round :: Number -> Int, LITERAL operand
+    Ceiling,
+    Floor,
+    Round,
     // --- Number (GHC's Double) ---
     SumN,          // sum :: [Number] -> Number
     NegateN,
@@ -321,8 +339,10 @@ enum Expr {
     Var(String),
     Not(Box<Expr>),
     Bin(Bin, Box<Expr>, Box<Expr>),
-    /// `div`/`mod` with a POSITIVE LITERAL divisor (totality). Works at
-    /// Int and Integer; the evaluator dispatches on the operand value.
+    /// `div`/`mod` with a NONZERO LITERAL divisor (totality): positive at
+    /// Integer, either sign at Int, never -1 (GHC raises an overflow
+    /// exception for `minBound `div` (-1)` where Lua's `//` wraps). Works
+    /// at Int and Integer; the evaluator dispatches on the operand value.
     DivMod(bool, Box<Expr>, i64),
     If(Box<Expr>, Box<Expr>, Box<Expr>),
     ListLit(Vec<Expr>),
@@ -467,7 +487,7 @@ fn render(e: &Expr) -> String {
             "({} `{}` {})",
             render(l),
             if *is_div { "div" } else { "mod" },
-            d
+            if *d < 0 { format!("({})", d) } else { d.to_string() }
         ),
         Expr::If(c, t, f) => format!(
             "(if {} then {} else {})",
@@ -588,6 +608,13 @@ fn p_name(p: &P) -> &'static str {
         P::AbsI => "abs",
         P::Even => "even",
         P::Odd => "odd",
+        P::NegateInt => "negate",
+        P::AbsInt => "abs",
+        P::SignumInt => "signum",
+        P::Truncate => "truncate",
+        P::Ceiling => "ceiling",
+        P::Floor => "floor",
+        P::Round => "round",
         P::SumN => "sum",
         P::NegateN => "negate",
         P::AbsN => "abs",
@@ -739,6 +766,14 @@ fn ghc_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
     }
 }
 
+/// GHC's `div` at Int: the quotient rounded toward negative infinity.
+/// Rust's `/` truncates toward zero; the quotient is one less when the
+/// division is inexact and the operands' signs differ.
+fn floor_div(n: i64, d: i64) -> i64 {
+    let q = n / d;
+    if n % d != 0 && ((n < 0) != (d < 0)) { q - 1 } else { q }
+}
+
 /// Numeric ops dispatch on the value: Int is the host machine integer
 /// (wrapping, like the Lua 5.4 emission), Integer is exact (checked —
 /// the generator's budget keeps it in range; see Value::Integer), Number
@@ -818,6 +853,13 @@ fn p_arity(p: &P) -> usize {
         | P::AbsI
         | P::Even
         | P::Odd
+        | P::NegateInt
+        | P::AbsInt
+        | P::SignumInt
+        | P::Truncate
+        | P::Ceiling
+        | P::Floor
+        | P::Round
         | P::SumN
         | P::NegateN
         | P::AbsN
@@ -1059,6 +1101,20 @@ fn call_builtin(p: &P, mut args: Vec<Value>) -> Value {
             as_list(&args[0]).iter().map(as_str).collect::<Vec<_>>().concat(),
         ),
         P::ToInteger => Value::Integer(as_int(&args[0]) as i128),
+        // --- Int: GHC's Num/RealFrac at Int. negate and abs wrap at
+        // minBound like the host's integer arithmetic; signum is -1/0/1.
+        // The roundings take a literal operand (every Number atom is
+        // below 2^63, so the i64 conversion is exact); `round` is GHC's
+        // half-to-even. On a doubles-only host each of these can compute
+        // the -0.0 Int (`negate 0`, `truncate (-0.5)`), which must show
+        // as the reference's `0`.
+        P::NegateInt => Value::Int(as_int(&args[0]).wrapping_neg()),
+        P::AbsInt => Value::Int(as_int(&args[0]).wrapping_abs()),
+        P::SignumInt => Value::Int(as_int(&args[0]).signum()),
+        P::Truncate => Value::Int(as_number(&args[0]).trunc() as i64),
+        P::Ceiling => Value::Int(as_number(&args[0]).ceil() as i64),
+        P::Floor => Value::Int(as_number(&args[0]).floor() as i64),
+        P::Round => Value::Int(as_number(&args[0]).round_ties_even() as i64),
         P::NegateI => match &args[0] {
             Value::Integer(n) => Value::Integer(-n),
             v => panic!("negate at Integer on {v:?}"),
@@ -1173,15 +1229,20 @@ fn eval(e: &Expr, env: &Env) -> Value {
             }
         }
         Expr::DivMod(is_div, l, d) => match eval(l, env) {
-            // Haskell floor division/modulo. The divisor is a positive
-            // literal by construction, where div_euclid == floor division
-            // and rem_euclid == Haskell mod.
+            // Haskell's `div`/`mod`: floor division, the remainder taking
+            // the divisor's sign (Euclid's `div_euclid` agrees only for a
+            // positive divisor). |d| >= 2, so the truncating quotient
+            // cannot overflow.
             Value::Int(n) => {
-                Value::Int(if *is_div { n.div_euclid(*d) } else { n.rem_euclid(*d) })
+                Value::Int(if *is_div { floor_div(n, *d) } else { n - floor_div(n, *d) * *d })
             }
             Value::Integer(n) => {
                 let d = *d as i128;
-                Value::Integer(if *is_div { n.div_euclid(d) } else { n.rem_euclid(d) })
+                let q = {
+                    let q = n / d;
+                    if n % d != 0 && ((n < 0) != (d < 0)) { q - 1 } else { q }
+                };
+                Value::Integer(if *is_div { q } else { n - q * d })
             }
             v => panic!("div/mod on {v:?}"),
         },
@@ -1904,6 +1965,8 @@ impl Gen {
             ("0.5", 0.5),
             ("2.5", 2.5),
             ("-1.5", -1.5),
+            ("-0.5", -0.5),
+            ("-0.25", -0.25),
             ("0.1", 0.1),
             ("1e-3", 1e-3),
             ("1.5e3", 1.5e3),
@@ -2050,7 +2113,7 @@ impl Gen {
     }
 
     fn int_expr(&mut self, depth: usize) -> Expr {
-        match self.r.below(13) {
+        match self.r.below(16) {
             0 | 1 | 2 => {
                 let op = [Bin::Add, Bin::Sub, Bin::Mul][self.r.below(3)];
                 Expr::Bin(
@@ -2120,7 +2183,29 @@ impl Gen {
                 let m = self.expr(&mty, depth - 1);
                 Expr::Call(P::HmSize, vec![m])
             }
+            10 => {
+                let p = [P::NegateInt, P::AbsInt, P::SignumInt][self.r.below(3)].clone();
+                Expr::Call(p, vec![self.expr(&Ty::Int, depth - 1)])
+            }
+            11 => {
+                // A NEGATIVE literal divisor, -2 .. -9: `0 `div` (-5)` is
+                // a -0.0 Int on a doubles-only host, and the remainder
+                // takes the divisor's sign.
+                Expr::DivMod(
+                    self.r.chance(1, 2),
+                    b(self.expr(&Ty::Int, depth - 1)),
+                    -(2 + self.r.below(8) as i64),
+                )
+            }
             12 => self.read_show(&Ty::Int, depth),
+            13 => {
+                // Number -> Int on a literal: the atom set has the ties
+                // (0.5, 2.5, -1.5, -0.5), the small negatives whose
+                // ceiling/truncation/rounding is a zero (-0.5, -0.25, `-0`)
+                // and the big integer spellings up to 2^62.
+                let p = [P::Truncate, P::Ceiling, P::Floor, P::Round][self.r.below(4)].clone();
+                Expr::Call(p, vec![self.number_atom()])
+            }
             _ => self.atom(&Ty::Int),
         }
     }
