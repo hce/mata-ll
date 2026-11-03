@@ -44,6 +44,37 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A map read whose key reads another version of the same map answers
+  for the version it was asked about.** `M.lookup (2, M.size m2) m1` with
+  `m1 = M.fromList [((1, 1), "a")]` and `m2 = M.insert (2, 2) "b" m1` was
+  `Just "b"` and `M.member (2, M.size m2) m1` was `True` (GHC `Nothing`
+  and `False`: `(2, 2)` is not in m1); the mirror shape `n2 = M.delete (2,
+  2) n1; M.lookup (2, M.size n1) n2` was `Just "b"` (GHC `Nothing`), and
+  `findWithDefault`, `insertWith`, `adjust` and `Data.Set.member` with
+  such a key followed, since they go through the same lookup. Maps are
+  diff+reroot handles over one shared store per version family, and
+  reading an old version reroots that store onto it; the structural-key
+  readers fetched the store first and encoded the key second, and
+  encoding a structural key forces its components — a component that
+  reads the sibling version rerooted the store the reader was already
+  holding, so the index hit the other version's content. The readers now
+  encode the key before they fetch the store, the order the writes always
+  had, and the HashMap runtime states the rule every operation on a
+  version obeys: everything that can run user code — forcing the handle,
+  forcing the key and value, encoding the key — happens before the store
+  is fetched, and nothing that can force a thunk stands between the fetch
+  and the index. The scalar, Number-flavored and fused case-of-lookup
+  readers already forced the key first and are unchanged. Found by the
+  2026-10 fresh-eyes review (H1). (GHC-goldened case
+  `hashmap_read_key_reroot`: tuple, list, Maybe and nested keys, scalar
+  Int/String/Bool and Number keys, a `Hashable`-constrained body, an
+  existential key in the dictionary-routed world, `Data.Set`, and the
+  lookup-based Data.Map readers, each read in both directions; the
+  `hashmap_enum_reroot` case gains the same shapes over the `hm*`
+  builtins including the fused `case hmLookup k m of`; the backend
+  fuzzer's map vocabulary gains the versioned-key probe — a read on one
+  version of a family with a key computed from `hmSize` of another.)
+
 - **`*>` and `<*` exist, as Applicative class methods with base's
   definitions and fixity, and `Data.Map.intersection`/`difference` take
   two value types, as containers' do.** `Just 1 *> Just 2` was "Unbound

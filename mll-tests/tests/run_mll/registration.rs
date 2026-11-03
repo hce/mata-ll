@@ -714,6 +714,11 @@ mll_test!(hashmap_versions, "hashmap_versions.mll");
 // OTHER versions of the same family: the force reroots the shared store,
 // so enumeration must snapshot first. Also pins compare-on-NaN = GT.
 mll_test!(hashmap_enum_reroot, "hashmap_enum_reroot.mll");
+// A read whose KEY reads another version of the same family (H1): the
+// structural encoder forces the key's components, and that force reroots
+// the shared store, so every reader encodes the key before it fetches the
+// store. All reader families, both directions, through Data.Map/Data.Set.
+mll_test!(hashmap_read_key_reroot, "hashmap_read_key_reroot.mll");
 // A discarded `pure x`/`return x` in every spelling (`return $ e` once
 // emitted a bare payload as a Lua statement — a load failure).
 mll_test!(pure_discard_spellings, "pure_discard_spellings.mll");

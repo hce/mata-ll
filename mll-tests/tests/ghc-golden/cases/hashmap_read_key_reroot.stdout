@@ -1,0 +1,37 @@
+Nothing
+False
+Nothing
+"none"
+[((1,1),"a"),((2,2),"z")]
+[((1,1),"a")]
+Just "a"
+1
+Nothing
+False
+Just "a"
+Nothing
+(Nothing,False)
+(Nothing,False)
+Nothing
+Just "c"
+(Nothing,False)
+"miss"
+"hit a"
+(Nothing,False)
+(Nothing,False)
+(Nothing,False)
+(Nothing,False)
+(Nothing,False)
+(Nothing,False)
+(Nothing,False)
+Nothing
+False
+Nothing
+Nothing
+Nothing
+Nothing
+Nothing
+False
+True
+([(1,1)],[(1,1),(2,2)])
+([((1,1),"a")],[((1,1),"a"),((2,2),"b")],[((1,1),"a"),((2,2),"b")],[((1,1),"a")])

@@ -239,6 +239,17 @@ fn gen_ty(r: &mut Rng, depth: usize, fun_ok: bool) -> Ty {
     }
 }
 
+/// A random STRUCTURAL HashMap key type: a list, pair or Maybe of key
+/// types — the shapes the encoded store serves, whose encoding forces the
+/// key's components (the versioned-key probe leans on these).
+fn gen_structural_key_ty(r: &mut Rng) -> Ty {
+    match r.below(3) {
+        0 => Ty::list(gen_key_ty(r, 1)),
+        1 => Ty::pair(gen_key_ty(r, 1), gen_key_ty(r, 1)),
+        _ => Ty::Maybe(Box::new(gen_key_ty(r, 1))),
+    }
+}
+
 /// A random HashMap KEY type (see Ty::keyable).
 fn gen_key_ty(r: &mut Rng, depth: usize) -> Ty {
     if depth == 0 || r.chance(1, 2) {
@@ -2242,15 +2253,25 @@ impl Gen {
     /// persistent representation must honor.
     fn hm_expr(&mut self, k: &Ty, v: &Ty, depth: usize) -> Expr {
         let mty = Ty::hm(k.clone(), v.clone());
+        // A write's key may read a map version in scope (a third of the
+        // time one is there): the writes encode the key before they touch
+        // the store, and this keeps that order probed too (hm_sibling_key).
+        let sibling = if self.r.chance(1, 3) { self.scoped_map(&mty) } else { None };
         match self.r.below(8) {
             0 | 1 => {
-                let key = self.hm_key_expr(k, depth - 1);
+                let key = match &sibling {
+                    Some(other) => self.hm_sibling_key(k, other),
+                    None => self.hm_key_expr(k, depth - 1),
+                };
                 let val = self.expr(v, depth - 1);
                 let m = self.expr(&mty, depth - 1);
                 Expr::Call(P::HmInsert, vec![key, val, m])
             }
             2 => {
-                let key = self.expr(k, depth - 1);
+                let key = match &sibling {
+                    Some(other) => self.hm_sibling_key(k, other),
+                    None => self.expr(k, depth - 1),
+                };
                 let m = self.expr(&mty, depth - 1);
                 Expr::Call(P::HmDelete, vec![key, m])
             }
@@ -2271,6 +2292,148 @@ impl Gen {
             ),
             _ => Expr::Annot(b(Expr::Call(P::HmEmpty, vec![])), mty),
         }
+    }
+
+    /// A map variable of type `mty` in scope, if any (the hm sites use it
+    /// as the SIBLING version a key reads — see `hm_sibling_key`).
+    fn scoped_map(&mut self, mty: &Ty) -> Option<String> {
+        let hits: Vec<&(String, Ty)> =
+            self.scope.iter().filter(|(_, t)| t == mty).collect();
+        if hits.is_empty() {
+            return None;
+        }
+        let i = self.r.below(hits.len());
+        Some(hits[i].0.clone())
+    }
+
+    /// A key of type `k` whose scalar leaves are all computed from
+    /// `hmSize other` — `other` a map variable of the SAME family as the
+    /// map the key is used against (H1). Encoding a structural key forces
+    /// its components, and this component reads another version, which
+    /// reroots the family's shared store in the middle of the read: a
+    /// reader that fetched the store before encoding answered for the
+    /// wrong version. A scalar key is forced before the call, so the
+    /// scalar shapes pin that the read stays right there too. The sizes
+    /// are small (0..4), so the keys land among the atoms often enough to
+    /// hit.
+    fn hm_sibling_key(&mut self, k: &Ty, other: &str) -> Expr {
+        let size = Expr::Call(P::HmSize, vec![Expr::Var(other.to_string())]);
+        match k {
+            Ty::Int => {
+                if self.r.chance(1, 2) {
+                    size
+                } else {
+                    Expr::Bin(Bin::Add, b(size), b(Expr::IntLit(self.r.below(3) as i64 - 1)))
+                }
+            }
+            Ty::Number => Expr::Annot(
+                b(Expr::Call(P::FromIntegralN, vec![size])),
+                Ty::Number,
+            ),
+            Ty::Str => Expr::Call(P::ShowP, vec![Expr::Annot(b(size), Ty::Int)]),
+            Ty::Bool => Expr::Call(P::Even, vec![size]),
+            Ty::List(t) => {
+                let head = self.hm_sibling_key(t, other);
+                if self.r.chance(1, 2) {
+                    Expr::ListLit(vec![head])
+                } else {
+                    Expr::Cons(b(head), b(self.atom(k)))
+                }
+            }
+            Ty::Pair(a, bt) => match self.r.below(3) {
+                0 => Expr::MkPair(b(self.hm_sibling_key(a, other)), b(self.atom(bt))),
+                1 => Expr::MkPair(b(self.atom(a)), b(self.hm_sibling_key(bt, other))),
+                _ => Expr::MkPair(
+                    b(self.hm_sibling_key(a, other)),
+                    b(self.hm_sibling_key(bt, other)),
+                ),
+            },
+            Ty::Maybe(t) => Expr::Just(b(self.hm_sibling_key(t, other))),
+            Ty::Integer | Ty::Ordering | Ty::Fun(..) | Ty::Hm(..) => {
+                unreachable!("not a key type: {k:?}")
+            }
+        }
+    }
+
+    /// A literal key for a write in the versioned-key probe: an atom (a
+    /// Number scalar through the no-negative-zero atom, as `hm_key_expr`).
+    fn hm_literal_key(&mut self, k: &Ty) -> Expr {
+        if *k == Ty::Number {
+            self.number_key_atom()
+        } else {
+            self.atom(k)
+        }
+    }
+
+    /// The MIRROR of a literal key `kw`: the same key value, spelled so
+    /// that evaluating it reads `hmSize other` first — every literal leaf
+    /// `L` becomes `if hmSize other < 0 then <another atom> else L` (a
+    /// size is never negative, so the value is `L`; a leafless `[]` or
+    /// `Nothing` is wrapped whole). Used against the version the write of
+    /// `kw` did NOT produce, the mirror is exactly the key on which the two
+    /// versions differ, so a read that answers for the wrong version is
+    /// caught every time, not only when a random key happens to collide.
+    fn hm_mirror_key(&mut self, kw: &Expr, k: &Ty, other: &str) -> Expr {
+        let wrap = |g: &mut Self, e: Expr, ty: &Ty| {
+            let size = Expr::Call(P::HmSize, vec![Expr::Var(other.to_string())]);
+            let alt = g.hm_literal_key(ty);
+            Expr::If(b(Expr::Bin(Bin::Lt, b(size), b(Expr::IntLit(0)))), b(alt), b(e))
+        };
+        match (kw, k) {
+            (Expr::ListLit(xs), Ty::List(t)) if !xs.is_empty() => Expr::ListLit(
+                xs.iter().map(|x| self.hm_mirror_key(x, t, other)).collect(),
+            ),
+            (Expr::MkPair(a, x), Ty::Pair(ta, tx)) => Expr::MkPair(
+                b(self.hm_mirror_key(a, ta, other)),
+                b(self.hm_mirror_key(x, tx, other)),
+            ),
+            (Expr::Just(x), Ty::Maybe(t)) => Expr::Just(b(self.hm_mirror_key(x, t, other))),
+            _ => wrap(self, kw.clone(), k),
+        }
+    }
+
+    /// The versioned-KEY read probe (H1): a base map and one derivation of
+    /// it (an insert or a delete of a literal key, so the two are one
+    /// version family differing on that key), then `p` (hmLookup or
+    /// hmMember) on one of them with a key that reads the OTHER — the key
+    /// is encoded while the read runs, and the encoding reroots the
+    /// family. Half the time the key is the mirror of the written key
+    /// (`hm_mirror_key`: the read is then sensitive to the version it
+    /// answers for), else a size-derived key (`hm_sibling_key`). Both
+    /// directions: the older version read with a key reading the newer,
+    /// and the reverse.
+    fn hm_sibling_read(&mut self, p: P, k: &Ty, v: &Ty, depth: usize) -> Expr {
+        // Three quarters structural keys: a scalar key is forced before
+        // the call, so only a structural key is encoded DURING the read.
+        let structural = gen_structural_key_ty(&mut self.r);
+        let k = if self.r.chance(3, 4) { &structural } else { k };
+        let mty = Ty::hm(k.clone(), v.clone());
+        let base = self.fresh_var();
+        let base_e = self.expr(&mty, depth - 1);
+        self.scope.push((base.clone(), mty.clone()));
+        let kw = self.hm_literal_key(k);
+        let derived_e = if self.r.chance(1, 2) {
+            let val = self.expr(v, depth - 1);
+            Expr::Call(P::HmInsert, vec![kw.clone(), val, Expr::Var(base.clone())])
+        } else {
+            Expr::Call(P::HmDelete, vec![kw.clone(), Expr::Var(base.clone())])
+        };
+        let derived = self.fresh_var();
+        self.scope.push((derived.clone(), mty.clone()));
+        let (read, other) = if self.r.chance(1, 2) {
+            (base.clone(), derived.clone())
+        } else {
+            (derived.clone(), base.clone())
+        };
+        let key = if self.r.chance(1, 2) {
+            self.hm_mirror_key(&kw, k, &other)
+        } else {
+            self.hm_sibling_key(k, &other)
+        };
+        self.scope.pop();
+        self.scope.pop();
+        let body = Expr::Call(p, vec![Expr::Annot(b(key), k.clone()), Expr::Var(read)]);
+        Expr::Let(base, b(base_e), b(Expr::Let(derived, b(derived_e), b(body))))
     }
 
     fn scoped_var(&mut self, ty: &Ty) -> Option<Expr> {
@@ -2756,8 +2919,13 @@ impl Gen {
                 Expr::Call(P::Elem, vec![x, xs])
             }
             6 => {
+                // hmMember; half the time the versioned-key probe
+                // (hm_sibling_read).
                 let k = gen_key_ty(&mut self.r, 1);
                 let v = gen_ty(&mut self.r, 1, false);
+                if self.r.chance(1, 2) {
+                    return self.hm_sibling_read(P::HmMember, &k, &v, depth);
+                }
                 let key = self.pinned(&k, depth - 1);
                 let m = self.expr(&Ty::hm(k, v), depth - 1);
                 Expr::Call(P::HmMember, vec![key, m])
@@ -3101,8 +3269,12 @@ impl Gen {
         match self.r.below(8) {
             0 => {
                 // hmLookup: the key type flows nowhere — the key is
-                // pinned, the map expression pins itself.
+                // pinned, the map expression pins itself. Half the time
+                // the versioned-key probe (hm_sibling_read).
                 let k = gen_key_ty(&mut self.r, 1);
+                if self.r.chance(1, 2) {
+                    return self.hm_sibling_read(P::HmLookup, &k, t, depth);
+                }
                 let key = self.pinned(&k, depth - 1);
                 let m = self.expr(&Ty::hm(k, t.clone()), depth - 1);
                 Expr::Call(P::HmLookup, vec![key, m])

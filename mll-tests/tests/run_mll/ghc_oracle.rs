@@ -436,6 +436,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_hashmap_dict_form_reader, "cases", "hashmap_dict_form_reader.mll"),
         (ghc_oracle_hashmap_dict_form_body, "cases", "hashmap_dict_form_body.mll"),
         (ghc_oracle_hashset_dict_form, "cases", "hashset_dict_form.mll"),
+        (ghc_oracle_hashmap_read_key_reroot, "cases", "hashmap_read_key_reroot.mll"),
         (ghc_oracle_list_comprehensions, "cases", "list_comprehensions.mll"),
         (ghc_oracle_list_element_laziness, "cases", "list_element_laziness.mll"),
         (ghc_oracle_lists, "cases", "lists.mll"),

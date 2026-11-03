@@ -2157,6 +2157,19 @@ local function __mll_hashstr(s) s = __force(s); local h = 5381 for i = 1, #s do 
 -- version becomes the root. Purely internal — observationally the maps
 -- are as persistent as before; single-threaded Lua makes the mutation
 -- safe, and no runtime function yields mid-operation.
+-- THE ORDERING RULE every operation on a version obeys: everything that
+-- can run user code — forcing the map handle, forcing the key and the
+-- value, ENCODING the key (a structural encoder forces every component
+-- of the key) — happens BEFORE the operation fetches that version's
+-- store (`m.t`, or __mll_hm_reroot), and nothing that can force a thunk
+-- stands between the store fetch and the index. A forced thunk may read
+-- another version of the same family, and that read reroots: the store
+-- table a `local t = m.t` already holds is mutated into the other
+-- version's contents, so an index taken after it answers for the wrong
+-- version (H1: `hmLookup (2, hmSize m2) m1` found m2's entry because
+-- the key was encoded after `m.t` was fetched). The enumerators that
+-- force values while walking take the snapshot discipline below for the
+-- same reason.
 -- (__mll_hm_mt / __mll_hme_mt are declared at the top of the runtime:
 -- __mll_to_lua and the FFI marshallers close over them.)
 -- The shared canonical empty map (hmEmpty is one value program-wide). It
@@ -2436,10 +2449,25 @@ local function __mll_hme_insert(enc, cmp, k, v, m)
     m.k, m.v, m.p = ek, old, h
     return h
 end
-local function __mll_hme_lookup(enc, k, m) if getmetatable(m) == __thunk_mt then m = __force(m) end local t = m.t if t == nil then t = __mll_hm_reroot(m) end local e = t[enc(k)] if e == nil then return nil else return Just(e[2]) end end
-local function __mll_hme_delete(enc, k, m)
+-- The reads encode the key BEFORE they touch the store (the ordering
+-- rule in the header): `enc` forces the key's components, and a
+-- component that reads another version of this family reroots the store
+-- a `local t = m.t` taken earlier would still point at — the index then
+-- answered for THAT version (`hmLookup (2, hmSize m2) m1` found m2's
+-- entry). The writes above and the delete below already encode first.
+local function __mll_hme_lookup(enc, k, m)
+    if getmetatable(k) == __thunk_mt then k = __force(k) end
+    local ek = enc(k)
     if getmetatable(m) == __thunk_mt then m = __force(m) end
-    local ek = enc(__force(k))
+    local t = m.t
+    if t == nil then t = __mll_hm_reroot(m) end
+    local e = t[ek]
+    if e == nil then return nil else return Just(e[2]) end
+end
+local function __mll_hme_delete(enc, k, m)
+    if getmetatable(k) == __thunk_mt then k = __force(k) end
+    local ek = enc(k)
+    if getmetatable(m) == __thunk_mt then m = __force(m) end
     local t = m.t
     if t == nil then t = __mll_hm_reroot(m) end
     local old = t[ek]
@@ -2456,7 +2484,14 @@ local function __mll_hme_delete(enc, k, m)
     m.k, m.v, m.p = ek, old, h
     return h
 end
-local function __mll_hme_member(enc, k, m) if getmetatable(m) == __thunk_mt then m = __force(m) end local t = m.t if t == nil then t = __mll_hm_reroot(m) end return t[enc(k)] ~= nil end
+local function __mll_hme_member(enc, k, m)
+    if getmetatable(k) == __thunk_mt then k = __force(k) end
+    local ek = enc(k)
+    if getmetatable(m) == __thunk_mt then m = __force(m) end
+    local t = m.t
+    if t == nil then t = __mll_hm_reroot(m) end
+    return t[ek] ~= nil
+end
 local function __mll_hme_fromList(enc, cmp, xs) xs = __force(xs); local t = {} local n = 0 local cur = xs while cur ~= nil do local p = __force(__mll_head(cur)) local k = __force(p[1]) local seq = __mll_hm_nan_seq local ek = enc(k) local e = {k, __force(p[2])} if __mll_hm_nan_seq ~= seq then e[3] = __mll_hm_nan_seq end if t[ek] == nil then n = n + 1 end t[ek] = e cur = __mll_tail(cur) end return setmetatable({t = t, n = n, cmp = cmp}, __mll_hme_mt) end
 -- The enumerators sort by the compare the writes stamped on the handle
 -- (the shared empty map has none and no entries to sort). NaN-bearing

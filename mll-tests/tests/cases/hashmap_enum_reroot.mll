@@ -35,6 +35,41 @@ main = do
         f3 = hmInsert 12 0 f2
         f4 = hmFromList [(20, hmSize f2), (21, hmSize f3), (22, hmSize f1)] :: HashMap Int Int
     assert (show f4 == "{20 -> 2, 21 -> 3, 22 -> 1}") ("show f4: " <> show f4)
+    -- A READ whose key reads another version (H1): encoding a structural
+    -- key forces its components, and the force reroots the store, so the
+    -- reader must encode before it fetches the store. Both directions, the
+    -- scalar and fused-case shapes (the key is forced before the call), and
+    -- a key component that is itself a lookup in the sibling version.
+    let k1 = hmFromList [((1, 1), "a")] :: HashMap (Int, Int) String
+        k2 = hmInsert (2, 2) "b" k1
+    assert (hmLookup (2, hmSize k2) k1 == Nothing) "structural lookup on the older version"
+    assert (not (hmMember (2, hmSize k2) k1)) "structural member on the older version"
+    assert (hmLookup (1, hmSize k2 - 1) k1 == Just "a") "structural hit on the older version"
+    let d1 = hmFromList [((1, 1), "a"), ((2, 2), "b")] :: HashMap (Int, Int) String
+        d2 = hmDelete (2, 2) d1
+    assert (hmSize d2 == 1) "d2 size"
+    assert (hmLookup (2, hmSize d1) d2 == Nothing) "structural lookup on the newer version"
+    assert (not (hmMember (2, hmSize d1) d2)) "structural member on the newer version"
+    let p1 = hmFromList [((1, 1), 1)] :: HashMap (Int, Int) Int
+        p2 = hmInsert (2, 2) 2 p1
+    assert (hmLookup (2, maybe 0 id (hmLookup (2, 2) p2)) p1 == Nothing) "component read by lookup"
+    let c1 = hmFromList [(1, "a")] :: HashMap Int String
+        c2 = hmInsert 2 "b" c1
+    assert (hmLookup (hmSize c2) c1 == Nothing) "scalar lookup on the older version"
+    assert (not (hmMember (hmSize c2) c1)) "scalar member on the older version"
+    let fused = case hmLookup (hmSize c2) c1 of
+            Just v -> "hit " <> v
+            Nothing -> "miss"
+    assert (fused == "miss") "fused case lookup on the older version"
+    let fusedHit = case hmLookup (hmSize c2 - 1) c1 of
+            Just v -> "hit " <> v
+            Nothing -> "miss"
+    assert (fusedHit == "hit a") "fused case hit on the older version"
+    let l1 = hmFromList [([1], "a")] :: HashMap [Int] String
+        l2 = hmInsert [2] "b" l1
+    assert (hmLookup [hmSize l2] l1 == Nothing) "list key lookup on the older version"
+    assert (hmLookup [hmSize l2] l2 == Just "b") "list key lookup on the newer version"
+    assert (show (hmToList k1) == "[((1,1),\"a\")]" && hmSize k2 == 2) "versions intact"
     -- compare on NaN is GT in every position (GHC: `<`, then `==`, else GT).
     let nan = 0.0 / 0.0 :: Number
     assert (compare nan 1.0 == GT) "compare nan 1.0"

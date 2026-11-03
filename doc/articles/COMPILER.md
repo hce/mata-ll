@@ -389,7 +389,21 @@ constant folding (§7) can then recognize them.
   calling the Number family `__mll_hmn_*`: the writes stamp the handle
   (`nk`), the enumerators hand keys back as doubles (Lua 5.3+ stores an
   integral float key as an integer), lookup/member stay the scalar
-  functions.
+  functions. At run time a map is a diff+reroot handle (runtime.lua,
+  "HashMap runtime"): one mutable store per version family, the newest
+  version owning it and every older version a diff chain that reading it
+  replays onto the store (rerooting). The one invariant every operation
+  on a version obeys is the ORDERING RULE: everything that can run user
+  code — forcing the handle, forcing the key and the value, encoding the
+  key (a structural encoder forces every component of the key) — happens
+  before the operation fetches the version's store (`m.t` or
+  `__mll_hm_reroot`), and nothing that can force a thunk stands between
+  the fetch and the index, because a forced thunk may read another
+  version of the same family and that read reroots the store already in
+  hand (`hmLookup (2, hmSize m2) m1` found m2's entry when the key was
+  encoded after the fetch — H1). The forcing enumerators (show, the FFI
+  marshallers) obey it by snapshotting the store (`__mll_hm_snapshot`)
+  before forcing any value.
 
 - **A Number is a double.** `Number` is an IEEE double on every host and
   never carries Lua's integer subtype (that subtype is `Int`'s): a
