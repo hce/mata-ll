@@ -272,28 +272,44 @@ fromIntegral n = fromInteger (toInteger n)
 
 -- Rounding, with GHC's names and semantics but the result type fixed at
 -- Int (the RealFrac generalization is deferred with the rest of the
--- numeric tower's upper rungs — see CAVEATS). `floor` is the same
+-- numeric tower's upper rungs — see CAVEATS). The result is always an
+-- Int, as GHC's `fromInteger . floor`: for a finite Number the exact
+-- integer reduced modulo 2^64 into Int's range (`floor 1e19` is
+-- -8446744073709551616, `floor 1e300` is 0), and 0 for NaN and the
+-- infinities. The runtime primitives wrap Lua's math.floor/math.ceil,
+-- which return a FLOAT when no integer fits; `floor` is the same
 -- primitive LMath declares (an identical FFI re-declaration is not an
--- import collision); LMath's Lua-named `ceil` stays as well.
-floor :: Number -> LuaPure "math.floor" Int
-ceiling :: Number -> LuaPure "math.ceil" Int
+-- import collision), and LMath's Lua-named `ceil` is `ceiling`'s.
+floor :: Number -> LuaPure "__mll_floor" Int
+ceiling :: Number -> LuaPure "__mll_ceil" Int
 
 -- Toward zero, as GHC.
 truncate :: Number -> Int
 truncate x = if x >= 0.0 then floor x else ceiling x
 
 -- Round half to even, as GHC: a tie (fractional part exactly 0.5) goes
--- to the even neighbour. The fractional part is exact — `fromIntegral n`
--- reconstructs the double `floor` consumed, and for |x| >= 2^52 (where
--- doubles are already integral) it is exactly x, so f is 0 and x rounds
--- to itself.
+-- to the even neighbour. The fractional part is computed in doubles from
+-- the floored double itself (`floor_Number`), never from the Int — the
+-- Int is wrapped past 2^63 and `fromIntegral` of it would not give x
+-- back. For |x| >= 2^52 a double is integral, so f is 0 and x rounds to
+-- itself (0 for NaN and the infinities, whose f is NaN and fails both
+-- comparisons). Below 2^52 the subtraction is exact for every x outside
+-- (-0.5, 0) (Sterbenz: |x| and |floor x| are within a factor of two, or
+-- the floor is 0); inside it the exact difference 1 + x lies above 0.5
+-- and may round, but no lower than 0.5 itself — a tie then goes to the
+-- even neighbour of n = -1, which is the 0 the exact fraction also picks.
 round :: Number -> Int
 round x =
     let n = floor x
-        f = x - fromIntegral n
+        f = x - floor_Number x
     in if f < 0.5 then n
        else if f > 0.5 then n + 1
        else if even n then n else n + 1
+
+-- The floored value as a Number: math.floor's own result, re-floated at
+-- the FFI boundary (on Lua 5.3+ math.floor returns the integer subtype
+-- when the result fits; a Number is a double on every host).
+floor_Number :: Number -> LuaPure "math.floor" Number
 
 -- Largest / smallest element. Both error on an empty structure.
 maximum :: (Ord a, Foldable t) => t a -> a

@@ -2803,6 +2803,57 @@ local function __mll_rem_fn(a, b) return __mll_rem(__force(a), __force(b)) end
 local function quotRem_Int(a, b) a = __force(a); b = __force(b); return { __mll_quot(a, b), __mll_rem(a, b) } end
 local function divMod_Int(a, b) a = __force(a); b = __force(b); return { __mll_div(a, b), __mll_mod(a, b) } end
 
+-- Rounding a Number to an Int: the Prelude's `floor` and `ceiling`
+-- (`truncate` and `round` are defined over them). GHC's `floor :: Double
+-- -> Int` is `fromInteger . floor`: the exact integer below x, narrowed to
+-- Int the way every Integer -> Int conversion is — the value modulo 2^64
+-- — and 0 for NaN and the infinities (decodeFloat gives those a mantissa
+-- times 2^972, a multiple of 2^64). Lua's math.floor/math.ceil return
+-- that integer only while it fits a 64-bit integer; for NaN, ±inf and |x|
+-- >= 2^63 they return the FLOAT — not a value of type Int at all: it
+-- showed as `Infinity` or as a 301-digit numeral, and `fromIntegral` of it
+-- sent the Integer limb loop around forever. The fast path (the native
+-- call plus two comparisons; a fitting result lies in [-2^63, 2^63), the
+-- test Lua itself applies before it returns an integer) is what hot
+-- numeric code pays; everything else takes the wrap below.
+--
+-- The wrap is exact without `//`, bit operations or a bignum: a double of
+-- magnitude >= 2^63 is an integer multiple of its ulp, which is >= 2^11
+-- there, so math.fmod(r, 2^64) — C's fmod, exact for every pair of
+-- doubles — is a multiple of 2^11 of magnitude below 2^64: at most 53
+-- significant bits, hence representable, with r's sign. Moving it into
+-- [-2^63, 2^63) adds or subtracts 2^64 once, again exact (a multiple of
+-- 2^11 of magnitude <= 2^63). That is the representative of r modulo 2^64
+-- in Int's range — GHC's integerToInt, the low 64 bits read as two's
+-- complement. On Lua 5.3+ math.tointeger makes it the integer subtype
+-- (the float -2^63 converts, so every value in the interval does); on a
+-- doubles-only host the double IS the Int, and since every wrapped value
+-- is a multiple of 2^11 it is GHC's exact Int there too, not a rounding
+-- of it — only arithmetic on it past 2^53 is the host's documented limit.
+local __mll_floor, __mll_ceil
+do
+    local mfloor, mceil, fmod, tointeger = math.floor, math.ceil, math.fmod, math.tointeger
+    local huge = math.huge
+    local TWO63, TWO64 = 9223372036854775808.0, 18446744073709551616.0
+    local function wrap(r)
+        if r ~= r or r == huge or r == -huge then return 0 end
+        local m = fmod(r, TWO64)
+        if m >= TWO63 then m = m - TWO64 elseif m < -TWO63 then m = m + TWO64 end
+        if tointeger then return tointeger(m) end
+        return m
+    end
+    __mll_floor = function(x)
+        local r = mfloor(x)
+        if r >= -TWO63 and r < TWO63 then return r end
+        return wrap(r)
+    end
+    __mll_ceil = function(x)
+        local r = mceil(x)
+        if r >= -TWO63 and r < TWO63 then return r end
+        return wrap(r)
+    end
+end
+
 -- Number subtype probe (Lua 5.3+ native math.type, else a portable fallback).
 -- LuaJIT and Lua 5.1/5.2 have no integer subtype: every number is an IEEE-754
 -- double, so "float" is the correct answer for any number there. Non-numbers

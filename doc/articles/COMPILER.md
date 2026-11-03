@@ -495,6 +495,44 @@ constant folding (§7) can then recognize them.
   a -0.0 there, and a float-subtype Int zero formatted as `"0"` either
   way. Pinned by the GHC-goldened `int_sign_of_zero` (identical lines on
   both hosts) and the self-asserting `int_sign_of_zero_boundary`.
+- **A rounding to Int yields an Int.** GHC's `floor`/`ceiling`/
+  `truncate`/`round :: Double -> Int` are `fromInteger . (… :: Integer)`:
+  the exact integer, narrowed modulo 2^64 like every Integer -> Int
+  conversion, and 0 for NaN and the infinities (decodeFloat's mantissa
+  times 2^972 is a multiple of 2^64). Lua's `math.floor`/`math.ceil`
+  return that integer only while it fits a 64-bit integer and the FLOAT
+  otherwise, so the Prelude's `floor :: Number -> LuaPure "math.floor"
+  Int` was a type lie for NaN, ±inf and |x| >= 2^63 — it showed
+  `Infinity` or a 301-digit numeral, and `round`'s `fromIntegral n` sent
+  `fromInteger_Integer`'s limb loop around forever (`n % B` of a
+  non-finite number is NaN, never 0). The Prelude's `floor`/`ceiling`
+  (and LMath's `floor`/`ceil`, the same declarations, and JSON's
+  `numFloor`) are the runtime's `__mll_floor`/`__mll_ceil`: the native
+  call plus two comparisons on the fast path (a fitting result lies in
+  [-2^63, 2^63), the very test Lua applies before returning an integer),
+  and otherwise the wrap — 0 for a non-finite result, else
+  `math.fmod(r, 2^64)` moved into [-2^63, 2^63) by one addition or
+  subtraction of 2^64, then `math.tointeger`. Exact without `//`, bit
+  operations or a bignum: a double of magnitude >= 2^63 is a multiple of
+  its ulp (>= 2^11), C's fmod is exact for every pair of doubles, and a
+  multiple of 2^11 below 2^64 in magnitude has at most 53 significant
+  bits — so the result is the representative of r modulo 2^64 in Int's
+  range, GHC's `integerToInt`. On a doubles-only host that double IS
+  GHC's exact Int (the same 53-bit argument), so LuaJIT prints GHC's
+  digits; arithmetic on it past 2^53 is the host's documented limit.
+  `truncate` is still `if x >= 0 then floor x else ceiling x`, and
+  `round` computes its fractional part as `x - floor_Number x` in
+  doubles (the floored double, re-floated at the FFI boundary), never
+  from the wrapped Int: exact for every x outside (-0.5, 0) by Sterbenz,
+  and inside it rounding can only reach 0.5 from above, where the tie
+  rule at n = -1 picks the same 0. `fromInteger_Integer` rejects a
+  non-integral or non-finite argument with an internal error instead of
+  looping — a second line of defense that only an FFI declaration typing
+  a float-returning host function `Int` can reach now. Pinned by the
+  GHC-goldened `round_to_int_nonfinite` (identical lines on both hosts)
+  and `round_to_int_wrap` (Int arithmetic on the wrapped values, Lua
+  5.3+); the backend fuzzer's roundings take operands past 2^63 and the
+  quotients `1 / 0`, `(-1) / 0`, `0 / 0` against a bit-level reference.
 - **First-class operators** (`opfunc_value`): a first-class `(op)` is
   the value of whatever `op` denotes, decided once in the monomorphizer
   (the main walk and the dictionary rewrite call it from their `OpFunc`

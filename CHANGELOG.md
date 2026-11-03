@@ -44,6 +44,53 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **`floor`, `ceiling`, `truncate` and `round` of a `Number` always yield
+  an `Int`: GHC's exact value modulo 2^64 past 2^63, 0 for NaN and the
+  infinities — and `round` of NaN or an infinity returns.** `floor (0/0)
+  :: Int` printed `NaN`, `floor (1/0)` `Infinity`, `floor 1e300` a
+  301-digit numeral, `floor 1e30 + 1` `1000000000000000019884624838656`
+  (GHC: `5076964154930102273`), `ceiling 1e19` `10000000000000000000`
+  (GHC: `-8446744073709551616`), `truncate 9.3e18` `9300000000000000000`
+  (GHC: `-9146744073709551616`), and `round (1/0)`/`round (0/0)` never
+  returned, allocating without bound on Lua 5.5 and dying with `table
+  overflow` on LuaJIT. The Prelude bound `floor`/`ceiling` to Lua's
+  `math.floor`/`math.ceil` typed `Int`; those return the integer only
+  while it fits a 64-bit integer and the FLOAT otherwise, so an
+  `Int`-typed value carried the float subtype (on LuaJIT: simply the
+  double), and `round`'s `fromIntegral n` lifted that float through
+  `fromInteger_Integer`, whose limb loop (`while n ~= 0`) never ends on
+  NaN or an infinity. GHC's `floor :: Double -> Int` is `fromInteger .
+  floor`: the exact integer below x reduced modulo 2^64 into `Int`'s
+  range, and 0 for NaN and the infinities (decodeFloat's mantissa times
+  2^972 is a multiple of 2^64) — the same answer from all four functions.
+  The Prelude's `floor`/`ceiling` (and LMath's `floor`/`ceil` — the same
+  declarations, so `import LMath` still shadows nothing — and the JSON
+  library's `numFloor`) are now the runtime primitives
+  `__mll_floor`/`__mll_ceil`: the native call plus two comparisons when
+  the result fits (hot numeric code pays only that), otherwise 0 for a
+  non-finite result and `math.fmod(r, 2^64)` moved into [-2^63, 2^63)
+  for a finite one — exact without `//`, bit operations or a bignum,
+  because a double of magnitude 2^63 or more is a multiple of its ulp
+  (at least 2^11), C's fmod is exact, and a multiple of 2^11 below 2^64
+  has at most 53 significant bits; `math.tointeger` then makes it the
+  integer subtype. `round` computes its fractional part from the floored
+  double (`x - floor_Number x`) instead of `fromIntegral` of the Int, so
+  no Integer is built and a non-finite argument gives 0 (its fraction is
+  NaN and fails both comparisons); half-to-even is unchanged, including
+  the ties at 2^52 + 1/2. On LuaJIT an `Int` is a double, but every
+  wrapped value is a multiple of 2^11 and so exact there: `floor 1e30`
+  prints GHC's `5076964154930102272` on every host, and only arithmetic
+  on it past 2^53 meets the documented limit (`floor 1e30 + 1` is
+  absorbed). `fromInteger_Integer` now rejects a non-integral or
+  non-finite argument with an internal error instead of looping — a
+  second line of defense that only an FFI declaration typing a
+  float-returning host function `Int` can reach. The backend fuzzer's
+  roundings take operands at and past 2^63 and the quotients `1 / 0`,
+  `(-1) / 0`, `0 / 0`, against a reference that decomposes the double
+  bit-wise. Found by the 2026-10 fresh-eyes review (N12; the float-typed
+  `floor`/`ceiling` result is Q35). (GHC-goldened cases
+  `round_to_int_nonfinite` — identical lines on every host — and
+  `round_to_int_wrap`, Int arithmetic on the wrapped values, Lua 5.3+.)
 - **An `Int` range that reaches `maxBound` (or `minBound` downward)
   terminates, and `[x ..]` / `[x, y ..]` at `Int` end at the bound.**
   `length [maxBound - 2 .. maxBound :: Int]` never returned, `take 5` of

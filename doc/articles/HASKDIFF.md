@@ -164,7 +164,13 @@ arithmetic can also compute IEEE's -0.0 (`negate 0`, `0 * (-5)`,
 `truncate (-0.5)`); that value is the `Int` 0 exactly as in GHC — it
 shows as `0`, converts to `0.0`, reads back from a map as `0` — and only
 a host that receives it across the FFI can see the sign (CAVEATS.md,
-"Int overflow wraps silently").
+"Int overflow wraps silently"). `floor`, `ceiling`, `truncate` and `round`
+of a `Number` are GHC's `fromInteger . floor` at `Int` on every host: the
+exact integer modulo 2^64 for a finite argument (`floor 1e30` is
+5076964154930102272, `ceiling 1e19` is -8446744073709551616, `floor
+1e300` is 0), 0 for NaN and the infinities — a wrapped value is a
+multiple of 2^11, so the doubles-only host holds GHC's exact `Int` there
+too, and only arithmetic on it past 2^53 rounds.
 
 Numeric defaulting is GHC's implicit `default (Integer, Number)` (`Number`
 is GHC's `Double`), so an unannotated literal used only in integer

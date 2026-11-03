@@ -437,6 +437,11 @@ mll_test!(int_literal_wrap_window, "int_literal_wrap_window.mll");
 mll_test!(read_typeclass, "read_typeclass.mll");
 mll_test!(read_grammar, "read_grammar.mll");
 mll_test!(read_int_wrap, "read_int_wrap.mll");
+// N12/Q35: floor/ceiling/truncate/round of a Number always yield an Int —
+// 0 for NaN and the infinities, the exact value modulo 2^64 past 2^63 (on
+// every host), and Int arithmetic on the wrapped results (Lua 5.3+ golden).
+mll_test!(round_to_int_nonfinite, "round_to_int_nonfinite.mll");
+mll_test!(round_to_int_wrap, "round_to_int_wrap.mll");
 mll_test!(monad_nonio, "monad_nonio.mll");
 mll_test!(derive_enum, "derive_enum.mll");
 mll_test!(nested_eq, "nested_eq.mll");

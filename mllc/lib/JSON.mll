@@ -707,7 +707,11 @@ hexDigitChar d = if d < 10 then strChar (48 + d) else strChar (87 + d)
 -- is canonicalized (`negate 0 :: Int` is -0.0 there, and encodes as 0).
 intToNum :: Int -> LuaPure "__mll_int_to_number" Number
 numFmod :: Number -> Number -> LuaPure "math.fmod" Number
-numFloor :: Number -> LuaPure "math.floor" Int
+-- The Prelude's floor primitive: an Int for every argument (both call
+-- sites above pass a value already checked integral and inside the Int
+-- range, where it is Lua's math.floor; a raw math.floor typed Int returns
+-- a float past 2^63 or for a non-finite argument).
+numFloor :: Number -> LuaPure "__mll_floor" Int
 numFormat :: String -> Number -> LuaPure "string.format" String
 -- __mll_math_type is the runtime's portability shim around math.type: native
 -- on Lua 5.3+, and on interpreters without an integer subtype (LuaJIT,

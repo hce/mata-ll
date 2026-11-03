@@ -291,6 +291,17 @@ fromInteger_Integer = function(n)
     n = __force(n)
     if type(n) == "table" then return n end  -- already an Integer
     if n == 0 then return __int_zero end
+    -- The limb loop below ends only for a finite integer: `n % B` of NaN or
+    -- an infinity is NaN, which is never 0, so the loop would allocate limbs
+    -- forever; a fraction would be stored as a limb. No well-typed Int
+    -- holds such a value (the Prelude's roundings always yield an integer,
+    -- and the FFI hands Int results through as the host gives them), so
+    -- reaching one here is a type lie upstream — an FFI declaration typing
+    -- a float-returning host function `Int` — and an internal error names
+    -- it instead of hanging.
+    if n % 1 ~= 0 then
+        error("internal error: fromInteger at Integer of a non-integral number: " .. tostring(n))
+    end
     if n < 0 and -n < 0 then return __int_mk(-1, {0, 0, 32768}) end  -- -(2^63)
     local sign = 1
     if n < 0 then sign = -1; n = -n end

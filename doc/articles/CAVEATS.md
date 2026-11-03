@@ -92,7 +92,9 @@ so `18446744073709551617 :: Int` is `1` on every host) and the literal
 pattern `-9223372036854775808` compare correctly on LuaJIT; `minBound +
 1`, `maxBound` and a runtime `fromInteger`/`fromIntegral` of an `Integer`
 past 2^53 (which rounds there instead of wrapping) are where the 2^53
-limit shows. An `Int` range is
+limit shows (`floor`/`ceiling`/`truncate`/`round` of a `Number` at or
+beyond 2^63 do wrap, to GHC's exact `Int` — the wrapped value is a
+multiple of 2^11, which a double holds). An `Int` range is
 GHC.Enum's `Int` instance on every host (`eftInt` stops on equality
 before it increments, `efdtInt` against `y - delta`, `[x ..]` ends at
 `maxBound`), so a range that reaches a bound terminates on LuaJIT too —
@@ -169,9 +171,16 @@ The higher rungs of the numeric tower are not yet typeclasses. `pi`, `exp`,
 semantics — `floor`, `ceiling`, `truncate` (toward zero) and `round` (half
 to even) — but typed `Number -> Int` rather than GHC's `(RealFrac a,
 Integral b) => a -> b` (`LMath.floor`/`LMath.ceil` remain, and `floor` is
-the same primitive in both). So you can compute with these at `Number`, but
-you cannot yet write code generic over `Floating a`/`RealFrac a`, nor give
-those classes a user instance. Generalising them is deferred.
+the same primitive in both). The result is always an `Int`, as GHC's
+`fromInteger . floor` at `Int`: for a finite `Number` the exact integer
+reduced modulo 2^64 into `Int`'s range (`floor 1e19` is
+-8446744073709551616, `floor 1e300` is 0, `floor 9223372036854775808.0`
+is `minBound`), and 0 for NaN and the infinities — on every host, since a
+wrapped value is a multiple of 2^11 and so exact as a double (only
+arithmetic on it past 2^53 meets LuaJIT's limit). So you can compute with
+these at `Number`, but you cannot yet write code generic over `Floating
+a`/`RealFrac a`, nor give those classes a user instance. Generalising them
+is deferred.
 
 ## Some literal type errors defer to the enclosing binding
 

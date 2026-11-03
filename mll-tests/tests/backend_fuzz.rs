@@ -47,7 +47,11 @@
 //! standing probe beside the hand corpus. The fragment never reaches an infinity or a NaN: every Number
 //! production bounds its magnitude (products and powers take literal
 //! operands, division takes a nonzero literal divisor), so IEEE arithmetic
-//! in the strict reference is bit-identical to the host's. The Enum
+//! in the strict reference is bit-identical to the host's — the one
+//! exception is the operand of a rounding to Int, which may be a literal
+//! past 2^63 or the quotient `1 / 0`, `(-1) / 0`, `0 / 0`: the rounding
+//! consumes it (GHC's value modulo 2^64, 0 for a non-finite operand —
+//! N12), so no Number arithmetic or `show` ever sees it. The Enum
 //! ranges at Int and Integer (`take k [a .. c]`, `take k [a, b .. c]`, a
 //! third of them with a zero step) are oracled against base's own
 //! `eftInt`/`efdtInt`/`enumDeltaToInteger`, so the direction rule
@@ -773,6 +777,28 @@ fn ghc_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
     }
 }
 
+/// GHC's `fromInteger (n :: Integer) :: Int` for the integer-valued double
+/// `x` a rounding produced: 0 for NaN and the infinities (their
+/// decodeFloat mantissa times 2^972 is a multiple of 2^64), the exact
+/// value modulo 2^64 otherwise. Below 2^63 the `as` conversion is exact
+/// (x is integral); from 2^63 up the double is read bit-wise as m * 2^e
+/// with m < 2^53 and e >= 11, and the low 64 bits of that product are `m
+/// << e` (nothing survives a shift of 64 or more) — a route independent
+/// of the runtime's fmod-based wrap, so the two can disagree.
+fn double_to_int_ghc(x: f64) -> i64 {
+    if !x.is_finite() {
+        return 0;
+    }
+    if x.abs() < 9223372036854775808.0 {
+        return x as i64;
+    }
+    let bits = x.to_bits();
+    let e = ((bits >> 52) & 0x7ff) as i64 - 1075;
+    let m = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
+    let low = (if e >= 64 { 0u64 } else { m << e }) as i64;
+    if x < 0.0 { low.wrapping_neg() } else { low }
+}
+
 /// GHC's `div` at Int: the quotient rounded toward negative infinity.
 /// Rust's `/` truncates toward zero; the quotient is one less when the
 /// division is inexact and the operands' signs differ.
@@ -1110,18 +1136,19 @@ fn call_builtin(p: &P, mut args: Vec<Value>) -> Value {
         P::ToInteger => Value::Integer(as_int(&args[0]) as i128),
         // --- Int: GHC's Num/RealFrac at Int. negate and abs wrap at
         // minBound like the host's integer arithmetic; signum is -1/0/1.
-        // The roundings take a literal operand (every Number atom is
-        // below 2^63, so the i64 conversion is exact); `round` is GHC's
-        // half-to-even. On a doubles-only host each of these can compute
-        // the -0.0 Int (`negate 0`, `truncate (-0.5)`), which must show
-        // as the reference's `0`.
+        // The roundings take a literal operand and are GHC's `fromInteger
+        // . floor`: the exact integer modulo 2^64, 0 for a non-finite
+        // operand (`double_to_int_ghc`); `round` is GHC's half-to-even.
+        // On a doubles-only host each of these can compute the -0.0 Int
+        // (`negate 0`, `truncate (-0.5)`), which must show as the
+        // reference's `0`.
         P::NegateInt => Value::Int(as_int(&args[0]).wrapping_neg()),
         P::AbsInt => Value::Int(as_int(&args[0]).wrapping_abs()),
         P::SignumInt => Value::Int(as_int(&args[0]).signum()),
-        P::Truncate => Value::Int(as_number(&args[0]).trunc() as i64),
-        P::Ceiling => Value::Int(as_number(&args[0]).ceil() as i64),
-        P::Floor => Value::Int(as_number(&args[0]).floor() as i64),
-        P::Round => Value::Int(as_number(&args[0]).round_ties_even() as i64),
+        P::Truncate => Value::Int(double_to_int_ghc(as_number(&args[0]).trunc())),
+        P::Ceiling => Value::Int(double_to_int_ghc(as_number(&args[0]).ceil())),
+        P::Floor => Value::Int(double_to_int_ghc(as_number(&args[0]).floor())),
+        P::Round => Value::Int(double_to_int_ghc(as_number(&args[0]).round_ties_even())),
         P::NegateI => match &args[0] {
             Value::Integer(n) => Value::Integer(-n),
             v => panic!("negate at Integer on {v:?}"),
@@ -2013,6 +2040,48 @@ impl Gen {
         Expr::NumLit { text, value }
     }
 
+    /// A Number operand for the roundings to Int only: the magnitudes at
+    /// and beyond 2^63 that GHC's `fromInteger . floor` wraps modulo 2^64
+    /// (2^63 itself, which is `minBound`; 2^63 +/- one ulp; 1e19 and
+    /// 9.3e18, whose wraps are negative; 1e30 and 2.5e30; 1e300, a
+    /// multiple of 2^64, so 0), the half-way values just past 2^52 (where
+    /// the double's spacing is exactly 1/2, so `round`'s tie rule meets
+    /// the last fractions a double can hold), and the three non-finite
+    /// quotients `1 / 0`, `(-1) / 0` and `0 / 0`, which round to 0. These
+    /// never enter Number arithmetic or a `show` — the rounding consumes
+    /// them — so the Number budget below is untouched.
+    fn rounding_operand(&mut self) -> Expr {
+        const LITS: &[(&str, f64)] = &[
+            ("9223372036854775808", 9223372036854775808.0),
+            ("-9223372036854775808", -9223372036854775808.0),
+            ("9223372036854777856", 9223372036854777856.0),
+            ("-9223372036854777856", -9223372036854777856.0),
+            ("9223372036854774784", 9223372036854774784.0),
+            ("1e19", 1e19),
+            ("-1e19", -1e19),
+            ("9.3e18", 9.3e18),
+            ("1e30", 1e30),
+            ("-1e30", -1e30),
+            ("2.5e30", 2.5e30),
+            ("1e300", 1e300),
+            ("-1e300", -1e300),
+            ("4503599627370496.5", 4503599627370496.5),
+            ("4503599627370497.5", 4503599627370497.5),
+            ("-4503599627370496.5", -4503599627370496.5),
+            ("-0.49999999999999994", -0.49999999999999994),
+        ];
+        if self.r.chance(1, 4) {
+            let (num, nt) = [("1", 1.0), ("-1", -1.0), ("0", 0.0)][self.r.below(3)];
+            return Expr::Bin(
+                Bin::Div,
+                b(Expr::NumLit { text: num, value: nt }),
+                b(Expr::NumLit { text: "0", value: 0.0 }),
+            );
+        }
+        let (text, value) = LITS[self.r.below(LITS.len())];
+        Expr::NumLit { text, value }
+    }
+
     /// A Number expression. The magnitude budget: an atom is below 2^63;
     /// `+`/`-` at most double a level's magnitude; `*` takes a small
     /// literal factor (|k| <= 9), or multiplies two literal atoms (below
@@ -2226,9 +2295,13 @@ impl Gen {
                 // Number -> Int on a literal: the atom set has the ties
                 // (0.5, 2.5, -1.5, -0.5), the small negatives whose
                 // ceiling/truncation/rounding is a zero (-0.5, -0.25, `-0`)
-                // and the big integer spellings up to 2^62.
+                // and the big integer spellings up to 2^62; a third of the
+                // operands come from `rounding_operand` instead — the
+                // magnitudes past 2^63 that GHC wraps modulo 2^64 and the
+                // non-finite quotients that round to 0 (N12).
                 let p = [P::Truncate, P::Ceiling, P::Floor, P::Round][self.r.below(4)].clone();
-                Expr::Call(p, vec![self.number_atom()])
+                let operand = if self.r.chance(1, 3) { self.rounding_operand() } else { self.number_atom() };
+                Expr::Call(p, vec![operand])
             }
             _ => self.atom(&Ty::Int),
         }

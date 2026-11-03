@@ -536,6 +536,8 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_result_only_monad, "cases", "result_only_monad.mll"),
         (ghc_oracle_return_bottom_interproc, "cases", "return_bottom_interproc.mll"),
         (ghc_oracle_return_non_strict, "cases", "return_non_strict.mll"),
+        (ghc_oracle_round_to_int_nonfinite, "cases", "round_to_int_nonfinite.mll"),
+        (ghc_oracle_round_to_int_wrap, "cases", "round_to_int_wrap.mll"),
         (ghc_oracle_scoping, "cases", "scoping.mll"),
         (ghc_oracle_section_composition, "cases", "section_composition.mll"),
         (ghc_oracle_selective_import, "cases", "selective_import.mll"),

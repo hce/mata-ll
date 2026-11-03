@@ -35,8 +35,15 @@ modf :: Number -> LuaPure "math.modf" (Number, Number)
 -- (No `abs` here: `abs` is the Prelude's Num method, which covers Number.
 -- An LMath `abs :: Number -> Number` shadowed it for every importer, so
 -- `abs (-3 :: Int)` failed to typecheck after `import LMath`.)
-ceil :: Number -> LuaPure "math.ceil" Int
-floor :: Number -> LuaPure "math.floor" Int
+-- `floor` is the Prelude's `floor` primitive — the same declaration, so
+-- importing LMath unqualified shadows nothing — and `ceil` is the
+-- Prelude's `ceiling` under Lua's name. Both always yield an Int: Lua's
+-- own math.floor/math.ceil return a float for NaN, an infinity or a
+-- magnitude of 2^63 and beyond, which is no value of type Int; the
+-- primitives give GHC's Int there (the exact value modulo 2^64, 0 for a
+-- non-finite argument) and Lua's result for every other argument.
+ceil :: Number -> LuaPure "__mll_ceil" Int
+floor :: Number -> LuaPure "__mll_floor" Int
 fmod :: Number -> Number -> LuaPure "math.fmod" Number
 
 -- Int
