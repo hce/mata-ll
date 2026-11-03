@@ -425,6 +425,10 @@ mll_test!(num_sign_edges, "num_sign_edges.mll");
 mll_test!(record_brace_next_line, "record_brace_next_line.mll");
 mll_test!(enum_range, "enum_range.mll");
 mll_test!(enum_zero_step_range, "enum_zero_step_range.mll");
+// N11: Int ranges reaching maxBound/minBound terminate with GHC's
+// elements (Lua 5.3+ golden) and terminate on a doubles-only host too.
+mll_test!(enum_int_bounds, "enum_int_bounds.mll");
+mll_test!(enum_int_bounds_terminate, "enum_int_bounds_terminate.mll");
 // An integer literal beyond the Int range at Int is GHC's `fromInteger`:
 // the value modulo 2^64 (Lua 5.3+ golden), and the in-window values on
 // every host.

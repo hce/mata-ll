@@ -582,30 +582,64 @@ toEnum_Int n = n
 fromEnum_Int :: Int -> Int
 fromEnum_Int n = n
 
+-- GHC.Enum's Int instance, transcribed (`eftInt`, `efdInt`, `efdtIntUp`,
+-- `efdtIntDn`). The walks are bounded by construction: `enumFrom x` is
+-- `enumFromTo x maxBound`, `enumFromThen x1 x2` runs to maxBound (upward)
+-- or minBound (downward), and every walk tests its limit BEFORE the
+-- addition that would pass it — `eftInt` stops on `x == y`, `efdtIntUp`
+-- on `x > y - delta` — so no step ever computes `maxBound + 1`: on an
+-- integer host that wraps to minBound and `n > m` then never holds, and
+-- on a doubles-only host the addition is absorbed, both infinite loops
+-- (N11). An Int range therefore terminates for every pair of bounds,
+-- including the bounds themselves. The cons tails stay suspended, as in
+-- base: `take 5 [1 ..]` walks five cells.
 enumFrom_Int :: Int -> [Int]
-enumFrom_Int n = n : enumFrom_Int (n + 1)
+enumFrom_Int n = enumFromTo_Int n maxBound
 
 enumFromThen_Int :: Int -> Int -> [Int]
-enumFromThen_Int n m = enumFromThenHelper_Int n (m - n)
-
-enumFromThenHelper_Int :: Int -> Int -> [Int]
-enumFromThenHelper_Int x step = x : enumFromThenHelper_Int (x + step) step
+enumFromThen_Int x1 x2 = enumFromThenTo_Int x1 x2 (if x2 >= x1 then maxBound else minBound)
 
 enumFromTo_Int :: Int -> Int -> [Int]
-enumFromTo_Int n m = if n > m then [] else n : enumFromTo_Int (n + 1) m
+enumFromTo_Int n m = if n > m then [] else enumFromToUp_Int n m
 
-enumFromThenTo_Int :: Int -> Int -> Int -> [Int]
-enumFromThenTo_Int n next m = enumFromThenToHelper_Int n (next - n) m
+-- `eftInt`'s `go`: `n <= m` holds at entry, so the equality is the exit and
+-- the increment never leaves the range.
+enumFromToUp_Int :: Int -> Int -> [Int]
+enumFromToUp_Int x m = if x == m then [x] else x : enumFromToUp_Int (x + 1) m
 
 -- GHC.Enum's direction rule (`enumFromThenTo x1 x2 y | x2 >= x1 = efdtIntUp
 -- ..`): the walk is upward when the step is zero or positive and stops
 -- once it passes the limit, so `[x, x .. y]` is infinitely many `x` when
 -- `x <= y` and `[]` otherwise; only a negative step walks down.
-enumFromThenToHelper_Int :: Int -> Int -> Int -> [Int]
-enumFromThenToHelper_Int x step m =
-    if step >= 0
-    then if x > m then [] else x : enumFromThenToHelper_Int (x + step) step m
-    else if x < m then [] else x : enumFromThenToHelper_Int (x + step) step m
+enumFromThenTo_Int :: Int -> Int -> Int -> [Int]
+enumFromThenTo_Int x1 x2 y =
+    if x2 >= x1 then enumFromThenToUp_Int x1 x2 y else enumFromThenToDn_Int x1 x2 y
+
+-- `efdtIntUp`: a limit below the second element leaves `[x1]` or `[]`;
+-- otherwise `y >= x2 = x1 + delta`, so `y - delta` cannot wrap, and the
+-- walk emits its last element when `x > y - delta` instead of computing
+-- `x + delta` past the limit.
+enumFromThenToUp_Int :: Int -> Int -> Int -> [Int]
+enumFromThenToUp_Int x1 x2 y =
+    if y < x2
+    then if y < x1 then [] else [x1]
+    else x1 : enumFromThenToUpGo_Int x2 (x2 - x1) (y - (x2 - x1))
+
+enumFromThenToUpGo_Int :: Int -> Int -> Int -> [Int]
+enumFromThenToUpGo_Int x delta lim =
+    if x > lim then [x] else x : enumFromThenToUpGo_Int (x + delta) delta lim
+
+-- `efdtIntDn`, the mirror: `y <= x2 = x1 + delta` with `delta < 0`, so
+-- `y - delta` cannot wrap either.
+enumFromThenToDn_Int :: Int -> Int -> Int -> [Int]
+enumFromThenToDn_Int x1 x2 y =
+    if y > x2
+    then if y > x1 then [] else [x1]
+    else x1 : enumFromThenToDnGo_Int x2 (x2 - x1) (y - (x2 - x1))
+
+enumFromThenToDnGo_Int :: Int -> Int -> Int -> [Int]
+enumFromThenToDnGo_Int x delta lim =
+    if x < lim then [x] else x : enumFromThenToDnGo_Int (x + delta) delta lim
 
 -- Enum instance for Bool: the semantics (and error texts) a derived
 -- instance has — Bool is a builtin type, so it cannot carry a deriving

@@ -92,7 +92,14 @@ so `18446744073709551617 :: Int` is `1` on every host) and the literal
 pattern `-9223372036854775808` compare correctly on LuaJIT; `minBound +
 1`, `maxBound` and a runtime `fromInteger`/`fromIntegral` of an `Integer`
 past 2^53 (which rounds there instead of wrapping) are where the 2^53
-limit shows.
+limit shows. An `Int` range is
+GHC.Enum's `Int` instance on every host (`eftInt` stops on equality
+before it increments, `efdtInt` against `y - delta`, `[x ..]` ends at
+`maxBound`), so a range that reaches a bound terminates on LuaJIT too —
+but with the bounds themselves rounded: `[maxBound - 2 .. maxBound]` is
+the one element `2^63` there (GHC: three), and a stepped range whose two
+leading elements round to the same double is a zero-step range, infinite
+when it does not exceed its limit, as GHC's rule says of a zero step.
 
 A doubles-only host also has two spellings of the `Int` zero: `negate 0`,
 `0 * (-5)`, ``0 `div` (-5)``, `ceiling (-0.5)` and `truncate (-0.5)`

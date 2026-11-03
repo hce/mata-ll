@@ -30,15 +30,16 @@
 //!     if __mll_fu_k0 <= 0 then return __mll_fu_a end       -- … decided at
 //!     …                                                    -- its position
 //!     local __mll_fu_i, __mll_fu_hi = <A>, <B>
+//!     if __mll_fu_i > __mll_fu_hi then return __mll_fu_a end  -- empty range
 //!     while true do
 //!         if __mll_fu_k0 <= 0 then return __mll_fu_a end   -- take gates
-//!         if __mll_fu_i > __mll_fu_hi then return __mll_fu_a end
 //!         local __mll_fu_x = __mll_fu_i
 //!         __mll_fu_k0 = __mll_fu_k0 - 1                    -- at its position
 //!         local __mll_fu_x0 = __mll_fu_s1(__mll_fu_x)      -- map
 //!         if __mll_fu_s0(__mll_fu_x0) then                 -- filter
 //!             __mll_fu_a = __mll_fu_f(__mll_fu_a, __mll_fu_x0)
 //!         end
+//!         if __mll_fu_i == __mll_fu_hi then return __mll_fu_a end  -- last
 //!         __mll_fu_i = __mll_fu_i + 1
 //!     end
 //! end)()
@@ -169,10 +170,16 @@
 //! * NAMES — Prelude names are not shadowable at top level, and
 //!   `enumFromTo_Int` is compiler-namespaced, so only LOCAL shadowing is
 //!   checked, on every matched name.
-//! * RANGE EDGE — `while i <= hi … i = i + 1` reproduces
-//!   `enumFromTo_Int`'s own arithmetic, including its behavior at
-//!   maxBound (both diverge identically there — a pre-existing Prelude
-//!   property fusion does not change).
+//! * RANGE EDGE — the loop is GHC's `eftInt` in loop form, the shape
+//!   the Prelude's `enumFromTo_Int` has: emptiness (`i > hi`) is decided
+//!   ONCE before the loop, and inside it the exit is the equality `i ==
+//!   hi` AFTER the element's body and BEFORE the increment. So `i <= hi`
+//!   holds whenever `i + 1` is computed and `maxBound + 1` is never
+//!   formed — on an integer host that sum wraps to minBound and a `while
+//!   i <= hi` head never fails (N11: `length [maxBound - 2 .. maxBound]`
+//!   hung); on a doubles-only host it is absorbed, the same hang. One
+//!   comparison per element, as the head test was: the empty-range test
+//!   moved out of the loop and the equality took its place.
 //! * LEAF SOURCE — an arbitrary list expression is walked
 //!   `__force`/`__mll_head`/`__mll_tail` like every runtime consumer;
 //!   the element is forced at extraction exactly when the gated pipeline
@@ -961,22 +968,42 @@ impl CodeGen {
                 let b_e = self.site_forced_arg_ast(b);
                 stmts.push(Stmt::Local(vec!["__mll_fu_i".into()], Some(a_e)));
                 stmts.push(Stmt::Local(vec!["__mll_fu_hi".into()], Some(b_e)));
-                let mut loop_body = std::mem::take(&mut loop_head);
-                loop_body.push(Stmt::If {
+                // eftInt's shape (see RANGE EDGE): the emptiness test runs
+                // ONCE before the loop, and inside it the exit is the
+                // equality test after the body, before the increment — so
+                // `i <= hi` holds whenever `i + 1` is computed and
+                // `maxBound + 1` is never formed. One comparison per
+                // element, as the `i > hi` loop head had.
+                let exit_seed = Block(vec![Stmt::Return(Expr::name("__mll_fu_a"))]);
+                stmts.push(Stmt::If {
                     cond: Expr::binop(
                         ">",
                         Expr::name("__mll_fu_i"),
                         Expr::name("__mll_fu_hi"),
                     ),
-                    then_b: Block(vec![Stmt::Return(Expr::name("__mll_fu_a"))]),
+                    then_b: exit_seed.clone(),
                     elseifs: vec![],
                     else_b: None,
                 });
+                let mut loop_body = std::mem::take(&mut loop_head);
                 loop_body.push(Stmt::Local(
                     vec!["__mll_fu_x".into()],
                     Some(Expr::name("__mll_fu_i")),
                 ));
                 loop_body.extend(body);
+                // The last element's body has run; a spent take budget
+                // needs no check here (`i + 1` cannot bottom, and the next
+                // iteration's top check returns — see the leaf source).
+                loop_body.push(Stmt::If {
+                    cond: Expr::binop(
+                        "==",
+                        Expr::name("__mll_fu_i"),
+                        Expr::name("__mll_fu_hi"),
+                    ),
+                    then_b: exit_seed,
+                    elseifs: vec![],
+                    else_b: None,
+                });
                 loop_body.push(Stmt::Assign(
                     "__mll_fu_i".into(),
                     Expr::binop("+", Expr::name("__mll_fu_i"), Expr::lit("1")),

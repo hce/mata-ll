@@ -44,6 +44,37 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **An `Int` range that reaches `maxBound` (or `minBound` downward)
+  terminates, and `[x ..]` / `[x, y ..]` at `Int` end at the bound.**
+  `length [maxBound - 2 .. maxBound :: Int]` never returned, `take 5` of
+  that range printed `[9223372036854775805, 9223372036854775806,
+  9223372036854775807, -9223372036854775808, -9223372036854775807]` (GHC:
+  the first three), `[maxBound - 1 ..]` had no end and `[minBound + 2,
+  minBound + 1 .. minBound]` walked past `minBound` forever; on LuaJIT
+  every such range hung at once. The Prelude's `enumFromTo_Int` was
+  `if n > m then [] else n : go (n + 1) m` — it formed `maxBound + 1`,
+  which wraps to `minBound` on an integer host (so `n > m` never held) and
+  is absorbed on a doubles-only host (`2^63 + 1 == 2^63`) — and
+  `enumFrom_Int`/`enumFromThen_Int` had no bound at all; the fused range
+  loop (`while i <= hi … i = i + 1`) had the same arithmetic by design.
+  GHC.Enum's `Int` instance is transcribed now: `eftInt` emits `x` and
+  stops on `x == y` *before* the increment, `efdtIntUp`/`efdtIntDn` stop
+  on `x > y - delta` (`y - delta` cannot wrap once `y >= x2`), `enumFrom x`
+  is `enumFromTo x maxBound`, and `enumFromThen x1 x2` runs to `maxBound`
+  or `minBound` by its direction — so a range terminates for every pair of
+  bounds and produces GHC's elements, including the wrapping-delta shapes
+  (`[minBound, maxBound .. maxBound]` is `[minBound, maxBound]`, as in
+  GHC). The fused loop takes the same shape (emptiness decided once before
+  the loop, the equality exit after the body, before the increment — one
+  comparison per element, as before). The `Integer`, derived, `Bool`,
+  `Ordering`, `()` and `Number` ranges are unchanged. On LuaJIT the bounds
+  themselves remain doubles (`maxBound - 2` is `2^63` there, so the range
+  is one element), but every range terminates there too; a stepped range
+  whose two leading elements collapse to one double is a zero-step range
+  and infinite, as GHC's rule says of a zero step. The backend fuzzer's
+  Int ranges now put operands within three of the bounds. Found by the
+  2026-10 fresh-eyes review (N11). (GHC-goldened cases `enum_int_bounds`
+  — Lua 5.3+ — and `enum_int_bounds_terminate`, which runs on every host.)
 - **An integer literal beyond the `Int` range at type `Int` is GHC's
   `fromInteger n :: Int` — the value modulo 2^64.** `print
   ((-9223372036854775808) :: Int)` crashed at runtime ("attempt to

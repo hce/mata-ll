@@ -51,7 +51,10 @@
 //! ranges at Int and Integer (`take k [a .. c]`, `take k [a, b .. c]`, a
 //! third of them with a zero step) are oracled against base's own
 //! `eftInt`/`efdtInt`/`enumDeltaToInteger`, so the direction rule
-//! (upward iff `b >= a`) has a standing probe beside the hand corpus.
+//! (upward iff `b >= a`) has a standing probe beside the hand corpus; a
+//! third of the Int ranges put operands within three of maxBound/minBound
+//! (N11), so the equality exit at a bound and the `y - delta` guard
+//! (including a wrapping delta) are probed too.
 //! At Int, `negate`/`abs`/`signum`, `div`/`mod` by a negative literal and
 //! `truncate`/`ceiling`/`floor`/`round` of a Number literal are the shapes
 //! that compute a -0.0 Int on a doubles-only host (N9); the batch itself
@@ -378,9 +381,13 @@ enum Expr {
     /// form is infinite at a zero step. The probe is GHC.Enum's direction
     /// rule (the walk is upward iff `b >= a`, so a zero step walks upward:
     /// infinitely many `a` when `a <= c`, `[]` otherwise) and the limit
-    /// shapes below, between and beyond the first pair; the operands are
-    /// atoms, which keeps the fragment away from the Int overflow edge
-    /// (base guards it with `y - delta`), a separate concern.
+    /// shapes below, between and beyond the first pair. The operands are
+    /// atoms, and in a third of the Int ranges some lie within three of
+    /// maxBound/minBound (N11): base's `eftInt` stops on equality before
+    /// the increment and `efdtInt` against `y - delta`, so a range that
+    /// reaches a bound ends there, and a stepped range whose delta wraps
+    /// (`[minBound, maxBound .. maxBound]`) is whatever that wrapping
+    /// arithmetic yields — the reference computes it the same way.
     Range { from: Box<Expr>, then: Option<Box<Expr>>, to: Box<Expr>, budget: usize },
     /// A bare reference to a prelude/scaffold function used first-class
     /// (`map`, `const`, `($)`, …) — the arity-widening and adapters path.
@@ -1875,6 +1882,23 @@ impl Gen {
     }
 
     /// A depth-0 value of `ty`.
+    /// A range operand: an atom, or — when the range is one of the
+    /// near-bound Int ranges — half the time an Int within three of
+    /// maxBound or minBound, so the three operands land below, at and
+    /// (after a wrap) beyond a bound in every combination.
+    fn range_operand(&mut self, ty: &Ty, near_bound: bool) -> Expr {
+        if near_bound && self.r.chance(1, 2) {
+            let k = self.r.below(4) as i64;
+            if self.r.chance(1, 2) {
+                Expr::IntLit(i64::MAX - k)
+            } else {
+                Expr::IntLit(i64::MIN + k)
+            }
+        } else {
+            self.atom(ty)
+        }
+    }
+
     fn atom(&mut self, ty: &Ty) -> Expr {
         match ty {
             Ty::Int => Expr::IntLit(self.r.below(21) as i64 - 5),
@@ -2443,13 +2467,21 @@ impl Gen {
                 // between and beyond the first pair about equally. The
                 // budget is never zero, so each range shows at least its
                 // first element or its emptiness.
-                let from = self.atom(elem);
+                // A third of the Int ranges put some operands within a
+                // few of maxBound/minBound (N11): the `[x .. maxBound]`
+                // exit on equality, `efdtInt`'s `y - delta` guard at the
+                // top and bottom of the range, the `[x1]`/`[]` short
+                // answers, and the wrapping-delta shapes (`[minBound,
+                // maxBound .. maxBound]`), all of which the reference
+                // computes with base's own wrapping arithmetic.
+                let near_bound = *elem == Ty::Int && self.r.chance(1, 3);
+                let from = self.range_operand(elem, near_bound);
                 let then = match self.r.below(3) {
                     0 => None,
                     1 => Some(b(from.clone())),
-                    _ => Some(b(self.atom(elem))),
+                    _ => Some(b(self.range_operand(elem, near_bound))),
                 };
-                let to = self.atom(elem);
+                let to = self.range_operand(elem, near_bound);
                 let budget = 1 + self.r.below(5);
                 Expr::Range { from: b(from), then, to: b(to), budget }
             }

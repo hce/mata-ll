@@ -1441,3 +1441,54 @@ fn concrete_inner_binder_over_lazy_outer_emits_like_the_unshadowed_twin() {
         "a concrete inner binder named like a lazy outer one must emit exactly as a fresh name does"
     );
 }
+
+/// The fused range loop is GHC's `eftInt` in loop form (fuse.rs, RANGE
+/// EDGE): the emptiness test `i > hi` runs once BEFORE the loop, and the
+/// loop's exit is the equality `i == hi` after the element's body and
+/// before the increment, so `maxBound + 1` is never formed (N11: the
+/// `while i <= hi … i = i + 1` head wrapped at maxBound and never
+/// failed). Pinned on the two consumers whose fusion the range source
+/// feeds; the equality exit must precede the increment in the text.
+#[test]
+fn fused_range_loop_exits_on_equality_before_the_increment() {
+    let source = r#"
+main :: IO ()
+main = do
+  print (sum (filter odd (map (* 3) [1 .. 100 :: Int])))
+  print (length (filter even [1 .. 100 :: Int]))
+"#;
+    let lua = compile(source, Path::new("tests/cases"), &[])
+        .expect("compile should succeed")
+        .lua_code;
+    let loops = lua.matches("__mll_fu_i = __mll_fu_i + 1").count();
+    assert_eq!(loops, 2, "both pipelines must fuse into range loops: {lua}");
+    assert_eq!(
+        lua.matches("if __mll_fu_i > __mll_fu_hi then").count(),
+        2,
+        "the emptiness test runs once per loop, before it: {lua}"
+    );
+    assert_eq!(
+        lua.matches("if __mll_fu_i == __mll_fu_hi then").count(),
+        2,
+        "each loop exits on the equality: {lua}"
+    );
+    let mut rest = lua.as_str();
+    while let Some(at) = rest.find("if __mll_fu_i == __mll_fu_hi then") {
+        let after = &rest[at..];
+        let inc = after
+            .find("__mll_fu_i = __mll_fu_i + 1")
+            .expect("the increment follows the equality exit");
+        let head = after
+            .find("while true do")
+            .unwrap_or(usize::MAX);
+        assert!(
+            inc < head,
+            "the equality exit and the increment must sit in the same loop body: {lua}"
+        );
+        rest = &after[inc..];
+    }
+    assert!(
+        !lua.contains("while __mll_fu_i <= __mll_fu_hi"),
+        "no condition-headed range loop: {lua}"
+    );
+}

@@ -154,7 +154,12 @@ value is exact when it is a double (`minBound` is, `1` is) and rounds
 past 2^53 like every other `Int` there. On such a host
 `fromInteger`/`fromIntegral` at `Int` narrows an
 `Integer` past 2^53 to the nearest double — the same correctly rounded
-value the `Number` target gets — rather than wrapping. Its `Int`
+value the `Number` target gets — rather than wrapping. An `Int` range
+there is GHC's walk over those rounded bounds: it terminates whenever
+GHC's does (`[maxBound - 2 .. maxBound]` is the one element 2^63, GHC's
+three; `[x ..]` ends at the rounded `maxBound`), and a stepped range
+whose two leading elements round to one double is a zero-step range,
+infinite below its limit as GHC's rule says of a zero step. Its `Int`
 arithmetic can also compute IEEE's -0.0 (`negate 0`, `0 * (-5)`,
 `truncate (-0.5)`); that value is the `Int` 0 exactly as in GHC — it
 shows as `0`, converts to `0.0`, reads back from a map as `0` — and only
@@ -794,7 +799,7 @@ class `Hashable` are mata-ll's own.
 | `Eq` | the same types, plus `IORef a` (reference identity, as GHC) |
 | `Ord` | the same types but `IORef` (see the previous section) |
 | `Read` | `Int`, `Integer`, `Number`, `Bool`, `String` — GHC's grammar per type (see "`read` is GHC's lexer" below), no `Maybe`/list/tuple readers (there is no `deriving (Read)`) |
-| `Enum` | `Int`, `Integer`, `Number` (GHC's `Enum Double`: `fromEnum` truncates, the ranges are base's `numericEnumFrom` family), `Bool`, `Ordering`, `()`, and derived enumerations — every stepped range takes GHC.Enum's direction: upward iff the second element is not below the first, so `[x, x .. y]` is infinitely many `x` when `x <= y` and `[]` otherwise |
+| `Enum` | `Int` (GHC.Enum's instance: `[x ..]` ends at `maxBound`, `[x, y ..]` at the bound in its direction, and a range that reaches a bound stops there — `eftInt` exits on equality before it increments, `efdtInt` against `y - delta`), `Integer`, `Number` (GHC's `Enum Double`: `fromEnum` truncates, the ranges are base's `numericEnumFrom` family), `Bool`, `Ordering`, `()`, and derived enumerations — every stepped range takes GHC.Enum's direction: upward iff the second element is not below the first, so `[x, x .. y]` is infinitely many `x` when `x <= y` and `[]` otherwise |
 | `Bounded` | `Int`, `Bool`, `Ordering`, `()`, tuples up to the 15-tuple, and derived enumerations and single-constructor products |
 | `Num` | `Int`, `Integer`, `Number` |
 | `Real` | `Int`, `Integer`, `Number` |

@@ -883,6 +883,10 @@ variable.
     -- [1,5..3] is [1], [5,1..3] is [5], [3,1..5] is [], and a zero
     -- step is an infinite list of the start when it does not exceed
     -- the limit ([1,1..5]) and [] when it does ([5,5..1]).
+    -- At Int the instance is GHC.Enum's: [n ..] is [n .. maxBound],
+    -- [n, m ..] runs to maxBound or minBound by its direction, and a
+    -- range that reaches a bound ends there ([maxBound - 1 ..] is
+    -- the two elements; no walk computes maxBound + 1).
 
 # Type inference
 
