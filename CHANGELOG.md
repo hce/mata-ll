@@ -44,6 +44,39 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **An integer literal beyond the `Int` range at type `Int` is GHC's
+  `fromInteger n :: Int` — the value modulo 2^64.** `print
+  ((-9223372036854775808) :: Int)` crashed at runtime ("attempt to
+  perform arithmetic on a table value" on Lua 5.5, "attempt to compare
+  table with number" on LuaJIT), as did `9223372036854775808 :: Int`,
+  `18446744073709551617 :: Int` and every `negate`/`abs`/`+`/`==`/`show`
+  over such a literal: a numeral past i64 reaches the monomorphizer as a
+  decimal string (`TLiteral::BigInteger`), its literal lowering returned
+  it raw at `Int` (the right answer for an in-range machine integer), and
+  codegen hoisted the digits into the Integer literal pool, so an
+  Int-typed value was a bignum table. GHC narrows (Haskell 2010 §6.4.1,
+  the literal is `fromInteger n`; GHC's `Int` instance keeps the low 64
+  bits and warns): `9223372036854775808` is `minBound`,
+  `-9223372036854775809` is `maxBound`, `18446744073709551617` is `1`.
+  The monomorphizer now lowers a `BigInteger` literal at `Int` to that
+  machine integer at compile time (`integer_literal_as_int`) through the
+  one wrap the literal-PATTERN path already used (`wrap_decimal_to_i64`,
+  which HASKDIFF documented for patterns), so an expression and a pattern
+  spelling the same numeral meet the same value; the folder's `Lit` arm
+  is the second line of the same defense, and its `Int` folds (`+`, `-`,
+  `*`, prefix negation) now wrap like the Lua 5.3+ runtime they stand in
+  for (`negate minBound` folds to `minBound`, `9223372036854775807 + 1 ::
+  Int` to `minBound`; at any other type an overflowing fold still
+  declines). A dictionary-routed literal (`Num a => a` reached through an
+  existential) already narrowed at runtime through `fromInteger_Int`.
+  In-range literals compile byte-identically. On a doubles-only host the
+  wrapped value is read as the nearest double, as every `Int` there is
+  (`18446744073709551617 :: Int` is `1` on every host; `9223372036854775807`
+  is 2^63 on LuaJIT). Not from the 2026-10 review list: found by the
+  backend fuzzer once the N11 fix taught its Int ranges to put operands at
+  `minBound + k` — index 510 of the batch spelled `(-9223372036854775808)
+  :: Int`. (GHC-goldened cases `int_literal_wrap` — Lua 5.3+ — and
+  `int_literal_wrap_window`, the in-window values on every host.)
 - **An `Int` has no sign of zero on a doubles-only host either: a `-0.0`
   `Int` shows as `0` and converts to the `Number` `0.0`.** On LuaJIT an
   `Int` is a double, and `negate 0`, `0 * (-5)`, ``0 `div` (-5)``,

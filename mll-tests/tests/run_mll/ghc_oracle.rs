@@ -375,6 +375,8 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_either_ordering, "cases", "either_ordering.mll"),
         (ghc_oracle_enum_range, "cases", "enum_range.mll"),
         (ghc_oracle_enum_zero_step_range, "cases", "enum_zero_step_range.mll"),
+        (ghc_oracle_int_literal_wrap, "cases", "int_literal_wrap.mll"),
+        (ghc_oracle_int_literal_wrap_window, "cases", "int_literal_wrap_window.mll"),
         (ghc_oracle_even_odd, "cases", "even_odd.mll"),
         (ghc_oracle_even_odd_64bit, "cases", "even_odd_64bit.mll"),
         (ghc_oracle_exceptions, "cases", "exceptions.mll"),

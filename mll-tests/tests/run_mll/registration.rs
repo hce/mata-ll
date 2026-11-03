@@ -425,6 +425,11 @@ mll_test!(num_sign_edges, "num_sign_edges.mll");
 mll_test!(record_brace_next_line, "record_brace_next_line.mll");
 mll_test!(enum_range, "enum_range.mll");
 mll_test!(enum_zero_step_range, "enum_zero_step_range.mll");
+// An integer literal beyond the Int range at Int is GHC's `fromInteger`:
+// the value modulo 2^64 (Lua 5.3+ golden), and the in-window values on
+// every host.
+mll_test!(int_literal_wrap, "int_literal_wrap.mll");
+mll_test!(int_literal_wrap_window, "int_literal_wrap_window.mll");
 mll_test!(read_typeclass, "read_typeclass.mll");
 mll_test!(read_grammar, "read_grammar.mll");
 mll_test!(read_int_wrap, "read_int_wrap.mll");

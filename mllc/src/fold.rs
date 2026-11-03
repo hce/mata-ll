@@ -619,6 +619,23 @@ impl Folder {
                     ty,
                 )
             }
+            // The same guarantee for `Int`: an `Int` is the machine integer
+            // on every host, never a bignum, so a numeral past the i64 range
+            // typed Int is the value GHC's `fromInteger` at Int denotes —
+            // modulo 2^64 (`integer_literal_as_int`, the monomorphizer's own
+            // lowering; this arm catches whatever reaches the folder still
+            // spelled as digits). Codegen would otherwise hoist the digits
+            // into the Integer literal pool and hand `negate`/`show`/`+` at
+            // Int a table.
+            TExprKind::Lit(lit @ TLiteral::BigInteger(_))
+                if matches!(&ty, Ty::Con(c) if c == "Int") =>
+            {
+                self.changed = true;
+                TExpr::new(
+                    TExprKind::Lit(crate::mono::Monomorphizer::integer_literal_as_int(lit)),
+                    ty,
+                )
+            }
             TExprKind::Var(name) => {
                 if !self.is_shadowed(&name)
                     && let Some(lit) = self.cafs.get(&name) {
@@ -634,10 +651,18 @@ impl Folder {
                 }
                 TExpr::new(TExprKind::InfixApp { op, lhs, rhs }, ty)
             }
-            // Negating i64::MIN has no i64 result: like the binary folds, leave
-            // it unfolded for the runtime (an unchecked `-n` panicked in debug
-            // builds and wrapped in release, where an `Integer` promotes).
+            // At `Int` negation wraps like every other Int fold (GHC's
+            // `negate minBound` is `minBound`, the runtime's unary minus on
+            // Lua 5.3+ agrees, and a machine literal has no other value to
+            // take). At any other type a bare literal reaching here is a
+            // deferred overloaded literal whose instance is not known, so the
+            // one overflowing case (i64::MIN) is left unfolded for it — an
+            // Integer promotes there, and a wrapped `-n` would be wrong.
             TExprKind::Negate(inner) => match unwrap_lit(&inner) {
+                Some(TLiteral::Integer(n)) if is_int(&ty) => {
+                    self.changed = true;
+                    TExpr::new(TExprKind::Lit(TLiteral::Integer(n.wrapping_neg())), ty)
+                }
                 Some(TLiteral::Integer(n)) if n.checked_neg().is_some() => {
                     self.changed = true;
                     TExpr::new(TExprKind::Lit(TLiteral::Integer(-n)), ty)
@@ -845,13 +870,29 @@ fn try_fold_infix(op: &str, lhs: &TExpr, rhs: &TExpr, ty: &Ty) -> Option<TExpr> 
     }
 }
 
+/// Is `ty` the machine integer? Decides whether an integer fold wraps.
+fn is_int(ty: &Ty) -> bool {
+    matches!(ty, Ty::Con(c) if c == "Int")
+}
+
 fn fold_int_int(op: &str, a: i64, b: i64, ty: &Ty) -> Option<TExpr> {
     let lit = |v: i64| Some(TExpr::new(TExprKind::Lit(TLiteral::Integer(v)), ty.clone()));
     let cmp = |v: bool| Some(TExpr::new(TExprKind::Lit(TLiteral::Bool(v)), ty.clone()));
+    // GHC's `Int` is a two's-complement 64-bit word: `maxBound + 1` IS
+    // `minBound`, at compile time exactly as the Lua 5.3+ runtime computes
+    // it, so a node typed Int folds with wrapping arithmetic and never
+    // declines on overflow (a declined fold would be the same value one
+    // host-operation later). A bare literal pair at any OTHER type is a
+    // deferred overloaded literal whose instance is not yet known — there an
+    // overflowing fold declines and the instance's own arithmetic decides
+    // (an `Integer` promotes).
+    let arith = |checked: Option<i64>, wrapped: i64| {
+        if is_int(ty) { lit(wrapped) } else { checked.and_then(lit) }
+    };
     match op {
-        "+"   => a.checked_add(b).and_then(lit),
-        "-"   => a.checked_sub(b).and_then(lit),
-        "*"   => a.checked_mul(b).and_then(lit),
+        "+"   => arith(a.checked_add(b), a.wrapping_add(b)),
+        "-"   => arith(a.checked_sub(b), a.wrapping_sub(b)),
+        "*"   => arith(a.checked_mul(b), a.wrapping_mul(b)),
         // Haskell (and the emitted Lua runtime) use FLOOR semantics: `div`
         // rounds the quotient toward negative infinity and `mod` takes the
         // sign of the DIVISOR (7 `div` (-2) = -4, 7 `mod` (-2) = -1). Rust's

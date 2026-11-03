@@ -89,6 +89,7 @@ mod upvalues;
 mod util;
 
 pub(crate) use names::is_lua_keyword;
+pub(crate) use names::wrap_decimal_to_i64;
 pub(crate) use names::runtime_spellings;
 // For the builtin-instance definition test in lib.rs: the names the
 // runtime prelude binds and the operators a dictionary entry gets a value

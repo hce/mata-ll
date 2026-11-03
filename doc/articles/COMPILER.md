@@ -404,7 +404,13 @@ constant folding (§7) can then recognize them.
     `-0.0`) and `literal_ast` spells it as a Lua float
     (`lua_number_literal`); the folder's own `Lit` arm normalizes any
     Integer literal still typed Number — the second line of the same
-    defense; a literal PATTERN at Number is spelled as the rounded
+    defense (the `Int` counterpart: a `BigInteger` literal at `Int` —
+    a numeral past i64 — becomes the machine integer GHC's
+    `fromInteger` denotes, modulo 2^64, in `literal_use` through
+    `integer_literal_as_int`, the one `wrap_decimal_to_i64` the pattern
+    path uses, with the folder's `Lit` arm as its second line; left as
+    digits it was hoisted into the Integer pool and an Int was a table);
+    a literal PATTERN at Number is spelled as the rounded
     float by `collect_pattern_conditions` (and `__mll_lit_eq` compares a
     float scrutinee against the rounded literal);
   - the runtime: `fromInteger_Number` (the dictionary-routed literal
@@ -663,7 +669,16 @@ built-in operators and the now-resolved monomorphic typeclass methods. Pure
 peephole-style reduction; safe to extend with more recognized patterns.
 A fold at a `Number`-typed node is double arithmetic: the `Lit` arm turns
 any integer literal typed Number into the `TLiteral::Number` it denotes
-before the operator folds see it (see "A Number is a double" in §4).
+before the operator folds see it (see "A Number is a double" in §4). A
+fold at an `Int`-typed node is two's-complement 64-bit arithmetic: the
+`Lit` arm narrows a `BigInteger` literal typed Int to its value modulo
+2^64 (`integer_literal_as_int`), and `+`, `-`, `*` and prefix negation
+wrap (`fold_int_int`, `is_int`) — the arithmetic the Lua 5.3+ runtime
+performs, so folding changes no value there. At any other type a bare
+integer literal is a deferred overloaded literal whose instance is not
+known, and an overflowing fold declines (an `Integer` promotes). `div`
+and `mod` decline on a zero divisor and on `minBound div -1`, where the
+runtime raises.
 
 ---
 

@@ -90,7 +90,11 @@ pub(super) fn lua_int_literal(n: i64) -> String {
 /// (`9223372036854775808` is `minBound`, `18446744073709551617` is `1`).
 /// Wrapping arithmetic over the digits IS reduction modulo 2^64. The
 /// literal is digits with an optional leading sign (the lexer's shape).
-pub(super) fn wrap_decimal_to_i64(digits: &str) -> i64 {
+/// The ONE wrap for every `BigInteger` literal at `Int`: a pattern
+/// (`collect_pattern_conditions`) and an expression (the monomorphizer's
+/// `integer_literal_as_int`, the folder's `Lit` arm) go through this
+/// function, so the two positions can never disagree on a value.
+pub(crate) fn wrap_decimal_to_i64(digits: &str) -> i64 {
     let (negative, magnitude) = match digits.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, digits),

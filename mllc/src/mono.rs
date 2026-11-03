@@ -2974,7 +2974,14 @@ impl Monomorphizer {
     /// `Integer -> ty` / `Number -> ty`:
     ///   * Int: `fromInteger_Int` is the identity on the machine integer,
     ///     so the literal stays raw (`Err`) — the documented host
-    ///     representation;
+    ///     representation. A numeral past the i64 range (a `BigInteger`)
+    ///     is narrowed HERE, at compile time, to the machine integer GHC's
+    ///     `fromInteger` at Int denotes — the value modulo 2^64
+    ///     (`integer_literal_as_int`: `9223372036854775808 :: Int` is
+    ///     `minBound`, `18446744073709551617 :: Int` is `1`) — through the
+    ///     one wrap the literal-pattern path uses. Left as a `BigInteger`
+    ///     it was emitted as an Integer bignum, so an Int-typed value was a
+    ///     table at runtime and `negate`/`show`/`+` on it crashed;
     ///   * Number: `fromInteger` at Double ROUNDS the integer to the
     ///     nearest double, and a `Number` is an IEEE double on every host
     ///     (never Lua's integer subtype — the invariant codegen, the
@@ -3015,7 +3022,8 @@ impl Monomorphizer {
         let conv = match self.dispatch_method(method, &use_ty, ev) {
             MethodUse::Impl(name) => match name.as_str() {
                 "fromInteger_Number" => return Err(Self::integer_literal_as_number(lit)),
-                "fromInteger_Int" | "fromRational_Number" => return Err(lit),
+                "fromInteger_Int" => return Err(Self::integer_literal_as_int(lit)),
+                "fromRational_Number" => return Err(lit),
                 _ => TExpr::new(TExprKind::Var(name), Ty::Unit),
             },
             MethodUse::Evidence(kind) => TExpr::new(kind, use_ty),
@@ -3072,6 +3080,24 @@ impl Monomorphizer {
             TLiteral::BigInteger(s) => TLiteral::Number(
                 s.parse::<f64>().expect("an integer literal is a decimal numeral"),
             ),
+            other => other,
+        }
+    }
+
+    /// GHC's `fromInteger` at `Int` applied at compile time: a decimal
+    /// numeral outside the i64 range becomes the machine integer it
+    /// denotes modulo 2^64 (H2010 §6.4.1: the literal is `fromInteger n`,
+    /// and GHC's `Int` instance keeps the low 64 bits — `9223372036854775808`
+    /// is `minBound`, `-9223372036854775809` is `maxBound`,
+    /// `18446744073709551617` is `1`), through the wrap the literal-pattern
+    /// path already applies (`wrap_decimal_to_i64`), so an expression and
+    /// a pattern spelling the same numeral meet the same value. An in-range
+    /// literal, and every other literal kind, pass through unchanged. On a
+    /// doubles-only host the emitted machine integer is read as the
+    /// nearest double, as every `Int` there is.
+    pub(crate) fn integer_literal_as_int(lit: TLiteral) -> TLiteral {
+        match lit {
+            TLiteral::BigInteger(s) => TLiteral::Integer(crate::codegen::wrap_decimal_to_i64(&s)),
             other => other,
         }
     }

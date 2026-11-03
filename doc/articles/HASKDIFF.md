@@ -142,12 +142,17 @@ different speed. Annotate a value `:: Int` for the fast machine word when
 the deployment host is Lua 5.3+ or the values provably stay below 2^53;
 the full story (`div` beyond 2^53, the erased-`show` corner) is in
 CAVEATS.md under "Int overflow wraps silently". `Integer` is exact on
-every host. An integer literal pattern at `Int` compares with the
-literal's 64-bit value, wrapped exactly as GHC's `fromInteger` wraps an
-out-of-range literal (`f 9223372036854775808 = …` matches `minBound`, as
-in GHC, which warns); on a doubles-only host that value is exact when it
-is a double (`minBound` is) and rounds past 2^53 like every other `Int`
-there. On such a host `fromInteger`/`fromIntegral` at `Int` narrows an
+every host. An integer literal and an integer literal pattern at `Int`
+are the literal's 64-bit value, wrapped exactly as GHC's `fromInteger`
+wraps an out-of-range literal (`9223372036854775808 :: Int` is `minBound`
+and `f 9223372036854775808 = …` matches it, `18446744073709551617 :: Int`
+is `1`, as in GHC, which warns) — both positions go through one wrap at
+compile time, and a constant `Int` expression over such literals folds
+with wrapping arithmetic (`negate minBound`, `maxBound + 1`), the
+arithmetic the Lua 5.3+ runtime performs; on a doubles-only host that
+value is exact when it is a double (`minBound` is, `1` is) and rounds
+past 2^53 like every other `Int` there. On such a host
+`fromInteger`/`fromIntegral` at `Int` narrows an
 `Integer` past 2^53 to the nearest double — the same correctly rounded
 value the `Number` target gets — rather than wrapping. Its `Int`
 arithmetic can also compute IEEE's -0.0 (`negate 0`, `0 * (-5)`,

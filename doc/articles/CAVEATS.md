@@ -85,9 +85,14 @@ read back — converts), so `Number` arithmetic never wraps.
 On LuaJIT, integers are represented as doubles, so precision is lost beyond
 2^53. `minBound :: Int` itself is a double (-2^63 is a power of two), and
 the compiler spells it so every host reads it exactly — a constant-folded
-`-9223372036854775807 - 1` and the literal pattern `-9223372036854775808`
-compare correctly on LuaJIT; `minBound + 1`, `maxBound` and the wrap of
-`negate minBound` are where the 2^53 limit shows.
+`-9223372036854775807 - 1`, the literal `-9223372036854775808` (or
+`9223372036854775808`, which GHC's `fromInteger` wraps to `minBound`; the
+compiler wraps an out-of-range literal at `Int` the same way, modulo 2^64,
+so `18446744073709551617 :: Int` is `1` on every host) and the literal
+pattern `-9223372036854775808` compare correctly on LuaJIT; `minBound +
+1`, `maxBound` and a runtime `fromInteger`/`fromIntegral` of an `Integer`
+past 2^53 (which rounds there instead of wrapping) are where the 2^53
+limit shows.
 
 A doubles-only host also has two spellings of the `Int` zero: `negate 0`,
 `0 * (-5)`, ``0 `div` (-5)``, `ceiling (-0.5)` and `truncate (-0.5)`
