@@ -118,11 +118,13 @@ pub struct TFunction {
     pub clauses: Vec<TClause>,
     /// If true, this is a monomorphized specialization
     pub specialized: bool,
-    /// The SOURCE name a monomorphized specialization was generated from
-    /// (`foldl'` for `foldl'_IntT…`) — set only by mono's
-    /// generate_specialization. Consumers that key behavior on a Prelude
-    /// function's identity (the list-pipeline fusion) resolve through
-    /// this instead of parsing the mangled spelling.
+    /// The name a monomorphized specialization was generated from
+    /// (`sum` for `sum·LInt`; the instance method's generated name
+    /// `foldl'·[]` for `foldl'·[]·IntTIntT…`) — set only by mono's
+    /// specialization constructors. Consumers that key behavior on a
+    /// Prelude function's identity (the list-pipeline fusion, through
+    /// codegen's `fn_origin`) resolve through this and `ast::minted_parts`
+    /// instead of parsing the mangled spelling.
     pub spec_origin: Option<String>,
     /// Dictionary parameters of a dictionary-passing function (one per
     /// constraint, in declaration order), each `(class_name, param_name)`:

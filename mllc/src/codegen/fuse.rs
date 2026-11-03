@@ -167,7 +167,16 @@
 //!   one flat call. The runtime generics (`map(f, xs)` calling
 //!   `f(xs[1])`) already lean on exactly this. A partial application
 //!   bound as a stage local is a closure the same convention covers.
-//! * NAMES — Prelude names are not shadowable at top level, and
+//! * NAMES — every consumer, stage and source is recognized by its SOURCE
+//!   identity, `CodeGen::fn_origin` (mod.rs): a mono specialization
+//!   resolves to the function it was generated from, and a class method's
+//!   implementation at an instance (`foldl'·[]`) to the method, through
+//!   `ast::minted_parts`. No generated spelling is matched here — the
+//!   checker and mono own those spellings, and a hand-copied `foldl'_[a]`
+//!   kept the `foldl'` consumer dead for two months while every fusion
+//!   test checked values only (Q44). Which instance a `foldl'` use was
+//!   dispatched to is read off the structure argument's type (a list),
+//!   not off the name. Prelude names are not shadowable at top level, and
 //!   `enumFromTo_Int` is compiler-namespaced, so only LOCAL shadowing is
 //!   checked, on every matched name.
 //! * RANGE EDGE — the loop is GHC's `eftInt` in loop form, the shape
@@ -296,12 +305,6 @@ fn arrow_args(ty: &Ty, n: usize) -> Option<Vec<&Ty>> {
 }
 
 impl CodeGen {
-    /// The SOURCE name a call-head Var denotes: the mono specialization's
-    /// origin (`foldl'_IntT…` -> `foldl'`) or the name itself.
-    fn fn_origin<'a>(&'a self, name: &'a str) -> &'a str {
-        self.spec_origins.get(name).map(String::as_str).unwrap_or(name)
-    }
-
     /// Does evaluating `e` to WHNF force the variable `p` on every path?
     /// Conservative and syntactic: false when unsure. Used to judge a
     /// lambda's parameter strictness (sections desugar to lambdas).
@@ -675,13 +678,23 @@ impl CodeGen {
         if self.is_local_shadowed(name) {
             return None;
         }
+        // Every recognizer below asks for a name's SOURCE identity through
+        // `fn_origin` (mod.rs), never for its spelling: `foldl'` arrives as
+        // a specialization of the list instance's implementation, `sum` and
+        // `length` as specializations of the Prelude functions, the stages
+        // and the range source as the runtime's own names.
         let consumer = match (self.fn_origin(name), args.len()) {
             // `foldl'` is a Foldable class method: at list type mono
-            // dispatches it to the `[]` instance's implementation, named
-            // `foldl'_[a]` by the checker's instance-method mangling, and a
-            // specialization of that records it as its origin. Both
-            // spellings are the list strict fold.
-            ("foldl'", 3) | ("foldl'_[a]", 3) => Consumer::Fold { f: args[0], z: args[1] },
+            // dispatches it to the `[]` instance's implementation and
+            // specializes that, and `fn_origin` reads both back to the
+            // method. Which instance's fold this is, the structure
+            // argument's type says: an instance is decided by its head
+            // type, so a list-typed argument makes it the list instance's
+            // strict fold — the one this loop is the shape of. Any other
+            // structure (a Maybe, a user Foldable) stays the general call.
+            ("foldl'", 3) if matches!(args[2].ty, Ty::List(_)) => {
+                Consumer::Fold { f: args[0], z: args[1] }
+            }
             ("sum", 1) => {
                 // The element/result type: sum :: [a] -> a.
                 let Ty::Arrow(_, ret, _) = &f.ty else { return None };
@@ -748,25 +761,31 @@ impl CodeGen {
             let (h, sp) = spine(c);
             match &h.kind {
                 TExprKind::Var(n)
-                    if n == "map" && sp.len() == 2 && !self.is_local_shadowed(n) =>
+                    if self.fn_origin(n) == "map"
+                        && sp.len() == 2
+                        && !self.is_local_shadowed(n) =>
                 {
                     stages.push(Stage::Map(sp[0]));
                     chain = sp[1];
                 }
                 TExprKind::Var(n)
-                    if n == "filter" && sp.len() == 2 && !self.is_local_shadowed(n) =>
+                    if self.fn_origin(n) == "filter"
+                        && sp.len() == 2
+                        && !self.is_local_shadowed(n) =>
                 {
                     stages.push(Stage::Filter(sp[0]));
                     chain = sp[1];
                 }
                 TExprKind::Var(n)
-                    if n == "take" && sp.len() == 2 && !self.is_local_shadowed(n) =>
+                    if self.fn_origin(n) == "take"
+                        && sp.len() == 2
+                        && !self.is_local_shadowed(n) =>
                 {
                     stages.push(Stage::Take(sp[0]));
                     chain = sp[1];
                 }
                 TExprKind::Var(n)
-                    if n == "enumFromTo_Int"
+                    if self.fn_origin(n) == "enumFromTo_Int"
                         && sp.len() == 2
                         && !self.is_local_shadowed(n) =>
                 {

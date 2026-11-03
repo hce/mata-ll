@@ -189,6 +189,24 @@ pub fn minted(stem: &str, of: &str) -> String {
     format!("{stem}{MINT}{of}")
 }
 
+/// `minted`'s inverse, the one reading of a generated name: the stem — the
+/// source name the definition was generated from — and what it was minted
+/// at. `show·Color` reads `("show", Some("Color"))`; a name minted more
+/// than once splits at its FIRST separator, so `foldl'·[]·IntTInt` reads
+/// `("foldl'", Some("[]·IntTInt"))` — the method, then everything it was
+/// minted at; a name without a separator is a source name, `(name, None)`.
+/// A pass that keys behaviour on a Prelude function's identity reads the
+/// stem through this instead of keeping a copy of a generated spelling:
+/// those spellings are the checker's and the monomorphizer's to change,
+/// and a hand-copied one goes silently stale (the list-pipeline fusion's
+/// `foldl'` consumer was dead for two months on one, Q44).
+pub fn minted_parts(name: &str) -> (&str, Option<&str>) {
+    match name.split_once(MINT) {
+        Some((stem, of)) => (stem, Some(of)),
+        None => (name, None),
+    }
+}
+
 /// A name as a message shows it: a generated name with `_` for its
 /// separators, any other name unchanged.
 pub fn shown(name: &str) -> std::borrow::Cow<'_, str> {

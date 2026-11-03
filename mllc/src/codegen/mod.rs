@@ -380,10 +380,11 @@ struct CodeGen {
     /// same name (codegen emits it after the runtime block), so the prelude's
     /// parameter count must not be applied to it.
     module_fn_names: std::collections::HashSet<String>,
-    /// Mangled specialization name -> the SOURCE name mono generated it
-    /// from (`foldl'_IntT…` -> `foldl'`), read off TFunction::spec_origin.
-    /// `fn_origin` resolves through it so passes that key on a Prelude
-    /// function's identity never parse mangled spellings.
+    /// Mangled specialization name -> the name mono generated it from
+    /// (`sum·LInt` -> `sum`, `foldl'·[]·IntTIntT…` -> `foldl'·[]`), read
+    /// off TFunction::spec_origin. `fn_origin` resolves through it so
+    /// passes that key on a Prelude function's identity never parse
+    /// mangled spellings.
     spec_origins: std::collections::HashMap<String, String>,
     /// Emitted parameter counts of where-local functions in scope — the
     /// local analog of `fixed_arity`, kept by ScopeSnapshot exactly like
@@ -535,6 +536,24 @@ impl CodeGen {
     /// gate on the same membership).
     fn is_local_shadowed(&self, name: &str) -> bool {
         self.local_vars.contains(&names::sanitize_name(name))
+    }
+
+    /// The SOURCE name a call-head Var denotes — the ONE way a pass asks
+    /// "is this Var the Prelude's `foldl'`/`sum`/`map`". A mono
+    /// specialization resolves to the function it was generated from
+    /// (`spec_origins`): a source name, or the generated name of a class
+    /// method's implementation at an instance (`foldl'·[]`), which reads
+    /// as `ast::minted_parts` — its stem is the method's source name. No
+    /// recognizer keeps a copy of a generated spelling: those are the
+    /// checker's and the monomorphizer's to change, and they have changed
+    /// twice under a hand-copied `foldl'_[a]` that never matched (Q44).
+    /// Which INSTANCE a method use was dispatched to is a question for the
+    /// argument types, not the spelling: an instance is decided by its
+    /// head type, so a `foldl'` whose structure argument is a list is the
+    /// list instance's, whatever the implementation's name.
+    fn fn_origin<'a>(&'a self, name: &'a str) -> &'a str {
+        let origin = self.spec_origins.get(name).map(String::as_str).unwrap_or(name);
+        crate::ast::minted_parts(origin).0
     }
 
     /// True when a reference to sanitized name `sname` resolves to a runtime

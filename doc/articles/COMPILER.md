@@ -749,6 +749,21 @@ Responsibilities beyond the obvious translation:
   `let`/`where` value, a WHNF-yielding bound action, a fused loop local);
   the scope snapshots (`ScopeSnapshot`, `VarsSnapshot` in function.rs)
   restore the set at every scope exit.
+- **List-pipeline fusion** (`fuse.rs`, from the App arm of the expression
+  walk): `foldl'`/`sum`/`length` over `map`/`filter`/`take` chains and
+  `enumFromTo_Int` ranges emit one loop with no intermediate list (the
+  module header carries the grammar, the emitted shape and the soundness
+  argument). Every consumer, stage and source is recognized by its SOURCE
+  identity through `CodeGen::fn_origin` (mod.rs): a mono specialization
+  resolves to the function it was generated from (`TFunction::spec_origin`),
+  and a class method's implementation at an instance (`foldl'·[]`) to the
+  method through `ast::minted_parts`, the one reading of a generated name.
+  No pass matches a generated spelling — those are the checker's and
+  mono's to change, and a hand-copied `foldl'_[a]` kept the `foldl'`
+  consumer dead from 2026-09-03 to 2026-11-03 while the fusion tests
+  checked values only (Q44; the shape is pinned now). Which instance a
+  method use was dispatched to is read off the argument types (an instance
+  is decided by its head type), never off the name.
 - **Where groups:** a clause's `where` group (`where_binds_stmts`) is
   emitted exactly once, by the emitter that has just bound the clause's
   pattern variables — `clause_intro_stmts` (pattern.rs) for every

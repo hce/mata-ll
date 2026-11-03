@@ -847,6 +847,10 @@ mll_test!(integer_bigdiv, "integer_bigdiv.mll");
 mll_test!(integer_to_number_rounding, "integer_to_number_rounding.mll");
 mll_test!(integer_show_subtype, "integer_show_subtype.mll");
 mll_test!(list_fusion_inline, "list_fusion_inline.mll");
+// The foldl' consumer is recognized by the method's source identity, not
+// a copied spelling of the list instance's generated method name, which
+// had gone stale twice and left every foldl' pipeline unfused (Q44).
+mll_test!(list_fusion_foldl_consumer, "list_fusion_foldl_consumer.mll");
 mll_test!(inline_shadowed_free_var, "inline_shadowed_free_var.mll");
 mll_test!(exact_let_eager, "exact_let_eager.mll");
 mll_test!(exact_let_eager_hm, "exact_let_eager_hm.mll");

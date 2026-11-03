@@ -44,6 +44,38 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **The list-pipeline fusion fires for the `foldl'` consumer again: a
+  `foldl' f z (map g (filter p [a .. b]))` — the `list_pipeline` benchmark
+  among them — is one loop, not the lazy walk.** Every `foldl'` pipeline
+  compiled to the unfused cons-cell walk while `sum` and `length` over the
+  same chains fused: the benchmark ran at 212x of its handwritten twin on
+  Lua 5.5 and 76x on LuaJIT where `bench/STATUS.md` records 8.6x and 1.4x,
+  and every fusion test checked values only, so the regression was
+  silent. `foldl'` is a `Foldable` method, and at list type mono
+  dispatches it to the list instance's implementation and specializes
+  that; the consumer recognizer in `fuse.rs` resolved the specialization
+  to its origin and then matched that origin against a hand-copied
+  spelling of the instance method's generated name, `foldl'_[a]`, which
+  the checker never produced: it minted `foldl'_[]` when the match was
+  written (2026-09-03, the commit that made `foldl'` a class method) and
+  `foldl'·[]` since generated names took the middle-dot separator
+  (2026-10-03). The fix removes the spelling: `ast::minted_parts` is the
+  one reading of a generated name (its inverse of `minted`), and codegen's
+  `fn_origin` resolves a call-head Var to its SOURCE name through the
+  specialization origin and that reading, so a method's implementation at
+  any instance reads as the method; every consumer, stage and source
+  recognizer in `fuse.rs` asks it. Which instance a `foldl'` use was
+  dispatched to is decided by the structure argument's type (a list),
+  as an instance is decided by its head type — not by the name. Values
+  were never wrong; the shape now is pinned (`local __mll_fu_hi` loops
+  counted on the benchmark's exact shape, an operator fold, a lambda fold
+  and a leaf source) so the next spelling change fails a test instead of
+  the benchmark. `list_pipeline` is back at 9.5x / 1.4x (walls 0.010s /
+  0.001s, the README's post-fusion numbers). Q44, found by the benchmark
+  runs of the 2026-10 review. (GHC-goldened case
+  `list_fusion_foldl_consumer`, codegen-shape test
+  `foldl_consumer_fuses_through_the_method_origin`.)
+
 - **`floor`, `ceiling`, `truncate` and `round` of a `Number` always yield
   an `Int`: GHC's exact value modulo 2^64 past 2^63, 0 for NaN and the
   infinities — and `round` of NaN or an infinity returns.** `floor (0/0)

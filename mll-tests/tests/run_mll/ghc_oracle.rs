@@ -193,6 +193,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_integer_to_number_rounding, "cases", "integer_to_number_rounding.mll"),
         (ghc_oracle_integer_show_subtype, "cases", "integer_show_subtype.mll"),
         (ghc_oracle_list_fusion_inline, "cases", "list_fusion_inline.mll"),
+        (ghc_oracle_list_fusion_foldl_consumer, "cases", "list_fusion_foldl_consumer.mll"),
         (ghc_oracle_inline_shadowed_free_var, "cases", "inline_shadowed_free_var.mll"),
         (ghc_oracle_exact_let_eager, "cases", "exact_let_eager.mll"),
         (ghc_oracle_lit_pat_native_eq, "cases", "lit_pat_native_eq.mll"),

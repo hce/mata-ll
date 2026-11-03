@@ -1492,3 +1492,54 @@ main = do
         "no condition-headed range loop: {lua}"
     );
 }
+
+/// The `foldl'` consumer is recognized by the method's SOURCE identity
+/// (`CodeGen::fn_origin`: specialization -> the list instance's method ->
+/// `foldl'`), never by a copied spelling of the generated method name.
+/// The recognizer matched `foldl'_[a]` while the checker minted
+/// `foldl'_[]`, then `foldl'·[]`, so every `foldl'` pipeline — the
+/// list_pipeline benchmark among them — ran as the lazy walk for two
+/// months while every fusion test checked values only (Q44). Pinned on
+/// the benchmark's exact shape, an operator fold over a map, a lambda fold
+/// over a filter (each a range loop) and a leaf source (a cell-walk loop);
+/// a fold over a Maybe is no list pipeline and must stay a call.
+#[test]
+fn foldl_consumer_fuses_through_the_method_origin() {
+    let source = r#"
+import Data.List (foldl')
+
+pipeline :: Int -> Int
+pipeline n = foldl' step 0 (filter odd (map (* 3) [1 .. n]))
+  where
+    step a x = (a + x) `mod` 1000000007
+
+leaf :: [Int] -> Int
+leaf xs = foldl' (\acc x -> acc + x * x) 0 (filter even xs)
+
+main :: IO ()
+main = do
+    print (pipeline 200000)
+    print (foldl' (+) 0 (map (* 3) [1 .. 20 :: Int]))
+    print (foldl' (\acc x -> acc + x * x) 0 (filter even [1 .. 20 :: Int]))
+    print (leaf [1 .. 20])
+    print (foldl' (+) 0 (Just (5 :: Int)))
+"#;
+    let lua = compile(source, Path::new("tests/cases"), &[])
+        .expect("compile should succeed")
+        .lua_code;
+    assert_eq!(
+        lua.matches("local __mll_fu_hi =").count(),
+        3,
+        "the three range pipelines under foldl' must each fuse into a range loop: {lua}"
+    );
+    assert_eq!(
+        lua.matches("__mll_fu_l = __mll_tail(__mll_fu_l)").count(),
+        1,
+        "the leaf-source pipeline under foldl' must fuse into a cell-walk loop: {lua}"
+    );
+    assert_eq!(
+        lua.matches("local __mll_fu_a =").count(),
+        4,
+        "exactly the four list pipelines bind a fused accumulator; the Maybe fold stays a call: {lua}"
+    );
+}
