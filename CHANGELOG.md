@@ -44,6 +44,39 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **`*>` and `<*` exist, as Applicative class methods with base's
+  definitions and fixity, and `Data.Map.intersection`/`difference` take
+  two value types, as containers' do.** `Just 1 *> Just 2` was "Unbound
+  variable: (*>)" and `Just 1 <* Just 2` "Unbound variable: (<*)" (GHC
+  `Just 2` and `Just 1`): the builtin Applicative class registered `pure`,
+  `<*>` and `liftA2` only. Both are now methods of the class (`(*>) :: f
+  a -> f b -> f b`, `(<*) :: f a -> f b -> f a`) with base's defaults —
+  `a1 *> a2 = (id <$ a1) <*> a2`, `(<*) = liftA2 const` — so a user
+  instance giving GHC's minimal definition gets them, one giving its own
+  `*>` keeps it, and the dictionary of every Applicative instance carries
+  them for a dictionary-passing body or an existential. The builtin
+  instances are base's: `*>` is `thenIO` at IO, ST and LuaIO, and at
+  Maybe and lists the same function as the Monad instance's `>>` (base
+  defines `>>` as `*>` there); Either takes the default; `<*` is `liftA2
+  const` everywhere. Both are `infixl 4` beside `<$>`, `<$` and `<*>`, so
+  `Just 1 *> Just 2 <* Just 3` groups left and `m >> a *> b` is `m >> (a
+  *> b)`, as under GHC. The MINIMAL formula is unchanged (`pure`, and
+  `<*>` or `liftA2`). Separately, `M.intersection (M.fromList [(1, "a")])
+  (M.fromList [(1, 0 :: Int)])` was "Cannot unify 'String' with 'Int'"
+  and `M.difference` of a `Map Int String` and a `Map Int Bool` "Cannot
+  unify 'String' with 'Bool'" (GHC `[(1,"a")]` and `[]`): both were typed
+  `Map k v -> Map k v -> Map k v`, where containers has `Map k a -> Map k
+  b -> Map k a` — the second map contributes only its keys, which the
+  bodies already honoured. Found by the 2026-10 fresh-eyes review (M22;
+  the queue's "`*>` / `<*` unbound"). (GHC-goldened case
+  `applicative_sequencing_map_value_types`: both operators at `[]`,
+  `Maybe`, `Either`, `IO` with its effects in order and `ST`, their
+  fixity against `<$>`/`<*>`/`>>`, first-class uses, a user instance
+  giving only `pure`/`<*>`, one giving only `pure`/`liftA2`, one giving
+  its own `*>`, the dictionary route through an existential, and
+  `intersection`/`difference` over three value types beside `Data.Set`'s
+  one-type controls.)
+
 - **`scanl`, `scanl1`, `intersperse`, `span`, `break` and `foldl'` are
   GHC's definitions clause for clause, so they demand exactly what GHC
   demands.** `scanl` matched the list before emitting the seed, so `take 1

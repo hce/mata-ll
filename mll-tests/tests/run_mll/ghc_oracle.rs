@@ -501,6 +501,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_repeat_cycle, "cases", "repeat_cycle.mll"),
         (ghc_oracle_lua_keywords, "cases", "lua_keywords.mll"),
         (ghc_oracle_prelude_ghc_extras, "cases", "prelude_ghc_extras.mll"),
+        (ghc_oracle_applicative_sequencing_map_value_types, "cases", "applicative_sequencing_map_value_types.mll"),
         (ghc_oracle_monadfail_list_maybe, "cases", "monadfail_list_maybe.mll"),
         (ghc_oracle_monadfail_user_instance, "cases", "monadfail_user_instance.mll"),
         (ghc_oracle_monadfail_irrefutable_binds, "cases", "monadfail_irrefutable_binds.mll"),

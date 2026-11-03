@@ -86,6 +86,7 @@ mll_test!(lua_iterator_method, "lua_iterator_method.mll");
 mll_test!(tuple_ctor, "tuple_ctor.mll");
 mll_test!(lua_keywords, "lua_keywords.mll");
 mll_test!(prelude_ghc_extras, "prelude_ghc_extras.mll");
+mll_test!(applicative_sequencing_map_value_types, "applicative_sequencing_map_value_types.mll");
 mll_test!(monadfail_list_maybe, "monadfail_list_maybe.mll");
 mll_test!(monadfail_user_instance, "monadfail_user_instance.mll");
 mll_test!(monadfail_irrefutable_binds, "monadfail_irrefutable_binds.mll");

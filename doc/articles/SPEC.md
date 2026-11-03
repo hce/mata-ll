@@ -846,11 +846,12 @@ Monads are just like in haskell:
         (>>)   :: m a -> m b -> m b
         m >> k = m >>= \_ -> k
 
-Note: of the operators shown above, `fmap`, `(<$>)`, `pure`, `(<*>)`,
-`(>>=)`, `return`, and `(>>)` are provided. The secondary combinators
-`(<$)`, `(*>)`, and `(<*)` are declared here as the intended interface
-but are not yet available — referring to them is currently an unbound
-variable.
+Note: `fmap`, `(<$>)`, `pure`, `(<*>)`, `liftA2`, `(*>)`, `(<*)`,
+`(>>=)`, `return` and `(>>)` are class methods with these defaults
+(`(<$>)` and `liftA2` are methods here too; see "Foldable and
+Traversable" below for `liftA2` and `list_traverse`). `(<$)` is a plain
+Prelude function over `fmap`, not a Functor method: `x <$ m = fmap
+(const x) m`.
 
     class Read a where
         read :: String -> a
@@ -1669,7 +1670,8 @@ Foldable (including user instances). `toList` lives in
 `Traversable` (method `traverse`; superclasses `Functor` and
 `Foldable`; the same three instances) provides applicative traversal,
 with `sequenceA` defined over it. `Applicative` additionally carries
-`liftA2` as a real method (as in GHC), and `list_traverse :: (a -> f b)
+`liftA2`, `*>` and `<*` as real methods (as in GHC, with base's
+defaults), and `list_traverse :: (a -> f b)
 -> [a] -> f [b]`, the list instance of `traverse` selected by the
 applicative's type: GHC's `foldr`/`liftA2` definition by default, an
 accumulating loop that runs in constant stack at IO, LuaIO, ST, Maybe
@@ -1743,7 +1745,7 @@ spelling:
 - The Prelude declares the standard fixities: `infixr 9 .`,
   `infixl 9 !!`, `infixr 8 ^`, `infixl 7 *, /, div, mod, quot, rem`,
   `infixl 6 +, -`, `infixr 6 <>`, `infixr 5 :, ++`,
-  `infix 4 ==, /=, <, <=, >=, >, elem, notElem`, `infixl 4 <$>, <$, <*>`,
+  `infix 4 ==, /=, <, <=, >=, >, elem, notElem`, `infixl 4 <$>, <$, <*>, *>, <*`,
   `infixr 3 &&`, `infixr 2 ||`, `infixl 1 >>, >>=`, `infixr 1 =<<`,
   `infixr 0 $, $!, seq` — GHC's table for these names.
 - An operator that two imports both provide has no fixity to group by;

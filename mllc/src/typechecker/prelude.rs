@@ -534,6 +534,15 @@ impl Checker {
             &[Ty::fun(&[ta.clone(), tb.clone()], tc.clone()), fa.clone(), fb.clone()],
             fc,
         );
+        // (*>) :: f a -> f b -> f b
+        // (<*) :: f a -> f b -> f a
+        // The sequencing pair is part of the class, as in base (whose
+        // Applicative is `pure`, `<*>`, `liftA2`, `*>`, `<*`): an instance
+        // may give its own (base's IO, Maybe and list instances do), and
+        // generic code reads them from the dictionary like any method.
+        // Neither is in the MINIMAL formula; both default below.
+        let then_ty = Ty::fun(&[fa.clone(), fb.clone()], fb.clone());
+        let before_ty = Ty::fun(&[fa.clone(), fb.clone()], fa.clone());
         // list_traverse :: (a -> f b) -> [a] -> f [b] — the list instance
         // of `traverse`, selected by the applicative's type. Not a GHC
         // method: it exists so that the Traversable [] instance dispatches
@@ -556,12 +565,22 @@ impl Checker {
             ("pure", pure_ty.clone(), Some(vec![a.clone(), f.clone()]), vec![("Applicative", "f")]),
             ("<*>", ap_ty, Some(vec![a.clone(), b.clone(), f.clone()]), vec![("Applicative", "f")]),
             ("liftA2", lifta2_ty, Some(vec![a.clone(), b.clone(), c.clone(), f.clone()]), vec![("Applicative", "f")]),
+            ("*>", then_ty, Some(vec![a.clone(), b.clone(), f.clone()]), vec![("Applicative", "f")]),
+            ("<*", before_ty, Some(vec![a.clone(), b.clone(), f.clone()]), vec![("Applicative", "f")]),
             ("list_traverse", list_traverse_ty, Some(vec![a.clone(), b.clone(), f.clone()]), vec![("Applicative", "f")]),
         ]);
         // GHC's defaults: a user instance defines `pure` and either `<*>`
         // or `liftA2` (defining neither loops, as under GHC).
         self.register_builtin_default("Applicative", "<*>", "f <*> x = liftA2 id f x");
         self.register_builtin_default("Applicative", "liftA2", "liftA2 f x y = fmap f x <*> y");
+        // base's `a1 *> a2 = (id <$ a1) <*> a2` and `(<*) = liftA2 const`,
+        // with `id`, `const` and `<$` (`fmap . const`) beta-reduced into
+        // lambdas: a default body is checked in the instance's module, so
+        // it names only class methods — never a Prelude source function
+        // the program may have redefined. The same two functions, for
+        // every instance.
+        self.register_builtin_default("Applicative", "*>", "a1 *> a2 = fmap (\\_ -> \\y -> y) a1 <*> a2");
+        self.register_builtin_default("Applicative", "<*", "a1 <* a2 = liftA2 (\\x _ -> x) a1 a2");
         self.register_builtin_default(
             "Applicative",
             "list_traverse",
@@ -569,20 +588,32 @@ impl Checker {
         );
 
         // Applicative instances (empty context — see the Functor loop).
+        // `*>` is base's at each: `thenIO` at IO (ST and LuaIO share the
+        // runtime), `Just _ *> m2 = m2; Nothing *> _ = Nothing` at Maybe,
+        // `xs *> ys = [y | _ <- xs, y <- ys]` at lists — the same function
+        // as the Monad instance's `>>` (base defines `>>` as `*>` for all
+        // three), so the `then_` implementations serve both methods.
+        // Either takes the class default, which at Either is `then_Either`
+        // as well. `<*` is the class default `liftA2 const` everywhere,
+        // spelled through each instance's own `liftA2` (Prelude.mll).
         for tc_name in &["IO", "LuaIO", "ST"] {
             self.register_builtin_instance_empty_ctx("Applicative", Ty::Con(tc_name.to_string()),
                 &[("pure", "pure"), ("<*>", "ap_IO"), ("liftA2", "liftA2_IO"),
+                  ("*>", "then_IO"), ("<*", "before_IO"),
                   ("list_traverse", "list_traverse_IO")]);
         }
         self.register_builtin_instance("Applicative", Ty::Con("[]".to_string()),
             &[("pure", "pure_List"), ("<*>", "ap_List"), ("liftA2", "liftA2_List"),
+              ("*>", "then_List"), ("<*", "before_List"),
               ("list_traverse", "list_traverse_List")]);
         self.register_builtin_instance("Applicative", Ty::Con("Maybe".to_string()),
             &[("pure", "pure_Maybe"), ("<*>", "ap_Maybe"), ("liftA2", "liftA2_Maybe"),
+              ("*>", "then_Maybe"), ("<*", "before_Maybe"),
               ("list_traverse", "list_traverse_Maybe")]);
         // Empty context, not None — see the Functor Either instance.
         self.register_builtin_instance_empty_ctx("Applicative", Ty::Con("Either".to_string()),
             &[("pure", "pure_Either"), ("<*>", "ap_Either"), ("liftA2", "liftA2_Either"),
+              ("*>", "then_Either"), ("<*", "before_Either"),
               ("list_traverse", "list_traverse_Either")]);
 
         // Built-in Monad typeclass (superclass: Applicative)

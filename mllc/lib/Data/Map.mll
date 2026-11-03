@@ -102,17 +102,19 @@ listAppend (x:xs) ys = x : listAppend xs ys
 -- intersection/difference probe the SECOND map directly (hmMember, a hash
 -- lookup) per entry of the first — O(n) overall. The previous spelling
 -- materialized `keys m2` and ran `elem` per entry, O(n*m) (F15).
-intersection :: (Eq k, Hashable k) => Map k v -> Map k v -> Map k v
+-- Only the second map's KEYS matter, so its value type is free, as in
+-- containers (`Map k a -> Map k b -> Map k a`).
+intersection :: (Eq k, Hashable k) => Map k a -> Map k b -> Map k a
 intersection m1 m2 = fromList (keepMember m2 (toList m1))
 
-keepMember :: Hashable k => Map k v -> [(k, v)] -> [(k, v)]
+keepMember :: Hashable k => Map k b -> [(k, a)] -> [(k, a)]
 keepMember _ [] = []
 keepMember m ((k, v):rest) = if member k m then (k, v) : keepMember m rest else keepMember m rest
 
-difference :: (Eq k, Hashable k) => Map k v -> Map k v -> Map k v
+difference :: (Eq k, Hashable k) => Map k a -> Map k b -> Map k a
 difference m1 m2 = fromList (dropMember m2 (toList m1))
 
-dropMember :: Hashable k => Map k v -> [(k, v)] -> [(k, v)]
+dropMember :: Hashable k => Map k b -> [(k, a)] -> [(k, a)]
 dropMember _ [] = []
 dropMember m ((k, v):rest) = if member k m then dropMember m rest else (k, v) : dropMember m rest
 

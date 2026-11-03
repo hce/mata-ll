@@ -619,6 +619,28 @@ liftA2_Either g (Right x) (Right y) = Right (g x y)
 liftA2_Either _ (Left e) _ = Left e
 liftA2_Either _ _ (Left e) = Left e
 
+-- The sequencing methods `*>` and `<*` of the builtin applicatives. `*>`
+-- is base's at each instance: `thenIO` at IO (ST and LuaIO share the
+-- runtime), and at Maybe and lists the same function as the Monad
+-- instance's `>>` (then_Maybe, then_List below; base defines `>>` as
+-- `*>` for all three). Either takes the class default, which at Either
+-- is then_Either. `<*` is the class default `liftA2 const` at every
+-- instance, through the instance's own liftA2.
+then_IO :: IO a -> IO b -> IO b
+then_IO a b = a >> b
+
+before_IO :: IO a -> IO b -> IO a
+before_IO ma mb = ma >>= \x -> mb >>= \_ -> pure x
+
+before_Maybe :: Maybe a -> Maybe b -> Maybe a
+before_Maybe a b = liftA2_Maybe (\x _ -> x) a b
+
+before_List :: [a] -> [b] -> [a]
+before_List xs ys = liftA2_List (\x _ -> x) xs ys
+
+before_Either :: Either e a -> Either e b -> Either e a
+before_Either a b = liftA2_Either (\x _ -> x) a b
+
 pure_Either :: a -> Either c a
 pure_Either x = Right x
 
@@ -1038,7 +1060,7 @@ infixl 7 *, /, `div`, `mod`, `quot`, `rem`
 infixl 6 +, -
 infixr 5 :, ++
 infix  4 ==, /=, <, <=, >=, >, `elem`, `notElem`
-infixl 4 <$>, <*>
+infixl 4 <$>, <*>, *>, <*
 infixr 3 &&
 infixr 2 ||
 infixl 1 >>, >>=

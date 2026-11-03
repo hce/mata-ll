@@ -899,7 +899,7 @@ default here). The minimal definitions are GHC's:
 | `Enum` | `toEnum`, `fromEnum` | `succ`, `pred` and the four ranges through `Int` |
 | `Bounded` | `minBound`, `maxBound` | — |
 | `Functor` | `fmap` | `<$>` (a method here, see below) |
-| `Applicative` | `pure`, and `<*>` or `liftA2` | each through the other |
+| `Applicative` | `pure`, and `<*>` or `liftA2` | each through the other; `a1 *> a2 = (id <$ a1) <*> a2`, `(<*) = liftA2 const` |
 | `Monad` | `>>=` | `>>`, `return = pure` |
 | `Foldable` | `foldr` | `foldl`, `foldl'` (continuation folds over `foldr`) |
 | `Traversable` | `traverse` | — |
@@ -1114,9 +1114,13 @@ generic over them, as in GHC. The differences:
 - **User instances of Functor, Applicative and Monad carry GHC's
   defaults.** An instance writes `fmap`; `pure` and either `<*>` or
   `liftA2`; and `>>=` — `<$>` defaults to `fmap`, `<*>`/`liftA2` to each
-  other, `>>` to `>>=`, `return` to `pure`. (`<$>` is a class method
-  here, where GHC has a plain `(<$>) = fmap`; the default makes the
-  difference invisible.) A `newtype State s a = State (s -> (a, s))`
+  other, `*>` to `(id <$ a1) <*> a2` and `<*` to `liftA2 const` (base's
+  definitions; an instance may give its own, as base's IO, Maybe and
+  list instances give `*>`), `>>` to `>>=`, `return` to `pure`. (`<$>`
+  is a class method here, where GHC has a plain `(<$>) = fmap`; the
+  default makes the difference invisible. `<$` is a plain function over
+  `fmap`, not a Functor method as in GHC: an instance cannot override
+  it.) A `newtype State s a = State (s -> (a, s))`
   with the three instances works with do-notation, `mapM`/`mapM_`,
   `when` and the rest, as under GHC; the program corpus
   (`mll-tests/tests/programs/state_monad.mll`) is the reference.
