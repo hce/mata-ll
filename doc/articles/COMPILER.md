@@ -430,8 +430,8 @@ constant folding (§7) can then recognize them.
     (no `//`, bitwise ops or `pow`, so LuaJIT and PUC agree; a value
     past 2^1024 overflows to Infinity as IEEE says). A doubles-only
     host's `__int_to_machine` IS that conversion (its `Int` is a
-    double); `__mll_read_number` parses integer syntax through the float
-    lexer (`"-0"` → `-0.0`);
+    double); `read` at `Number` converts integer syntax through it too
+    and applies the sign afterwards (`"-0"` → `-0.0`);
   - the FFI boundary: `ffi_decode_desc_inner` gives a `Number` leaf the
     `num` descriptor (checked and normalized by `__mll_ffi_decode`, and
     written back into a validation-only record/tuple so the host's table
@@ -666,6 +666,23 @@ Responsibilities beyond the obvious translation:
 - **Constructor tracking:** record/ADT layout for construction and field access.
 - **Type-specialized operations:** e.g. `show` for lists/tuples is emitted per
   element type, using the `Ty` carried on each `TExpr`.
+- **`read`:** the five builtin `Read` instances (`__mll_read_int`,
+  `read_Integer`, `__mll_read_number`, `__mll_read_bool`,
+  `__mll_read_string`, runtime.lua after the Integer library) are one
+  reader: `__mll_read_run` is GHC.Read's `parens` plus readEither's
+  leftover check around an item, the three numeric items share
+  `__mll_read_signed` (readNumber's `-` lexeme) and
+  `__mll_read_lex_number` (Text.Read.Lex's lexNumber: radix prefixes,
+  fraction and exponent with its left-biased choices), Int and Integer
+  share the digit fold (native below 2^53, else
+  `__int_from_digits` and, at Int, `__int_to_machine`'s wrap), Number
+  converts integral syntax through `__int_to_double` and a decimal with
+  a fraction or exponent through `__mll_read_decimal`
+  (numberToRangedRational's placement rule, then the host's correctly
+  rounded decimal converter on canonical text), and the String item is
+  lexString with lexLitChar's escapes (`__mll_read_escape`, the inverse
+  of show's control-name table). Every failure is `error("Prelude.read:
+  no parse", 0)`.
 - **FFI:** `LuaPure`/`LuaIO` bindings become direct Lua calls; method-call FFI
   (`":write"`) becomes `handle:write(...)`.
 - **IO:** an action-typed expression in a value position compiles to an

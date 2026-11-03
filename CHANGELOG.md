@@ -44,6 +44,55 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **`read` at `Int`, `Integer`, `Number`, `Bool` and `String` is GHC's
+  grammar, read by one shared lexer.** The five readers were hand-written
+  pattern sets that disagreed with GHC in both directions: `read
+  "9223372036854775808" :: Int` came back as Lua's FLOAT past int64
+  (`tonumber`), so `n + 1` printed `9223372036854775808` (GHC wraps like
+  `fromInteger`: `-9223372036854775807`) and on Lua 5.4+ an `Int` carried
+  the float subtype; `read "+5" :: Integer` and `read "(5" :: Integer`
+  parsed (GHC: no parse — `+` is not a sign lexeme and the paren needs
+  its mate) while `read "((42))"`, `read "- 42"`, `0x1F`/`0X1f`/`0o17`/
+  `0b11` at `Int` and `Integer`, `NaN`/`Infinity`/`-Infinity`/`0x10`/
+  `((2.5))`/`- 2.5` at `Number` and `((False))` at `Bool` were rejected
+  (GHC parses every one); `read "\"hi\"" :: String` kept its quotes and
+  `read "hi" :: String` succeeded — `read` at `String` was the identity.
+  The runtime now has one reader (GHC.Read over Text.Read.Lex) that
+  every instance goes through: surrounding white space, any depth of
+  parentheses with white space inside, readNumber's optional `-` lexeme
+  followed by white space and one number lexeme (decimal, `0x`/`0o`/
+  `0b` in either case; a fraction only when the dot is followed by a
+  digit and an exponent only when `e`/`E` and an optional sign are
+  followed by one, so `.5`, `5.`, `1.e3`, `1e` and `1_000` stay no
+  parse), the identifiers `NaN` and `Infinity` at `Number`, `True`/
+  `False` at `Bool`, and a Haskell string literal at `String` with
+  lexLitChar's whole escape set (`\n \t \\ \" \' \a \b \f \r \v`,
+  decimal, `\x`/`\X` hex and `\o`/`\O` octal numerics, `\^@`..`\^_`,
+  the named ASCII escapes with `\SOH` over `\SO`, `\&`, string gaps);
+  anything else or anything left over is `Prelude.read: no parse`
+  (raised at level 0 — the message is the diagnostic, as `head`'s is).
+  `Int` folds the digits exactly and narrows like `fromInteger` (modulo
+  2^64 on a 64-bit-integer host, where Lua's integer arithmetic wraps
+  exactly like GHC's; the nearest double on LuaJIT, whose `Int` is one);
+  a fraction or an exponent is no parse at `Int`/`Integer` (`read "1e3"
+  :: Int` fails in GHC too); `Number` reads integral syntax through the
+  exact Integer -> double conversion and a decimal with a fraction or
+  exponent through numberToRangedRational's placement rule (`1e400` is
+  `Infinity`, `1e-400` is `0.0`, `-1e-400` is `-0.0`, a zero mantissa is
+  zero whatever its exponent) and then the host's correctly rounded
+  converter over canonical text — bit for bit GHC's `fromRational` on
+  the classic hard cases, 770-digit midpoints included — with the sign
+  applied to the value (`-0` is `-0.0`). `read (show x) == x` holds at
+  every one of the five types, escapes and negative numbers included;
+  the backend fuzzer's vocabulary has `read (show e) :: T` at each
+  scalar type as a standing probe. One documented byte-string deviation
+  (HASKDIFF, "`read` is GHC's lexer, over bytes"): a numeric string
+  escape above `\255` is no parse, since a byte has no cell for the Char
+  GHC would read, and white space is `isSpace` over bytes (0xA0 counts,
+  a UTF-8 Unicode space does not). Found by the 2026-10 fresh-eyes
+  review (N7). (GHC-goldened cases `read_grammar` — accepted and
+  rejected shapes at all five types through `catch`, the dictionary
+  route, the round trips — and `read_int_wrap` for the int64 narrowing.)
 - **`fromInteger` and `fromIntegral` of an `Integer` at `Number` are
   correctly rounded at every magnitude.** From four 2^24 limbs up (2^72)
   the runtime accumulated the limbs in doubles by Horner's rule, which

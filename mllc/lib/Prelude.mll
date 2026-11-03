@@ -825,16 +825,17 @@ instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f, Boun
     minBound = (minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound)
     maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound)
 
--- Read instances: validating runtime parsers (GHC's grammar per type;
--- failure raises "Prelude.read: no parse" exactly like GHC).
+-- Read instances: one runtime lexer with GHC's Text.Read.Lex grammar
+-- (surrounding space, any depth of parentheses, `-` before a number,
+-- radix prefixes, a Haskell string literal at String); anything else
+-- raises GHC's "Prelude.read: no parse".
 read_Int :: String -> LuaPure "__mll_read_int" Int
 
 read_Number :: String -> LuaPure "__mll_read_number" Number
 
 read_Bool :: String -> LuaPure "__mll_read_bool" Bool
 
-read_String :: String -> String
-read_String s = s
+read_String :: String -> LuaPure "__mll_read_string" String
 
 ffi_tonumber :: String -> LuaPure "tonumber" Int
 ffi_tonumber_float :: String -> LuaPure "tonumber" Number

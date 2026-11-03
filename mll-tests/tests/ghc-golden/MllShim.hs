@@ -34,8 +34,10 @@
 --                     message to a handler. Implemented over SomeException;
 --                     the corpus never asserts on the message text (the
 --                     Lua-side text is host-specific).
---   * read_Integer, read_Number, read_Bool, read_String
---                   — mata-ll's monomorphic read helpers.
+--   * read_Int, read_Number, read_Bool, read_String
+--                   — mata-ll's monomorphic read helpers: each is GHC's
+--                     `read` at that type (mata-ll's runtime reader is
+--                     Text.Read.Lex's grammar).
 --   * ST, runST, STArray and the STArray operations
 --                   — mata-ll's builtin mutable Int array
 --                     (newSTArray size init, 0-based indices), lazy in
@@ -156,10 +158,10 @@ read_Number :: String -> Number
 read_Number = read
 
 read_Bool :: String -> Bool
-read_Bool s = if s P.== "True" then True else False
+read_Bool = read
 
 read_String :: String -> String
-read_String s = s
+read_String = read
 
 -- mata-ll's STArray: a mutable, 0-indexed Int array scoped to ST s.
 -- Backed here by an STRef over a LAZY Map Int Int — the values are

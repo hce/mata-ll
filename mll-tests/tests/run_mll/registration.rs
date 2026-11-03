@@ -424,6 +424,8 @@ mll_test!(record_brace_next_line, "record_brace_next_line.mll");
 mll_test!(enum_range, "enum_range.mll");
 mll_test!(enum_zero_step_range, "enum_zero_step_range.mll");
 mll_test!(read_typeclass, "read_typeclass.mll");
+mll_test!(read_grammar, "read_grammar.mll");
+mll_test!(read_int_wrap, "read_int_wrap.mll");
 mll_test!(monad_nonio, "monad_nonio.mll");
 mll_test!(derive_enum, "derive_enum.mll");
 mll_test!(nested_eq, "nested_eq.mll");

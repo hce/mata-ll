@@ -302,16 +302,21 @@ fromInteger_Integer = function(n)
     end
     return __int_mk(sign, mag)
 end
--- Parse a decimal string into an Integer (backs big literals and read_Integer).
-local function __int_from_decimal(s)
-    local sign, start = 1, 1
-    local c0 = string.byte(s, 1)
-    if c0 == 45 then sign = -1; start = 2 elseif c0 == 43 then start = 2 end
+-- Build a non-negative Integer from a run of pre-validated digits in a
+-- base of 2, 8, 10 or 16 (`read`'s radix lexemes and the decimal literal
+-- path). Each digit is folded in by one multiply-add over the limbs: a
+-- limb times 16 plus a carry stays below 2^28, exact in a double. A hex
+-- digit letter is case-insensitive (bit 6 cleared maps `a`-`f` onto
+-- `A`-`F`).
+local function __int_from_digits(base, s, first, last)
     local mag = {}
-    for i = start, #s do
-        local carry = string.byte(s, i) - 48
+    for i = first, last do
+        local carry = string.byte(s, i)
+        if carry >= 97 then carry = carry - 87
+        elseif carry >= 65 then carry = carry - 55
+        else carry = carry - 48 end
         for k = 1, #mag do
-            local v = mag[k] * 10 + carry   -- < 2^28, exact
+            local v = mag[k] * base + carry
             local lo = v % __INT_B
             mag[k] = lo
             carry = (v - lo) / __INT_B
@@ -322,7 +327,16 @@ local function __int_from_decimal(s)
             carry = (carry - lo) / __INT_B
         end
     end
-    return __int_mk(sign, mag)
+    return __int_mk(1, mag)
+end
+-- Parse a decimal string into an Integer (backs big literals).
+local function __int_from_decimal(s)
+    local start = 1
+    local c0 = string.byte(s, 1)
+    if c0 == 45 or c0 == 43 then start = 2 end
+    local x = __int_from_digits(10, s, start, #s)
+    if c0 == 45 and x[1] ~= 0 then x[1] = -1 end
+    return x
 end
 
 negate_Integer = function(x)
@@ -448,18 +462,6 @@ local function ord_compare__Integer(a, b)
 end
 -- `toInteger` at Integer is the identity; `fromInteger` too (already an Integer).
 local function toInteger_Integer(x) return __force(x) end
--- read @Integer: tolerate surrounding space and one layer of parentheses.
-local function read_Integer(s)
-    s = __force(s)
-    s = string.gsub(s, "^%s+", "")
-    s = string.gsub(s, "%s+$", "")
-    if string.byte(s, 1) == 40 then s = string.gsub(string.gsub(s, "^%(%s*", ""), "%s*%)$", "") end
-    -- Validate BEFORE parsing: __int_from_decimal is the fast path for
-    -- pre-validated literals and maps any byte through byte-48, so
-    -- garbage ("12x", "") silently became a number. GHC: no parse.
-    if not string.match(s, "^[%+%-]?%d+$") then error("Prelude.read: no parse") end
-    return __int_from_decimal(s)
-end
 -- toInteger @Int: lift a machine Int to an Integer (bignum).
 local function toInteger_Int(x) return fromInteger_Integer(__force(x)) end
 -- The Number target is GHC's integerToDouble: the nearest double to the

@@ -52,6 +52,11 @@
 //! third of them with a zero step) are oracled against base's own
 //! `eftInt`/`efdtInt`/`enumDeltaToInteger`, so the direction rule
 //! (upward iff `b >= a`) has a standing probe beside the hand corpus.
+//! `read (show e) :: T` at every scalar type (Int, Integer, Number, Bool,
+//! String — negative numbers, exponent-form doubles, escaped strings) is
+//! the identity on the reference side and runs mata-ll's `show` and its
+//! Text.Read.Lex reader on the other, so the two grammars are held
+//! together on machine-generated values.
 //!
 //! Everything is deterministic and offline: each program derives from
 //! (BATCH_SEED, index) through SplitMix64, so any failure reproduces by
@@ -369,6 +374,12 @@ enum Expr {
     /// (found by batch index 1264, the first generator bug the compiler
     /// caught rather than the other way around).
     Annot(Box<Expr>, Ty),
+    /// `(read (show e) :: T)` at a scalar `T`: the round trip through
+    /// mata-ll's `show` and `read`, which GHC's Read laws make the identity
+    /// — so the reference evaluates `e` alone, and the generated side has
+    /// to lex what its own `show` printed (a negative number, an
+    /// exponent-form double, a string with escapes).
+    ReadShow(Box<Expr>, Ty),
 }
 
 fn b(e: Expr) -> Box<Expr> {
@@ -535,6 +546,7 @@ fn render(e: &Expr) -> String {
         }
         Expr::FunRef(p) => p_name(p).into(),
         Expr::Annot(e, ty) => format!("({} :: {})", render(e), ty.render()),
+        Expr::ReadShow(e, ty) => format!("(read (show {}) :: {})", render(e), ty.render()),
     }
 }
 
@@ -1242,6 +1254,7 @@ fn eval(e: &Expr, env: &Env) -> Value {
         }
         Expr::FunRef(p) => Value::Builtin(p.clone(), Vec::new()),
         Expr::Annot(e, _) => eval(e, env),
+        Expr::ReadShow(e, _) => eval(e, env),
     }
 }
 
@@ -1923,7 +1936,7 @@ impl Gen {
     /// reaches the double's range — no infinity, no NaN, and the IEEE
     /// results in the reference are the host's bit for bit.
     fn number_expr(&mut self, depth: usize) -> Expr {
-        match self.r.below(16) {
+        match self.r.below(17) {
             0 | 1 | 2 => {
                 let op = if self.r.chance(1, 2) { Bin::Add } else { Bin::Sub };
                 Expr::Bin(
@@ -2000,6 +2013,7 @@ impl Gen {
                 let xs = self.expr(&Ty::list(Ty::Number), depth - 1);
                 Expr::Call(p, vec![f, z, xs])
             }
+            16 => self.read_show(&Ty::Number, depth),
             _ => self.atom(&Ty::Number),
         }
     }
@@ -2036,7 +2050,7 @@ impl Gen {
     }
 
     fn int_expr(&mut self, depth: usize) -> Expr {
-        match self.r.below(12) {
+        match self.r.below(13) {
             0 | 1 | 2 => {
                 let op = [Bin::Add, Bin::Sub, Bin::Mul][self.r.below(3)];
                 Expr::Bin(
@@ -2106,12 +2120,13 @@ impl Gen {
                 let m = self.expr(&mty, depth - 1);
                 Expr::Call(P::HmSize, vec![m])
             }
+            12 => self.read_show(&Ty::Int, depth),
             _ => self.atom(&Ty::Int),
         }
     }
 
     fn integer_expr(&mut self, depth: usize) -> Expr {
-        match self.r.below(10) {
+        match self.r.below(11) {
             0 | 1 => {
                 let op = if self.r.chance(1, 2) { Bin::Add } else { Bin::Sub };
                 Expr::Bin(
@@ -2143,12 +2158,13 @@ impl Gen {
                 P::SumI,
                 vec![self.expr(&Ty::list(Ty::Integer), depth - 1)],
             ),
+            10 => self.read_show(&Ty::Integer, depth),
             _ => self.atom(&Ty::Integer),
         }
     }
 
     fn bool_expr(&mut self, depth: usize) -> Expr {
-        match self.r.below(10) {
+        match self.r.below(11) {
             0 | 1 => {
                 // Eq/Ord operators at ANY fun-free type — the scalar paths
                 // for Int/Integer/Bool/String/Ordering, the A16 structural
@@ -2194,12 +2210,13 @@ impl Gen {
                 let t = if self.r.chance(1, 2) { Ty::Int } else { Ty::Integer };
                 Expr::Call(p, vec![self.pinned(&t, depth - 1)])
             }
+            10 => self.read_show(&Ty::Bool, depth),
             _ => self.atom(&Ty::Bool),
         }
     }
 
     fn str_expr(&mut self, depth: usize) -> Expr {
-        match self.r.below(8) {
+        match self.r.below(9) {
             0 | 1 => Expr::Call(
                 P::Append,
                 vec![
@@ -2217,8 +2234,16 @@ impl Gen {
                 P::Mconcat,
                 vec![self.expr(&Ty::list(Ty::Str), depth - 1)],
             ),
+            8 => self.read_show(&Ty::Str, depth),
             _ => self.atom(&Ty::Str),
         }
+    }
+
+    /// `(read (show e) :: T)` over a pinned `e` of scalar type `T` (show's
+    /// operand flows nowhere, so it carries its own pin).
+    fn read_show(&mut self, ty: &Ty, depth: usize) -> Expr {
+        let e = self.pinned(ty, depth - 1);
+        Expr::ReadShow(b(e), ty.clone())
     }
 
     fn ordering_expr(&mut self, depth: usize) -> Expr {

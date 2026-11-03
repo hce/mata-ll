@@ -171,7 +171,8 @@ integer-syntax literal at `Number` is lowered at compile time to the
 double GHC's `fromInteger` at Double denotes (`9007199254740993 ::
 Number` is `9007199254740992.0`, `-0 :: Number` is `-0.0`, and constant
 folding at `Number` is double arithmetic), `read` at `Number` reads
-integer syntax as a double (`read "-0"` is `-0.0`), `fromInteger`/
+integer syntax as a double (`read "-0"` is `-0.0`, `read "0x10"` is
+`16.0`), `fromInteger`/
 `fromIntegral` at `Number` are GHC's `integerToDouble` — the nearest
 double to the exact `Integer` at every magnitude, ties to even,
 `Infinity` past the double's range (`fromInteger (2 ^ 80 + 2 ^ 27 + 1)`
@@ -782,7 +783,7 @@ class `Hashable` are mata-ll's own.
 | `Show` | `Int`, `Integer`, `Number`, `String`, `Bool`, `ByteString`, `()`, `Ordering`, `Maybe a`, `Either a b`, `[a]`, every tuple, and anything that derives it |
 | `Eq` | the same types, plus `IORef a` (reference identity, as GHC) |
 | `Ord` | the same types but `IORef` (see the previous section) |
-| `Read` | `Int`, `Integer`, `Number`, `Bool`, `String` — GHC's grammar per type, no `Maybe`/list/tuple readers (there is no `deriving (Read)`) |
+| `Read` | `Int`, `Integer`, `Number`, `Bool`, `String` — GHC's grammar per type (see "`read` is GHC's lexer" below), no `Maybe`/list/tuple readers (there is no `deriving (Read)`) |
 | `Enum` | `Int`, `Integer`, `Number` (GHC's `Enum Double`: `fromEnum` truncates, the ranges are base's `numericEnumFrom` family), `Bool`, `Ordering`, `()`, and derived enumerations — every stepped range takes GHC.Enum's direction: upward iff the second element is not below the first, so `[x, x .. y]` is infinitely many `x` when `x <= y` and `[]` otherwise |
 | `Bounded` | `Int`, `Bool`, `Ordering`, `()`, tuples up to the 15-tuple, and derived enumerations and single-constructor products |
 | `Num` | `Int`, `Integer`, `Number` |
@@ -811,6 +812,42 @@ anywhere in the module, a derived one, or a structural one all count.
 What is missing is reported at the data declaration, naming the
 deriving clause, the constructor, the field type and the instance to
 add.
+
+## `read` is GHC's lexer, over bytes
+
+`read` at `Int`, `Integer`, `Number`, `Bool` and `String` is GHC.Read
+over Text.Read.Lex, one reader shared by the five instances: optional
+surrounding white space; any number of matched parenthesis layers, each
+allowing white space inside; for a number GHC's `readNumber` — an
+optional `-` lexeme (never `+`), white space, then one number lexeme:
+decimal digits, `0x`/`0X` hex, `0o`/`0O` octal, `0b`/`0B` binary, and
+at `Number` a fraction only when the dot is followed by a digit and an
+exponent only when `e`/`E` and an optional sign are followed by a digit
+(`.5`, `5.`, `1.e3`, `1e`, `1_000` are no parse, as in GHC), plus the
+identifiers `NaN` and `Infinity`; `True`/`False` at `Bool`; one Haskell
+string literal at `String` with `lexLitChar`'s escape set (`\n`, `\t`,
+`\\`, `\"`, `\'`, `\a` `\b` `\f` `\r` `\v`, decimal `\NNN`,
+`\xHH`/`\XHH`, `\oOOO`/`\OOOO`, `\^@` .. `\^_`, the named ASCII
+escapes `\NUL` .. `\DEL` and `\SP` with `\SOH` winning over `\SO`,
+the empty escape `\&`, and string gaps). Anything else, and anything
+left over, is `Prelude.read: no parse`. A fraction or an exponent is no
+parse at `Int` and `Integer` (`read "1e3" :: Int` fails, as in GHC);
+`Int` narrows the exact integer like GHC's `fromInteger` (modulo 2^64
+on a host with 64-bit integers; on LuaJIT, whose `Int` is a double, the
+nearest double — the documented 2^53 window); `Number` is the correctly
+rounded double of the exact decimal, with GHC's placement rule for an
+exponent beyond the range (`1e400` is `Infinity`, `1e-400` is `0.0`,
+`-1e-400` is `-0.0`, a mantissa of zeros is zero whatever its
+exponent); `read (show x) == x` at every one of the five types.
+
+Two consequences of byte strings (see "Strings and ByteStrings"): a
+numeric escape above `\255` is no parse, because a byte string has no
+cell for the Char GHC would read (`read "\"\\256\""` is `"\256"` in
+GHC) — `show` never emits one, so every shown string reads back; and
+white space is `isSpace` over bytes — space, `\t` `\n` `\v` `\f`
+`\r` and byte 0xA0 (U+00A0 under the Latin-1 reading `show` uses) —
+so a UTF-8-encoded Unicode space (U+1680, U+2000 ..) around a lexeme is
+no parse where GHC's `[Char]` skips it.
 
 ## Every builtin class carries GHC's defaults; `showList` is absent
 

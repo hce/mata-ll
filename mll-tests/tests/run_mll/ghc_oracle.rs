@@ -523,6 +523,8 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_rank2_argument_routes, "cases", "rank2_argument_routes.mll"),
         (ghc_oracle_class_method_constraints, "cases", "class_method_constraints.mll"),
         (ghc_oracle_read_typeclass, "cases", "read_typeclass.mll"),
+        (ghc_oracle_read_grammar, "cases", "read_grammar.mll"),
+        (ghc_oracle_read_int_wrap, "cases", "read_int_wrap.mll"),
         (ghc_oracle_record_brace_next_line, "cases", "record_brace_next_line.mll"),
         (ghc_oracle_record_update, "cases", "record_update.mll"),
         (ghc_oracle_records, "cases", "records.mll"),

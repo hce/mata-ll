@@ -854,7 +854,11 @@ variable.
 
     class Read a where
         read :: String -> a
-        -- Instances: Int, Integer, Number, Bool, String
+        -- Instances: Int, Integer, Number, Bool, String — GHC's
+        -- grammar (GHC.Read over Text.Read.Lex): surrounding white
+        -- space, nested parentheses, `-` before a number, radix
+        -- prefixes, NaN/Infinity at Number, a string literal with
+        -- its escapes at String; otherwise "Prelude.read: no parse"
 
     class Enum a where
         -- Instances: Int, Integer, Number (GHC's Enum Double), Bool,

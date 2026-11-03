@@ -1405,47 +1405,6 @@ end
 -- takes (x, base) — binding it directly reversed the meaning under the
 -- GHC-evoking name.
 local function __mll_logbase(b, x) return math.log(x, b) end
--- Read parsing (GHC parity). A read trims surrounding space and one
--- layer of parentheses; anything the type's grammar does not cover
--- raises GHC's exact "Prelude.read: no parse" (a catchable error).
--- The old readers accepted garbage: tonumber let read @Int return a
--- FRACTION ("3.5") or nil ("junk"), and read @Bool mapped everything
--- that was not "True" to False.
-local function __mll_read_trim(s)
-    s = string.gsub(s, "^%s+", "")
-    s = string.gsub(s, "%s+$", "")
-    if string.byte(s, 1) == 40 and string.byte(s, #s) == 41 then
-        s = string.gsub(string.gsub(s, "^%(%s*", ""), "%s*%)$", "")
-    end
-    return s
-end
-local function __mll_read_int(s)
-    s = __mll_read_trim(__force(s))
-    if not string.match(s, "^%-?%d+$") then error("Prelude.read: no parse") end
-    return tonumber(s)
-end
-local function __mll_read_number(s)
-    s = __mll_read_trim(__force(s))
-    if not (string.match(s, "^%-?%d+$")
-        or string.match(s, "^%-?%d+%.%d+$")
-        or string.match(s, "^%-?%d+[eE][%+%-]?%d+$")
-        or string.match(s, "^%-?%d+%.%d+[eE][%+%-]?%d+$")) then
-        error("Prelude.read: no parse")
-    end
-    -- A Number is a double on every host. Integer syntax goes through the
-    -- float lexer rather than `tonumber` + a conversion: "-0" reads as
-    -- -0.0 (GHC: `read "-0" :: Double` is -0.0; the integer 0 has no sign
-    -- to keep) and a long numeral rounds straight to the nearest double
-    -- instead of being read as a wrapping int64 first.
-    if string.match(s, "^%-?%d+$") then s = s .. ".0" end
-    return tonumber(s)
-end
-local function __mll_read_bool(s)
-    s = __mll_read_trim(__force(s))
-    if s == "True" then return true end
-    if s == "False" then return false end
-    error("Prelude.read: no parse")
-end
 local function show_Int(x) return __mll_show_integer(__force(x)) end
 -- Type-directed Double show: a Number is a double on every host (the
 -- producers keep it off Lua's integer subtype), and on LuaJIT every number
@@ -1572,6 +1531,322 @@ local function signum_Number(x) x = __force(x); if x > 0 then return 1.0 elseif 
 local function recip_Number(x) return 1.0 / __force(x) end
 local function fromRational_Number(x) return __force(x) end
 --#include runtime_integer.lua
+-- `read` for the five builtin Read instances: GHC.Read's instances over
+-- Text.Read.Lex's lexer, as ONE reader shared by all five. Every instance
+-- reads the same outer shape — optional surrounding white space, any
+-- number of matched parenthesis layers with white space inside each
+-- (`parens`), the type's item, and nothing left over — and one item: for
+-- Int, Integer and Number GHC's readNumber (an optional `-` lexeme, never
+-- `+`, white space, one number lexeme; at Number also the identifiers NaN
+-- and Infinity, and the sign is applied after conversion, so `-0` reads
+-- as -0.0 and `-Infinity` as itself); for Bool the identifier True or
+-- False; for String one Haskell string literal with lexLitChar's escape
+-- set. Anything else is GHC's exact "Prelude.read: no parse" — raised at
+-- level 0 like head/tail's bottoms, the message IS the diagnostic. The
+-- lexer is left-biased and maximal-munch exactly where ReadP's is (`<++`
+-- in lexNumber, lexFrac, lexExp): `5.` leaves the `.` unread, `1e` the
+-- `e`, `0x` the `x`, so each fails at the leftover check as it does in
+-- GHC. The old readers were five hand-written pattern sets that drifted
+-- apart: one took `+5` and a lone `(`, one needed a matched pair, none
+-- knew a radix prefix or more than one paren layer, `tonumber` handed an
+-- out-of-range Int on as a float, and read @String was the identity.
+local function __mll_read_fail() error("Prelude.read: no parse", 0) end
+-- Data.Char.isSpace over the runtime's byte strings: space, \t \n \v \f
+-- \r, and byte 0xA0 — GHC's isSpace holds for U+00A0, which that byte is
+-- under the Latin-1 reading show already uses for bytes above DEL.
+local function __mll_read_space(s, i)
+    while true do
+        local c = string.byte(s, i)
+        if c == 32 or c == 160 or (c ~= nil and c >= 9 and c <= 13) then i = i + 1 else return i end
+    end
+end
+-- The value of byte `c` as a digit of `base` (2, 8, 10 or 16; hex letters
+-- in either case), or nil when it is not one.
+local function __mll_read_digit(c, base)
+    if c == nil then return nil end
+    local v
+    if c <= 57 then
+        if c < 48 then return nil end
+        v = c - 48
+    elseif c >= 97 and c <= 102 then v = c - 87
+    elseif c >= 65 and c <= 70 then v = c - 55
+    else return nil end
+    if v < base then return v end
+    return nil
+end
+-- One number lexeme (Text.Read.Lex lexNumber), `s[i]` being a digit. A
+-- `0` followed by x/X, o/O or b/B and at least one digit of that base is
+-- a radix literal (MkNumber: digits only, no fraction or exponent —
+-- `0x1.8` leaves `.8` unread). Otherwise decimal digits, then a fraction
+-- only when `.` is followed by a digit and an exponent only when e/E, an
+-- optional sign, is followed by a digit (MkDecimal). Returns the index
+-- after the lexeme, the base, the span of the integral digits, the span
+-- of the fraction digits (nil, nil without one) and the exponent as a
+-- signed float (nil without one; a float so a long exponent saturates to
+-- +-inf instead of wrapping the integer subtype).
+local function __mll_read_lex_number(s, i)
+    if string.byte(s, i) == 48 then
+        local c2 = string.byte(s, i + 1)
+        local base
+        if c2 == 120 or c2 == 88 then base = 16
+        elseif c2 == 111 or c2 == 79 then base = 8
+        elseif c2 == 98 or c2 == 66 then base = 2 end
+        if base and __mll_read_digit(string.byte(s, i + 2), base) then
+            local j = i + 3
+            while __mll_read_digit(string.byte(s, j), base) do j = j + 1 end
+            return j, base, i + 2, j - 1
+        end
+    end
+    local j = i + 1
+    while __mll_read_digit(string.byte(s, j), 10) do j = j + 1 end
+    local ip_last = j - 1
+    local fp_first, fp_last
+    if string.byte(s, j) == 46 and __mll_read_digit(string.byte(s, j + 1), 10) then
+        fp_first = j + 1
+        j = j + 2
+        while __mll_read_digit(string.byte(s, j), 10) do j = j + 1 end
+        fp_last = j - 1
+    end
+    local ex
+    local e = string.byte(s, j)
+    if e == 101 or e == 69 then
+        local k, sign = j + 1, 1.0
+        local sc = string.byte(s, k)
+        if sc == 45 then sign = -1.0; k = k + 1 elseif sc == 43 then k = k + 1 end
+        if __mll_read_digit(string.byte(s, k), 10) then
+            local m = k + 1
+            while __mll_read_digit(string.byte(s, m), 10) do m = m + 1 end
+            ex = sign * tonumber(string.sub(s, k, m - 1))
+            j = m
+        end
+    end
+    return j, 10, i, ip_last, fp_first, fp_last, ex
+end
+-- Digit counts up to which every value of the base is exact in a double
+-- and in an int64 alike (below 2^53), so the digits fold natively; a
+-- longer run is folded by the Integer library and narrowed from there.
+local __mll_read_exact_digits = {[2] = 53, [8] = 17, [10] = 15, [16] = 13}
+local function __mll_read_fold(base, s, first, last)
+    local acc = 0
+    for i = first, last do acc = acc * base + __mll_read_digit(string.byte(s, i), base) end
+    return acc
+end
+-- readNumber's sign: one `-` lexeme, then white space. `+` is not a sign
+-- in Haskell's grammar, and `-(5)` is not a negative number (after the
+-- sign readNumber lexes one more lexeme and converts it; a `(` is not a
+-- number), so the digits must follow directly.
+local function __mll_read_signed(s, i)
+    if string.byte(s, i) == 45 then return true, __mll_read_space(s, i + 1) end
+    return false, i
+end
+-- Int: convertInt — a lexeme numberToInteger accepts (a radix literal, or
+-- decimal digits with neither fraction nor exponent: `1e3` and `1.0` are
+-- no parse at Int) through fromInteger. With 64-bit integers the digits
+-- fold in integer arithmetic, which wraps modulo 2^64 exactly like GHC's
+-- Integer -> Int narrowing (`9223372036854775808` reads as minBound); on
+-- a doubles-only host the Int is the nearest double, as every Int there
+-- is. `0 - v`, not `-v`: a negated zero must stay the integer 0, not -0.0.
+local function __mll_read_item_int(s, i)
+    local neg
+    neg, i = __mll_read_signed(s, i)
+    if not __mll_read_digit(string.byte(s, i), 10) then __mll_read_fail() end
+    local j, base, first, last, fp_first, _, ex = __mll_read_lex_number(s, i)
+    if fp_first or ex then __mll_read_fail() end
+    local v
+    if last - first < __mll_read_exact_digits[base] then
+        v = __mll_read_fold(base, s, first, last)
+    else
+        v = __int_to_machine(__int_from_digits(base, s, first, last))
+    end
+    if neg then v = 0 - v end
+    return v, j
+end
+-- Integer: the same lexeme, kept exact.
+local function __mll_read_item_integer(s, i)
+    local neg
+    neg, i = __mll_read_signed(s, i)
+    if not __mll_read_digit(string.byte(s, i), 10) then __mll_read_fail() end
+    local j, base, first, last, fp_first, _, ex = __mll_read_lex_number(s, i)
+    if fp_first or ex then __mll_read_fail() end
+    local v = __int_from_digits(base, s, first, last)
+    if neg then v = negate_Integer(v) end
+    return v, j
+end
+-- convertFrac over a decimal lexeme that has a fraction or an exponent:
+-- numberToRangedRational, then fromRational. A mantissa of zeros is zero
+-- whatever the exponent says; otherwise the position of the first
+-- significant digit plus the exponent places the value — past 10^1027 it
+-- is Infinity and below 10^-1024 it is zero before any rational is built
+-- (floatRange Double, widened by 3), and in between fromRational is the
+-- correctly rounded double, which both hosts' decimal converters produce
+-- (checked against GHC on the classic hard cases, 770-digit midpoints
+-- included). The text handed to the host is the significant digits and
+-- one small integer exponent, so neither leading zeros nor an exponent
+-- wider than the host's integer nor the integer subtype can enter.
+local function __mll_read_decimal(s, first, last, fp_first, fp_last, ex)
+    local fp = ""
+    if fp_first then fp = string.sub(s, fp_first, fp_last) end
+    ex = ex or 0.0
+    local digits = string.gsub(string.sub(s, first, last), "^0+", "")
+    local first_digit
+    if #digits > 0 then
+        first_digit = #digits
+        digits = digits .. fp
+    else
+        local zeros = #string.match(fp, "^0*")
+        if zeros == #fp then return 0.0 end
+        first_digit = -zeros
+        digits = string.sub(fp, zeros + 1)
+    end
+    local place = first_digit + ex
+    if place > 1027 then return math.huge end
+    if place < -1024 then return 0.0 end
+    return tonumber(digits .. "e" .. string.format("%d", ex - #fp))
+end
+-- Number: convertFrac — NaN, Infinity, or a number lexeme; integral
+-- syntax (decimal or radix) is the exact integer's nearest double
+-- (fromRational of an integer is integerToDouble), the rest goes through
+-- __mll_read_decimal. The result is a float on every host, and the sign
+-- is applied to the converted value (`-0` is -0.0, `-1e-400` is -0.0).
+local function __mll_read_item_number(s, i)
+    local neg
+    neg, i = __mll_read_signed(s, i)
+    local c = string.byte(s, i)
+    local v, j
+    if c == 78 and string.sub(s, i, i + 2) == "NaN" then
+        v = 0.0 / 0.0; j = i + 3
+    elseif c == 73 and string.sub(s, i, i + 7) == "Infinity" then
+        v = math.huge; j = i + 8
+    elseif __mll_read_digit(c, 10) then
+        local base, first, last, fp_first, fp_last, ex
+        j, base, first, last, fp_first, fp_last, ex = __mll_read_lex_number(s, i)
+        if fp_first == nil and ex == nil then
+            if last - first < __mll_read_exact_digits[base] then
+                v = __mll_read_fold(base, s, first, last) * 1.0
+            else
+                v = __int_to_double(__int_from_digits(base, s, first, last))
+            end
+        else
+            v = __mll_read_decimal(s, first, last, fp_first, fp_last, ex)
+        end
+    else
+        __mll_read_fail()
+    end
+    if neg then v = -v end
+    return v, j
+end
+-- Bool: the identifier True or False. A longer identifier (`Truex`,
+-- `True'`) fails at the leftover check, as the longer Ident lexeme fails
+-- GHC's `choose`.
+local function __mll_read_item_bool(s, i)
+    if string.sub(s, i, i + 3) == "True" then return true, i + 4 end
+    if string.sub(s, i, i + 4) == "False" then return false, i + 5 end
+    __mll_read_fail()
+end
+-- The named ASCII escapes of a string literal (`\NUL` .. `\US`, `\SP`,
+-- `\DEL`), the inverse of show's control-name table.
+local __mll_read_ascii_names = {SP = 32, DEL = 127}
+for code, name in pairs(__mll_ctrl_names) do __mll_read_ascii_names[name] = code end
+-- One escape of lexLitChar, `s[i]` being the byte after the backslash:
+-- the escape characters a b f n r t v \ " ', a control escape `\^@` ..
+-- `\^_`, a numeric escape (decimal digits, `\x`/`\X` hex, `\o`/`\O`
+-- octal; every digit is consumed, as lexInteger does), or a named ASCII
+-- escape with `\SOH` winning over `\SO` (the report's maximal munch: the
+-- three-letter names are tried first). Returns the byte and the index
+-- after the escape. A numeric escape above 255 is no parse: a byte string
+-- has no cell for it (GHC reads it as one Char up to \1114111 — the
+-- documented byte-string deviation; `show` never emits one).
+local function __mll_read_escape(s, i)
+    local e = string.byte(s, i)
+    if e == nil then __mll_read_fail() end
+    if e == 110 then return 10, i + 1 end
+    if e == 116 then return 9, i + 1 end
+    if e == 92 or e == 34 or e == 39 then return e, i + 1 end
+    if e == 114 then return 13, i + 1 end
+    if e == 97 then return 7, i + 1 end
+    if e == 98 then return 8, i + 1 end
+    if e == 102 then return 12, i + 1 end
+    if e == 118 then return 11, i + 1 end
+    if e == 94 then
+        local c = string.byte(s, i + 1)
+        if c == nil or c < 64 or c > 95 then __mll_read_fail() end
+        return c - 64, i + 2
+    end
+    local base, j = 10, i
+    if e == 120 or e == 88 then base = 16; j = i + 1
+    elseif e == 111 or e == 79 then base = 8; j = i + 1 end
+    local d = __mll_read_digit(string.byte(s, j), base)
+    if d then
+        local v = 0
+        while d do
+            if v <= 255 then v = v * base + d end
+            j = j + 1
+            d = __mll_read_digit(string.byte(s, j), base)
+        end
+        if v > 255 then __mll_read_fail() end
+        return v, j
+    end
+    local code = __mll_read_ascii_names[string.sub(s, i, i + 2)]
+    if code then return code, i + 3 end
+    code = __mll_read_ascii_names[string.sub(s, i, i + 1)]
+    if code then return code, i + 2 end
+    __mll_read_fail()
+end
+-- One string literal (lexString), `s[i]` being the opening quote: plain
+-- bytes are copied by runs, `\&` is the empty escape, a backslash
+-- followed by white space is a string gap (white space up to a closing
+-- backslash, contributing nothing), and every other backslash starts a
+-- lexLitChar escape. An unterminated literal is no parse. Returns the
+-- decoded string and the index after the closing quote.
+local function __mll_read_lex_string(s, i)
+    local out, n = {}, 0
+    i = i + 1
+    while true do
+        local j = string.find(s, '["\\]', i)
+        if j == nil then __mll_read_fail() end
+        if j > i then n = n + 1; out[n] = string.sub(s, i, j - 1) end
+        if string.byte(s, j) == 34 then return table.concat(out), j + 1 end
+        local e = string.byte(s, j + 1)
+        if e == 38 then
+            i = j + 2
+        elseif e == 32 or e == 160 or (e ~= nil and e >= 9 and e <= 13) then
+            i = __mll_read_space(s, j + 1)
+            if string.byte(s, i) ~= 92 then __mll_read_fail() end
+            i = i + 1
+        else
+            local v
+            v, i = __mll_read_escape(s, j + 1)
+            n = n + 1; out[n] = string.char(v)
+        end
+    end
+end
+local function __mll_read_item_string(s, i)
+    if string.byte(s, i) ~= 34 then __mll_read_fail() end
+    return __mll_read_lex_string(s, i)
+end
+-- `parens` and readEither's leftover check around one item: white space,
+-- any depth of `(`, the item, white space, that many `)` each followed by
+-- white space, end of input.
+local function __mll_read_run(s, item)
+    s = __force(s)
+    local i = __mll_read_space(s, 1)
+    local depth = 0
+    while string.byte(s, i) == 40 do depth = depth + 1; i = __mll_read_space(s, i + 1) end
+    local v
+    v, i = item(s, i)
+    i = __mll_read_space(s, i)
+    for _ = 1, depth do
+        if string.byte(s, i) ~= 41 then __mll_read_fail() end
+        i = __mll_read_space(s, i + 1)
+    end
+    if i <= #s then __mll_read_fail() end
+    return v
+end
+local function __mll_read_int(s) return __mll_read_run(s, __mll_read_item_int) end
+local function read_Integer(s) return __mll_read_run(s, __mll_read_item_integer) end
+local function __mll_read_number(s) return __mll_read_run(s, __mll_read_item_number) end
+local function __mll_read_bool(s) return __mll_read_run(s, __mll_read_item_bool) end
+local function __mll_read_string(s) return __mll_read_run(s, __mll_read_item_string) end
 -- head forces the element (a value-consumer under the head-consumption
 -- contract): it RETURNS the head as its result, and the WHNF-return invariant
 -- says a function may never return a raw thunk — the caller's one-level
