@@ -468,6 +468,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_sort_ghc_algorithm, "cases", "sort_ghc_algorithm.mll"),
         (ghc_oracle_sort_ghc_algorithm_data_list, "cases", "sort_ghc_algorithm_data_list.mll"),
         (ghc_oracle_maximum_minimum_class_fold, "cases", "maximum_minimum_class_fold.mll"),
+        (ghc_oracle_list_definitions_laziness, "cases", "list_definitions_laziness.mll"),
         (ghc_oracle_eq_minimal_instance, "cases", "eq_minimal_instance.mll"),
         (ghc_oracle_num_minimal_instance, "cases", "num_minimal_instance.mll"),
         (ghc_oracle_fractional_integral_minimal, "cases", "fractional_integral_minimal.mll"),

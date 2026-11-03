@@ -2079,14 +2079,20 @@ end
 -- The type-erased twin of the Foldable `foldl'` method (its Lua name:
 -- sanitize_name turns the prime into `_prime`), reached exactly like the
 -- erased foldl/foldr above — a use whose element type never resolved
--- (`length [error "x"]`) cannot dispatch to the `[]` instance. Strict in
--- the accumulator at every step, as the instance is.
+-- (`length [error "x"]`) cannot dispatch to the `[]` instance. GHC's
+-- foldl' (GHC.List's for lists, Data.Foldable's default for Maybe — the
+-- same rule) forces the INCOMING accumulator before each application: the
+-- seed is forced whenever the structure is non-empty (⊥ as the seed
+-- raises on `[1]` and on `Just 1`), every application's result is the
+-- next step's forced accumulator, and on an empty structure the seed is
+-- returned untouched — forced here only because a function's result is
+-- demanded to WHNF anyway, as is the last application's.
 local function foldl_prime(f, z, t)
     t = __force(t)
     if t == nil then return __force(z) end
     f = __force(f)
     local mt = getmetatable(t)
-    if mt == __just_mt then return __force(f(z, t[1])) end
+    if mt == __just_mt then return __force(f(__force(z), t[1])) end
     if mt ~= __cons_mt then
         error("foldl': type-erased fold over a structure that is not a list or Maybe")
     end

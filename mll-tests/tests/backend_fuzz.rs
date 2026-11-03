@@ -91,6 +91,14 @@
 //! if x <= y then y else x`, `maximum = foldl1' max`), where a NaN fails
 //! the `<=` and the tie side decides which zero comes back.
 //!
+//! `scanl`/`scanl1` (the running fold, at the element types whose growth
+//! the fold's own budget already bounds: Int wraps, Number multiplies by
+//! literals only, String appends), `intersperse` and `span`/`break` (at a
+//! `([t], [t])` pair type, under a pinned predicate) are oracled on their
+//! VALUES over the fragment's finite lists — their laziness on partial
+//! and infinite lists is the corpus case `list_definitions_laziness`'s
+//! job, since the strict reference cannot see a demand.
+//!
 //! Everything is deterministic and offline: each program derives from
 //! (BATCH_SEED, index) through SplitMix64, so any failure reproduces by
 //! seed alone, and the failure message carries the source and both outputs.
@@ -285,6 +293,15 @@ enum P {
     SumI, // sum :: [Integer] -> Integer (separate so eval stays typed)
     Null,
     ZipWith,
+    /// `scanl f z xs` / `scanl1 f xs`: the running left fold, seed first.
+    Scanl,
+    Scanl1,
+    /// `intersperse sep xs` (Data.List; the scaffold imports it).
+    Intersperse,
+    /// `span p xs` / `break p xs`: the longest prefix deciding `p` one
+    /// way, paired with the rest of the list.
+    Span,
+    Break,
     Fst,
     Snd,
     Head, // only ever applied to a syntactic cons (nonempty evidence)
@@ -616,6 +633,11 @@ fn p_name(p: &P) -> &'static str {
         P::Sum | P::SumI => "sum",
         P::Null => "null",
         P::ZipWith => "zipWith",
+        P::Scanl => "scanl",
+        P::Scanl1 => "scanl1",
+        P::Intersperse => "intersperse",
+        P::Span => "span",
+        P::Break => "break",
         P::Fst => "fst",
         P::Snd => "snd",
         P::Head => "head",
@@ -1195,8 +1217,12 @@ fn p_arity(p: &P) -> usize {
         | P::HmMember
         | P::HmDelete
         | P::PowN
+        | P::Scanl1
+        | P::Intersperse
+        | P::Span
+        | P::Break
         | P::AppendList => 2,
-        P::Foldr | P::Foldl | P::ZipWith | P::Flip | P::Twice | P::CompApp | P::HmInsert => 3,
+        P::Foldr | P::Foldl | P::ZipWith | P::Scanl | P::Flip | P::Twice | P::CompApp | P::HmInsert => 3,
     }
 }
 
@@ -1332,6 +1358,62 @@ fn call_builtin(p: &P, mut args: Vec<Value>) -> Value {
                     .map(|(x, y)| apply(apply(f.clone(), x), y))
                     .collect(),
             )
+        }
+        // GHC's scanl: the seed is the first element, then one running
+        // accumulator per list element (`scanl f z xs` has length xs + 1);
+        // scanl1 starts from the list's own head and is empty on [].
+        P::Scanl => {
+            let xs = as_list(&args[2]);
+            let z = args.swap_remove(1);
+            let f = args.swap_remove(0);
+            let mut out = vec![z.clone()];
+            let mut acc = z;
+            for x in xs {
+                acc = apply(apply(f.clone(), acc), x);
+                out.push(acc.clone());
+            }
+            Value::List(out)
+        }
+        P::Scanl1 => {
+            let xs = as_list(&args[1]);
+            let f = args.swap_remove(0);
+            let mut it = xs.into_iter();
+            let Some(first) = it.next() else {
+                return Value::List(Vec::new());
+            };
+            let mut out = vec![first.clone()];
+            let mut acc = first;
+            for x in it {
+                acc = apply(apply(f.clone(), acc), x);
+                out.push(acc.clone());
+            }
+            Value::List(out)
+        }
+        P::Intersperse => {
+            let xs = as_list(&args[1]);
+            let sep = args.swap_remove(0);
+            let mut out = Vec::with_capacity(xs.len() * 2);
+            for (i, x) in xs.into_iter().enumerate() {
+                if i > 0 {
+                    out.push(sep.clone());
+                }
+                out.push(x);
+            }
+            Value::List(out)
+        }
+        // span keeps the longest prefix on which `p` holds, break the
+        // longest on which it fails; the rest of the list is the second
+        // component either way.
+        P::Span | P::Break => {
+            let keep = *p == P::Span;
+            let mut xs = as_list(&args[1]);
+            let f = args.swap_remove(0);
+            let cut = xs
+                .iter()
+                .position(|x| as_bool(&apply(f.clone(), x.clone())) != keep)
+                .unwrap_or(xs.len());
+            let rest = xs.split_off(cut);
+            Value::Pair(b2(Value::List(xs)), b2(Value::List(rest)))
         }
         P::Flip => {
             let a = args.swap_remove(2);
@@ -2142,10 +2224,7 @@ impl Gen {
             Ty::Str => self.str_expr(depth),
             Ty::Ordering => self.ordering_expr(depth),
             Ty::List(t) => self.list_expr(t, depth),
-            Ty::Pair(a, bt) => Expr::MkPair(
-                b(self.expr(a, depth - 1)),
-                b(self.expr(bt, depth - 1)),
-            ),
+            Ty::Pair(a, bt) => self.pair_expr(a, bt, depth),
             Ty::Maybe(t) => self.maybe_expr(t, depth),
             Ty::Fun(a, bt) => self.fun_expr(a, bt, depth),
             Ty::Hm(k, v) => {
@@ -2738,7 +2817,14 @@ impl Gen {
     }
 
     fn list_expr(&mut self, elem: &Ty, depth: usize) -> Expr {
-        match self.r.below(15) {
+        // The running folds take the element types whose arithmetic the
+        // existing folds already run at (Int wraps; a Number lambda body
+        // multiplies by literals only; String appends; Bool and Ordering
+        // are finite) — never Integer, where one application per element
+        // would compound past the i128 headroom budget, as foldl's Int
+        // and Number instantiations avoid too.
+        let scan_ok = matches!(elem, Ty::Int | Ty::Number | Ty::Bool | Ty::Str | Ty::Ordering);
+        match self.r.below(20) {
             0 | 1 => {
                 // map with a random source element type.
                 let src = gen_ty(&mut self.r, 1, false);
@@ -2854,12 +2940,68 @@ impl Gen {
                 let budget = 1 + self.r.below(5);
                 Expr::Range { from: b(from), then, to: b(to), budget }
             }
+            15 if scan_ok => {
+                // scanl: the running fold from a seed at the element type
+                // over a source list of any fun-free type.
+                let src = gen_ty(&mut self.r, 1, false);
+                let f = self.pinned(
+                    &Ty::fun(elem.clone(), Ty::fun(src.clone(), elem.clone())),
+                    depth - 1,
+                );
+                let z = self.expr(elem, depth - 1);
+                let xs = self.expr(&Ty::list(src), depth - 1);
+                Expr::Call(P::Scanl, vec![f, z, xs])
+            }
+            16 if scan_ok => {
+                let f = self.pinned(
+                    &Ty::fun(elem.clone(), Ty::fun(elem.clone(), elem.clone())),
+                    depth - 1,
+                );
+                let xs = self.expr(&Ty::list(elem.clone()), depth - 1);
+                Expr::Call(P::Scanl1, vec![f, xs])
+            }
+            17 => {
+                let sep = self.expr(elem, depth - 1);
+                let xs = self.expr(&Ty::list(elem.clone()), depth - 1);
+                Expr::Call(P::Intersperse, vec![sep, xs])
+            }
+            18 | 19 => {
+                // A component of span/break at the element type: the pair
+                // type itself (`pair_expr`) arises too rarely from two
+                // independently generated types to carry the probe alone.
+                let split = self.span_expr(elem, depth);
+                let proj = if self.r.chance(1, 2) { P::Fst } else { P::Snd };
+                Expr::Call(proj, vec![split])
+            }
             _ => {
                 let n = self.r.below(4);
                 let xs = (0..n).map(|_| self.expr(elem, depth - 1)).collect();
                 Expr::ListLit(xs)
             }
         }
+    }
+
+    /// `span p xs` or `break p xs` at `([t], [t])`, under a pinned
+    /// predicate: the longest prefix deciding `p` one way, paired with the
+    /// rest of the list.
+    fn span_expr(&mut self, elem: &Ty, depth: usize) -> Expr {
+        let p = self.pinned(&Ty::fun(elem.clone(), Ty::Bool), depth - 1);
+        let xs = self.expr(&Ty::list(elem.clone()), depth - 1);
+        let op = if self.r.chance(1, 2) { P::Span } else { P::Break };
+        Expr::Call(op, vec![p, xs])
+    }
+
+    /// A pair-typed expression: a literal pair, or at `([t], [t])` one
+    /// time in three the whole `span`/`break` pair (printed or
+    /// pattern-bound as a pair; the list productions project it).
+    fn pair_expr(&mut self, a: &Ty, bt: &Ty, depth: usize) -> Expr {
+        if let Ty::List(t) = a
+            && a == bt
+            && self.r.chance(1, 3)
+        {
+            return self.span_expr(t, depth);
+        }
+        Expr::MkPair(b(self.expr(a, depth - 1)), b(self.expr(bt, depth - 1)))
     }
 
     /// The sort probe (see the module header): `sort` or `sortBy` under a
@@ -3239,6 +3381,8 @@ impl Gen {
 /// patterns than arrows, a user-defined higher-order combinator) — the
 /// random layer instantiates them at whatever types come up.
 const SCAFFOLD: &str = "\
+import Data.List (intersperse)
+
 fuzzTwice :: (a -> a) -> a -> a
 fuzzTwice f x = f (f x)
 ";

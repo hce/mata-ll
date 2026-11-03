@@ -53,10 +53,17 @@ groupBy _ [] = []
 groupBy eq (x:xs) = let sp = span (eq x) xs
                      in (x : fst sp) : groupBy eq (snd sp)
 
+-- GHC's definitions: `intersperse` emits the first element and hands the
+-- rest to `prependToAll`, which puts the separator before every further
+-- element. An `[x]` clause would have to match the TAIL before producing
+-- `x`, so `take 1 (intersperse 0 (1 : ⊥))` raised where GHC gives `[1]`.
 intersperse :: a -> [a] -> [a]
 intersperse _ [] = []
-intersperse _ [x] = [x]
-intersperse sep (x:xs) = x : sep : intersperse sep xs
+intersperse sep (x:xs) = x : prependToAll sep xs
+
+prependToAll :: a -> [a] -> [a]
+prependToAll _ [] = []
+prependToAll sep (x:xs) = sep : x : prependToAll sep xs
 
 intercalate :: [a] -> [[a]] -> [a]
 intercalate sep xs = concat (intersperse sep xs)

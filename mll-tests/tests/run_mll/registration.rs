@@ -744,6 +744,11 @@ mll_lib_test!(sort_ghc_algorithm_data_list, "sort_ghc_algorithm_data_list.mll");
 // maximum/minimum are foldl1' max / foldl1' min through the instance's own
 // max/min (GHC's tie sides, lawless instances, NaN and -0.0 at Number).
 mll_test!(maximum_minimum_class_fold, "maximum_minimum_class_fold.mll");
+// L12/M12: scanl/scanl1, intersperse, span/break and foldl' are GHC's
+// definitions clause for clause — the seed before the list, the element
+// before the tail, the pair after the match and the guard, the incoming
+// accumulator forced — so they demand exactly what GHC's do.
+mll_test!(list_definitions_laziness, "list_definitions_laziness.mll");
 // GHC's Eq and Show defaults on the builtin classes: a `/=`-only Eq
 // instance, a showsPrec-only Show instance with showParen precedence,
 // and show-only instances left unparenthesized inside derived fields/Just.

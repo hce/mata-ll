@@ -662,9 +662,20 @@ impl Checker {
         // a class method as in GHC's Foldable (so an instance can supply a
         // direct loop: the list instance in Prelude.mll does), with GHC's
         // own default over foldr for every other instance: a continuation
-        // per element applied to the accumulator forced by `seq`, each call
-        // a tail call. length/sum/product/maximum/minimum are defined over
-        // it (GHC's are strict too).
+        // per element that forces the INCOMING accumulator and hands `f acc
+        // x` on (Data.Foldable: `f' x k = \z -> z `seq` k (f z x)`, the
+        // shape GHC.List's list foldl' has too), each call a tail call. So
+        // the seed is forced whenever the structure is non-empty (`foldl'
+        // (\_ x -> x) undefined (Just 1)` raises under GHC) and returned
+        // untouched when it is empty. Forcing only the application's result
+        // (`k $! f acc x`, the previous shape) never forced the seed. The
+        // application is bound with `let` and seq'd before the continuation
+        // receives it rather than passed as GHC's unevaluated thunk: the
+        // receiver is either the next step, whose first act is to force it,
+        // or the identity, whose value the fold's caller demands to WHNF —
+        // nothing can observe it unevaluated in between — and the eager
+        // binding costs no thunk carrier per element. length/sum/product/
+        // maximum/minimum are defined over it (GHC's are strict too).
         self.register_builtin_class("Foldable", "t", &[], &[&["foldr"]], vec![
             ("foldr", foldr_ty, Some(vec![a.clone(), b.clone(), t.clone()]), vec![("Foldable", "t")]),
             ("foldl", foldl_ty.clone(), Some(vec![a.clone(), b.clone(), t.clone()]), vec![("Foldable", "t")]),
@@ -673,7 +684,7 @@ impl Checker {
         self.register_builtin_default(
             "Foldable",
             "foldl'",
-            "foldl' f z0 t = foldr (\\x k acc -> let acc' = f acc x in seq acc' (k acc')) (\\acc -> acc) t z0",
+            "foldl' f z0 t = foldr (\\x k acc -> seq acc (let acc' = f acc x in seq acc' (k acc'))) (\\acc -> acc) t z0",
         );
         // The lazy left fold, for an instance that gives `foldr` alone
         // (GHC's minimal definition). base defines it as `appEndo (getDual

@@ -72,19 +72,29 @@ showParen b p s = if b then "(" <> p (")" <> s) else p s
 -- `Either c` is the partially applied Either — both must match the kind of
 -- Foldable's class variable, which the compiler checks.
 -- foldl' is the third Foldable method (GHC's Foldable has it too): the
--- STRICT left fold. The list instance is the direct loop — the seq'd value
--- and the passed accumulator must be the SAME binding: two textual
--- `f acc x` are two separate thunks, so forcing one and passing the other
--- UNforced gives no strictness (the accumulator chain still grows) and
--- does the work twice. Instances that omit foldl' get the class default
--- (a continuation-passing fold over foldr, GHC's definition).
+-- STRICT left fold. The list instance is GHC.List's definition (base's
+-- `foldr (\v fn -> oneShot (\z -> z `seq` fn (k z v))) id xs z0`, written
+-- as the direct loop): at every cell the INCOMING accumulator is forced
+-- before `f` is applied, and `f z x` is handed to the next step
+-- unevaluated, where it is the incoming accumulator and gets forced in
+-- turn. So the seed is forced whenever the structure is non-empty —
+-- `foldl' (\_ x -> x) undefined [1]` raises as under GHC — and on `[]`
+-- it is returned untouched (`length [foldl' (+) undefined []]` is 1).
+-- Forcing the accumulator before the application rather than the
+-- application's result (the previous shape, which never forced the seed)
+-- is what GHC does, and it is the same amount of work: each `f z x` is
+-- forced exactly once, by the step that receives it or by the caller of
+-- the fold. The Maybe and Either instances are GHC's class default
+-- (Data.Foldable: `f' x k = \z -> z `seq` k (f z x)`) at one element,
+-- the same rule: the seed forced, the application handed on. Instances
+-- that omit foldl' get that default from typechecker/prelude.rs.
 instance Foldable [] where
     foldr _ acc [] = acc
     foldr f acc (x:xs) = f x (foldr f acc xs)
     foldl _ acc [] = acc
     foldl f acc (x:xs) = foldl f (f acc x) xs
     foldl' _ acc [] = acc
-    foldl' f acc (x:xs) = let z = f acc x in seq z (foldl' f z xs)
+    foldl' f acc (x:xs) = acc `seq` foldl' f (f acc x) xs
 
 instance Foldable Maybe where
     foldr _ acc Nothing = acc
@@ -92,7 +102,7 @@ instance Foldable Maybe where
     foldl _ acc Nothing = acc
     foldl f acc (Just x) = f acc x
     foldl' _ acc Nothing = acc
-    foldl' f acc (Just x) = f acc x
+    foldl' f acc (Just x) = acc `seq` f acc x
 
 -- Folding an Either folds over Right and ignores Left, like GHC.
 instance Foldable (Either c) where
@@ -101,7 +111,7 @@ instance Foldable (Either c) where
     foldl _ acc (Left _) = acc
     foldl f acc (Right x) = f acc x
     foldl' _ acc (Left _) = acc
-    foldl' f acc (Right x) = f acc x
+    foldl' f acc (Right x) = acc `seq` f acc x
 
 -- Length-generic Foldable functions. length/sum/product/maximum/minimum
 -- are STRICT left folds (the foldl' method), as in GHC (base's
@@ -187,11 +197,32 @@ cycle xs = ys
 iterate :: (a -> a) -> a -> [a]
 iterate f x = x : iterate f (f x)
 
--- Longest prefix satisfying p, paired with the remainder. Defined via
--- takeWhile/dropWhile to avoid `let (..) = .. in (fst.., snd..)`, which fails
--- the occurs-check at this polymorphic signature.
+-- Longest prefix satisfying p, paired with the remainder. GHC's span is
+-- `span _ xs@[] = (xs, xs); span p xs@(x:xs') | p x = let (ys, zs) = span
+-- p xs' in (x : ys, zs) | otherwise = ([], xs)`: the list is matched and
+-- `p x` decided BEFORE the pair exists (`span p ⊥` and `span (\_ -> ⊥)
+-- [1]` are ⊥, where a pair of two traversals was defined), `p` runs once
+-- per element, and the remainder IS the list's own suffix. Written
+-- literally, the second component of a long satisfying prefix is a chain
+-- of `zs` selectors one Lua frame deep per element (GHC enters a selector
+-- thunk as a jump; `__force` recurses), so the two components are
+-- instead two constant-stack walks that share the decisions through
+-- `decided`, the list of `p x` suspended per cell by `map` and memoized
+-- in the cell: `prefix` emits one cell per satisfying element and
+-- `suffix` is a tail-recursive skip that returns the original suffix.
+-- Both walk the list and its decisions side by side, so each component
+-- demands the list's cells and `p` on them exactly where GHC's does and
+-- an element's value is never demanded.
 span :: (a -> Bool) -> [a] -> ([a], [a])
-span p xs = (takeWhile p xs, dropWhile p xs)
+span p xs = case decided of
+    [] -> ([], [])
+    (b : _) -> if b then (prefix xs decided, suffix xs decided) else ([], xs)
+  where
+    decided = map p xs
+    prefix (y : ys) (c : cs) = if c then y : prefix ys cs else []
+    prefix _ _ = []
+    suffix ys@(_ : ys') (c : cs) = if c then suffix ys' cs else ys
+    suffix ys _ = ys
 
 -- Pair up two lists element-wise, stopping at the shorter. Lazy in the spine.
 -- Association-list lookup: the first pair whose key matches (GHC's
@@ -1155,9 +1186,15 @@ break p xs = span (\x -> not (p x)) xs
 -- Running folds. `scanl` and `scanr` keep the seed as the first/last
 -- element; the `1` variants start from the list's own first/last element
 -- and are empty on an empty list.
+-- scanl is GHC's definition clause for clause: the seed is emitted FIRST
+-- and the list is matched inside the suspended tail, so `scanl f q ⊥` is
+-- `q : ⊥`, `take 2 (scanl (+) 0 (1 : ⊥))` is `[0, 1]`, and the knot `ps =
+-- scanl (+) 1 ps` ties (the cell exists before `ps` is inspected). A
+-- clause per list shape would match the list before producing the seed.
 scanl :: (b -> a -> b) -> b -> [a] -> [b]
-scanl _ acc [] = [acc]
-scanl f acc (x:xs) = acc : scanl f (f acc x) xs
+scanl f q ls = q : (case ls of
+    [] -> []
+    (x:xs) -> scanl f (f q x) xs)
 
 scanl1 :: (a -> a -> a) -> [a] -> [a]
 scanl1 _ [] = []

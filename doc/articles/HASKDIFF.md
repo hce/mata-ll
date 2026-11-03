@@ -56,8 +56,10 @@ of a few hundred thousand pending applications overflows (10^5 completes,
 magnitude sooner (a few times 10^4). The leak is the same bug in both
 systems and takes the same fix — `foldl (+) 0 [1..n]` wants `foldl'`, a
 value built lazily inside `return` wants `` x `seq` return x `` (GHC's
-`return $!`) — but Lua turns it into a crash sooner rather than a slow
-completion. The Prelude's own folds do not leak: `length`, `sum`,
+`return $!`), `last (scanl (+) 0 [1..n])` — the lazy accumulator GHC's
+`scanl` also builds, one pending addition per element — wants a consumer
+that forces the elements in order (`sum`, `mapM_ print`) — but Lua turns
+it into a crash sooner rather than a slow completion. The Prelude's own folds do not leak: `length`, `sum`,
 `product`, `maximum` and `minimum` are strict left folds (the Foldable
 `foldl'` method), as in GHC, so they complete on lists of any length the
 heap can hold, and the traversals GHC runs without a deep stack
@@ -985,6 +987,20 @@ see above).
 
 The lazy list functions stream properly over infinite lists, so e.g.
 `takeWhile (< 100) [1 ..]` and `take 10 (filter even [1 ..])` terminate.
+They are GHC's definitions clause for clause, so a partial list is
+demanded exactly as far as GHC demands it: `take 1 (scanl (+) 0
+undefined)` is `[0]` (the seed is emitted before the list is matched, so
+`let ps = scanl (+) 1 ps in take 4 ps` ties its knot), `take 1
+(intersperse 0 (1 : undefined))` is `[1]`, `span p undefined` and `span
+(\_ -> undefined) [1]` raise (the list is matched and `p x` decided
+before the pair exists) while `take 2 (fst (span even (2 : 4 :
+undefined)))` is `[2, 4]`, and `foldl'` forces the incoming accumulator at
+every element — the seed too, whenever the structure is non-empty —
+through the list instance, the Maybe/Either instances and the class
+default alike (`foldl' (\_ x -> x) undefined [1]` and `... (Just 1)`
+raise, `foldl' (\a _ -> a) 0 [undefined]` is `0`). `span` runs its
+predicate once per element and hands back the list's own suffix as the
+remainder, as GHC's does.
 
 ## Control.Monad is narrower than GHC's
 
@@ -1025,8 +1041,12 @@ generic over them, as in GHC. The differences:
   `mapM_`/`sequence_`/`forM_`, `and`/`or`/`any`/`all`/`elem`/`notElem`,
   `concat`/`concatMap` (and so list comprehensions), `foldMap`/`mconcat`
   at lists and String, `unzip`/`unzip3`/`partition`/`scanr`/`scanr1`
-  (each walked spine), and `Data.Set.fromList`/`union` complete at a
-  million elements on Lua 5.5 and LuaJIT, with GHC's laziness. The list
+  (each walked spine), `span`/`break` (either component of a 3·10^5
+  prefix: the remainder is a tail-recursive skip over the shared
+  decisions rather than GHC's chain of `zs` selectors, which `__force`
+  would nest one Lua frame per element), and `Data.Set.fromList`/`union`
+  complete at a million elements on Lua 5.5 and LuaJIT, with GHC's
+  laziness. The list
   `traverse` dispatches on its applicative through an extra
   `Applicative` method, `list_traverse` (GHC's `foldr`/`liftA2`
   definition by default; an accumulating loop at IO, LuaIO, ST, Maybe

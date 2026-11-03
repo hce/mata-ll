@@ -1,0 +1,50 @@
+1 [0]
+2 [0,1]
+3 [0,1,3]
+4 [1]
+5 caught: Prelude.undefined
+6 [1,2,4,8]
+7 ([0,1,3],[1,3,6])
+8 (3,3)
+9 ([0,1,3,6],[1,3,6],[0],[])
+10 (100001,166671666700000,4501500,100000)
+11 [1]
+12 caught: Prelude.undefined
+13 [1,0,2]
+14 caught: Prelude.undefined
+15 ([1,0,2],5)
+16 ([1,0,2,0,3],[1],[],[1,2,0,3])
+17 caught: Prelude.undefined
+18 caught: Prelude.undefined
+19 (1,([],[]))
+20 caught: Prelude.undefined
+21 ([2,4],[2,4])
+22 ([1],[1])
+23 caught: Prelude.undefined
+24 (1,1)
+25 (2,2)
+26 (([2,4],[5,6]),([1,2,3],[4,5,6]),([],[]),([],[1,2]))
+27 ([3,4],[1,2],[2,4])
+28 (300000,300000)
+29 (300001,300000)
+30 caught: Prelude.undefined
+31 caught: Prelude.undefined
+32 (1,1)
+33 (0,0)
+34 caught: Prelude.undefined
+35 caught: Prelude.undefined
+36 caught: Prelude.undefined
+46 caught: Prelude.undefined
+47 caught: Prelude.undefined
+48 caught: Prelude.undefined
+49 (0,0,0)
+50 (1,2,3,4,5)
+37 caught: Prelude.undefined
+38 (500000500000,500000500000,4,5,0)
+39 (500000,500,3628800)
+40 ([3,2,1],"123")
+41 ([1,2,3],[1,2,3])
+42 (300000,[1,3,5])
+43 caught: Prelude.undefined
+44 caught: Prelude.undefined
+45 ([2,4,6],[2,4,6])

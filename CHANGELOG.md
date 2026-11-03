@@ -44,6 +44,48 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **`scanl`, `scanl1`, `intersperse`, `span`, `break` and `foldl'` are
+  GHC's definitions clause for clause, so they demand exactly what GHC
+  demands.** `scanl` matched the list before emitting the seed, so `take 1
+  (scanl (+) 0 undefined)` raised (GHC `[0]`), `take 2 (scanl (+) 0 (1 :
+  undefined))` raised (GHC `[0, 1]`), `take 1 (scanl1 (+) (1 :
+  undefined))` raised (GHC `[1]`) and the knot `let ps = scanl (+) 1 ps in
+  take 4 ps` overflowed the stack (GHC `[1, 2, 4, 8]`); it is now GHC's
+  `scanl f q ls = q : case ls of ...` — the seed first, the list matched
+  inside the suspended tail. `intersperse` had an `[x]` clause that
+  matched the tail before producing `x`, so `take 1 (intersperse 0 (1 :
+  undefined))` raised (GHC `[1]`); it is now GHC's `intersperse`/
+  `prependToAll` pair. `span` was a pair of `takeWhile` and `dropWhile`:
+  defined on an undefined list (`case span even undefined of (_, _) -> 1`
+  printed `1`; GHC raises, because the list is matched and `p x` decided
+  before the pair exists) and two traversals of the prefix, each running
+  `p`. It now matches the list and decides `p x` first, as GHC's does, and
+  walks one pass: the decisions are `map p xs`, shared by the prefix
+  (one cell per satisfying element) and the remainder (a tail-recursive
+  skip that returns the list's own suffix, as GHC's `otherwise = ([],
+  xs)` does), so `p` runs once per element and both components, like the
+  pair, demand the list's cells and `p` exactly where GHC's do; the
+  literal `let (ys, zs) = span p xs'` shape would have nested one Lua
+  frame per prefix element on the remainder (`snd (span (< 300000) [1 ..
+  600000])` completes on both hosts). `break` is `span` of the negated
+  predicate, unchanged. `foldl'` forced the RESULT of each application
+  and never the incoming accumulator, so `foldl' (\_ x -> x) undefined
+  [1]` printed `1` where GHC raises (GHC.List's `foldl'` is `z `seq` fn
+  (k z v)`: the seed is forced whenever the list is non-empty, returned
+  untouched on `[]`, and each application is forced by the step that
+  receives it). The list instance, the Maybe and Either instances, the
+  class default (Data.Foldable's `f' x k = \z -> z `seq` k (f z x)`, the
+  same rule — confirmed against GHC 9.14.1: `foldl' (\_ x -> x) undefined
+  (Just 1)` raises there too) and the type-erased runtime twin now all
+  force the incoming accumulator; `sum`/`length`/`product`/`maximum`/
+  `minimum` and the fused list pipelines compute the same values with no
+  extra work (the forced parameter is already in WHNF at the recursive
+  step, so the emitted loop lost a local rather than gaining a force).
+  Found by the 2026-10 fresh-eyes review (L12, M12). (GHC-goldened case
+  `list_definitions_laziness`, with the already-GHC-equal `unzip`/
+  `unzip3`/`scanr`/`scanr1`/`partition` kept as controls; the backend
+  fuzzer now carries `scanl`/`scanl1`/`intersperse`/`span`/`break` over
+  finite lists.)
 - **`maximum` and `minimum` are GHC's `foldl1' max` and `foldl1' min`: the
   Ord instance's own `max`/`min`, called as `max acc x`.** The Prelude
   folded with hand-written tests, `if y > m then y else m` and `if y < m
