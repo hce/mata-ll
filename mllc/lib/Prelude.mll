@@ -311,16 +311,26 @@ round x =
 -- when the result fits; a Number is a double on every host).
 floor_Number :: Number -> LuaPure "math.floor" Number
 
--- Largest / smallest element. Both error on an empty structure.
+-- Largest / smallest element: GHC's `foldl1' max` / `foldl1' min` over
+-- the elements, the class's own `max`/`min` called as `max acc x` — not
+-- a hand-written `>`/`<` test. The two differ exactly where the Ord
+-- instance makes them differ: the defaults `max x y = if x <= y then y
+-- else x` and `min x y = if x <= y then x else y` keep the LAST of equal
+-- maxima and the FIRST of equal minima (`maximum [P 1 "a", P 1 "b"]` is
+-- `P 1 "b"` when the instance compares the Int alone), an instance's own
+-- `max`/`min` are what `maximum`/`minimum` use (lawless or not), and at
+-- Number a NaN is never `<=` anything, so `maximum [1.0, nan]` is `1.0`,
+-- `maximum [nan, 1.0]` is `nan`, and `maximum [0.0, -0.0]` is `-0.0`.
+-- Both error on an empty structure.
 maximum :: (Ord a, Foldable t) => t a -> a
 maximum t = case foldr (\x xs -> x : xs) [] t of
     []     -> error "maximum: empty structure"
-    (x:xs) -> foldl' (\m y -> if y > m then y else m) x xs
+    (x:xs) -> foldl' max x xs
 
 minimum :: (Ord a, Foldable t) => t a -> a
 minimum t = case foldr (\x xs -> x : xs) [] t of
     []     -> error "minimum: empty structure"
-    (x:xs) -> foldl' (\m y -> if y < m then y else m) x xs
+    (x:xs) -> foldl' min x xs
 
 -- GHC 9.14.1's Data.List.sort/sortBy (base 4.22, GHC.Internal.Data.OldList:
 -- the natural mergesort with the four-way merge of GHC issue #24280),

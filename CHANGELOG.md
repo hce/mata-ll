@@ -44,6 +44,36 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **`maximum` and `minimum` are GHC's `foldl1' max` and `foldl1' min`: the
+  Ord instance's own `max`/`min`, called as `max acc x`.** The Prelude
+  folded with hand-written tests, `if y > m then y else m` and `if y < m
+  then y else m`, which disagree with the class methods exactly where an
+  Ord instance makes `max`/`min` differ from `>`/`<`: a tie kept the FIRST
+  element where GHC's `max x y = if x <= y then y else x` keeps the last
+  (`maximum [P 1 "a", P 1 "b", P 0 "c"]` printed `P 1 "a"` for an instance
+  comparing the Int alone; GHC prints `P 1 "b"`), an instance's own
+  `max`/`min` were never called (`maximum [M 1, M 2]` printed `M 2` under
+  `max _ _ = M 99`; GHC prints `M 99`), at Number a NaN was skipped
+  instead of deciding by position (`minimum [1.0, nan, 2.0]` printed `1.0`
+  where GHC prints `2.0`, `minimum [nan, 1.0]` printed `NaN` where GHC
+  prints `1.0`), and the sign of a zero went the other way (`maximum
+  [0.0, -0.0]` printed `0.0`; GHC `-0.0`). The two folds are now `foldl'
+  max x xs` and `foldl' min x xs` over the structure's elements — the
+  class method, with the strict left fold's argument order, so the
+  default `max`/`min` (through `compare` or `<=`, whichever the instance
+  gives), a user's own definitions, lawless or not, and the Number
+  `<=` on NaN and signed zeros all come out as under GHC. At Int, Number
+  and String the specialization passes the runtime's `ord_max__T` /
+  `ord_min__T` to the fold loop in place of a lambda, so the common paths
+  are no slower (one force per operand, no closure). The empty-structure
+  error text is unchanged: `maximum: empty structure` for every Foldable
+  (GHC's list instance says `Prelude.maximum: empty list`; see HASKDIFF).
+  Found by the 2026-10 fresh-eyes review (M6, N4). (GHC-goldened case
+  `maximum_minimum_class_fold`; the backend fuzzer's `max`/`min`/
+  `maximum`/`minimum` references now spell GHC's definitions through `<=`
+  and a probe applies them to `Number` lists carrying `0 / 0`, `0.0` and
+  `-0.0`.)
+
 - **`sortBy` calls the comparator with the caller's argument order, and
   `sort`/`sortBy` are GHC's algorithm, so a comparator that is no total
   order orders as under GHC.** The Prelude's merge asked `cmp y x` and

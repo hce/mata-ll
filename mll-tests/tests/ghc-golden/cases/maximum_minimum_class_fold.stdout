@@ -1,0 +1,26 @@
+P 1 "b"
+P 0 "b"
+(P 2 "c",P 2 "b")
+(Q 1 "b",Q 0 "b")
+(-0.0,0.0,0.0,-0.0)
+(M 99,M (-99),M 5,M 5)
+(V "abc",V "a")
+(2.0,1.0,2.0,NaN)
+(NaN,NaN,NaN)
+(3,P 4 "j")
+(7,P 8 "r")
+((1,"b"),(1,"a"))
+((1,P 1 "b"),(1,P 1 "a"))
+("b","a")
+(True,False,GT)
+(100000,1)
+P 6 "99994"
+P 0 "7"
+(P 1 "y",P 1 "x")
+(7,7,2)
+P 1 "b" P 0 "c"
+M 99 M (-99)
+2.0 2.0
+(2,"y") (2,"x")
+caught: minimum: empty structure
+caught: maximum: empty structure

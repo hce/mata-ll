@@ -741,6 +741,9 @@ mll_test!(existential_nested_dicts, "existential_nested_dicts.mll");
 mll_test!(ord_minimal_instance, "ord_minimal_instance.mll");
 mll_test!(sort_ghc_algorithm, "sort_ghc_algorithm.mll");
 mll_lib_test!(sort_ghc_algorithm_data_list, "sort_ghc_algorithm_data_list.mll");
+// maximum/minimum are foldl1' max / foldl1' min through the instance's own
+// max/min (GHC's tie sides, lawless instances, NaN and -0.0 at Number).
+mll_test!(maximum_minimum_class_fold, "maximum_minimum_class_fold.mll");
 // GHC's Eq and Show defaults on the builtin classes: a `/=`-only Eq
 // instance, a showsPrec-only Show instance with showParen precedence,
 // and show-only instances left unparenthesized inside derived fields/Just.

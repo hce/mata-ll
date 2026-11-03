@@ -1037,6 +1037,19 @@ generic over them, as in GHC. The differences:
   the instance's type); annotate:
   `length (Right 1 :: Either String Int)`. GHC accepts the
   ambiguous form.
+- **`maximum`/`minimum` are GHC's `foldl1' max` / `foldl1' min`** over
+  the structure's elements: the Ord instance's own `max`/`min`, called as
+  `max acc x`, so a tie yields the last of equal maxima and the first of
+  equal minima (`max x y = if x <= y then y else x`), an instance's own
+  `max`/`min` are honoured, and at `Number` a NaN decides by position
+  (`maximum [nan, 1.0]` is `NaN`, `maximum [1.0, nan]` is `1.0`) and
+  `maximum [0.0, -0.0]` is `-0.0`, as under GHC. The empty-structure
+  error is `maximum: empty structure` / `minimum: empty structure` for
+  EVERY Foldable, lists included: GHC's `Foldable []` instance routes to
+  `GHC.List.maximum`, whose message is `Prelude.maximum: empty list`,
+  while mata-ll's `maximum` is one Foldable-generic function and cannot
+  word the message per instance. Only a `catch` handler that inspects
+  the text sees the difference.
 - **`foldl'` stays list-only** (in `Data.List`/`Data.Foldable`).
 - **`toList` is only in `Data.Foldable`**, matching GHC's Prelude
   (which does not export it either), so a program's own `toList` meets

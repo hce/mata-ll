@@ -84,7 +84,12 @@
 //! literal built for the probe and the sorted result is printed, so the
 //! no-NaN budget of every other Number production stands (GHC's `compare`
 //! at Double says GT of a NaN, `>` says False, and `show` prints `NaN`;
-//! the reference does the same).
+//! the reference does the same). The max/min probe is built the same
+//! way: `maximum`/`minimum` over a literal `Number` list and `max`/`min`
+//! of two atoms, with `0 / 0`, `0.0` and `-0.0` among the atoms, printed
+//! directly — oracled against GHC's definitions spelled out (`max x y =
+//! if x <= y then y else x`, `maximum = foldl1' max`), where a NaN fails
+//! the `<=` and the tie side decides which zero comes back.
 //!
 //! Everything is deterministic and offline: each program derives from
 //! (BATCH_SEED, index) through SplitMix64, so any failure reproduces by
@@ -823,6 +828,20 @@ fn ghc_gt(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// GHC's `(<=)`: at Double the IEEE comparison, False when either side is
+/// a NaN and True of `0.0 <= -0.0`. It is the predicate inside the Ord
+/// defaults `max x y = if x <= y then y else x` and `min x y = if x <= y
+/// then x else y`, which `maximum`/`minimum` fold with as `max acc x`, so
+/// the references below spell those definitions with it rather than
+/// picking a side by `ghc_cmp`: on a NaN `compare` says GT where `<=`
+/// says False, and the two selections differ.
+fn ghc_le(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => x <= y,
+        _ => ghc_cmp(a, b) != std::cmp::Ordering::Greater,
+    }
+}
+
 /// base 4.22's `actualSort` (GHC.Internal.Data.OldList in GHC 9.14.1)
 /// over a "greater than" predicate — the algorithm itself, clause for
 /// clause, not a library sort: for a predicate that is no strict weak
@@ -1359,32 +1378,35 @@ fn call_builtin(p: &P, mut args: Vec<Value>) -> Value {
             Value::Bool(xs.iter().any(|e| ghc_cmp(e, x) == std::cmp::Ordering::Equal))
         }
         // GHC: max x y = if x <= y then y else x; min x y = if x <= y
-        // then x else y (indistinguishable for equal values, but exact).
+        // then x else y — the tie goes to max's SECOND and min's FIRST
+        // argument, and a NaN operand (the max/min probe's) fails the
+        // `<=`, so `max 1.0 nan` is 1.0 and `max nan 1.0` is nan.
         P::MaxP => {
             let y = args.pop().unwrap();
             let x = args.pop().unwrap();
-            if ghc_cmp(&x, &y) == std::cmp::Ordering::Greater { x } else { y }
+            if ghc_le(&x, &y) { y } else { x }
         }
         P::MinP => {
             let y = args.pop().unwrap();
             let x = args.pop().unwrap();
-            if ghc_cmp(&x, &y) == std::cmp::Ordering::Greater { y } else { x }
+            if ghc_le(&x, &y) { x } else { y }
         }
         P::Cmp => Value::Ord3(ghc_cmp(&args[0], &args[1])),
+        // GHC: maximum = foldl1' max, minimum = foldl1' min — the strict
+        // left fold's argument order `max acc x`, so equal maxima yield
+        // the LAST element and equal minima the FIRST, and a NaN decides
+        // by its position: `maximum [nan, 1.0]` is nan, `maximum [1.0,
+        // nan]` is 1.0.
         P::Maximum => {
             let xs = as_list(&args[0]);
             xs.into_iter()
-                .reduce(|a, x| {
-                    if ghc_cmp(&a, &x) == std::cmp::Ordering::Greater { a } else { x }
-                })
+                .reduce(|acc, x| if ghc_le(&acc, &x) { x } else { acc })
                 .expect("maximum: generator guarantees nonempty")
         }
         P::Minimum => {
             let xs = as_list(&args[0]);
             xs.into_iter()
-                .reduce(|a, x| {
-                    if ghc_cmp(&x, &a) == std::cmp::Ordering::Less { x } else { a }
-                })
+                .reduce(|acc, x| if ghc_le(&acc, &x) { acc } else { x })
                 .expect("minimum: generator guarantees nonempty")
         }
         P::ShowP => Value::Str(show_val(&args[0])),
@@ -2905,6 +2927,34 @@ impl Gen {
         (Expr::Call(P::SortBy, vec![cmp, xs]), ty)
     }
 
+    /// The max/min probe: `maximum`/`minimum` over a literal `Number`
+    /// list, or `max`/`min` of two atoms, where the atoms include `0 / 0`,
+    /// `0`, `-0` and `-0.0` beside the ordinary ones — the values on which
+    /// GHC's `max`/`min` (`if x <= y then y else x`) differ from a
+    /// comparison-by-`compare` or a `>`/`<` test: a NaN is never `<=`
+    /// anything, and `0.0 <= -0.0` holds so the fold's argument order
+    /// decides the sign of the zero. Returns a `Number` expression the
+    /// caller prints, so, as with the sort probe, the NaN reaches nothing
+    /// but the selection and `show`.
+    fn maxmin_probe(&mut self) -> Expr {
+        let atom = |g: &mut Self| match g.r.below(6) {
+            0 | 1 => Expr::NumLit { text: "(0 / 0)", value: f64::NAN },
+            2 => Expr::NumLit { text: "0.0", value: 0.0 },
+            3 => Expr::NumLit { text: "-0.0", value: -0.0 },
+            _ => g.number_atom(),
+        };
+        if self.r.chance(1, 3) {
+            let x = atom(self);
+            let y = atom(self);
+            let p = if self.r.chance(1, 2) { P::MaxP } else { P::MinP };
+            return Expr::Call(p, vec![x, y]);
+        }
+        let n = 1 + self.r.below(6);
+        let items = (0..n).map(|_| atom(self)).collect();
+        let p = if self.r.chance(1, 2) { P::Maximum } else { P::Minimum };
+        Expr::Call(p, vec![Expr::ListLit(items)])
+    }
+
     fn maybe_expr(&mut self, t: &Ty, depth: usize) -> Expr {
         match self.r.below(8) {
             0 => {
@@ -3305,6 +3355,13 @@ fn emit_print(g: &mut Gen, body: &mut String, expected: &mut Vec<String>, env: &
         let (e, ty) = g.sort_probe(depth);
         let v = eval(&e, env);
         body.push_str(&format!("    print ({} :: {})\n", render(&e), ty.render()));
+        expected.push(show_val(&v));
+        return;
+    }
+    if g.r.chance(1, 8) {
+        let e = g.maxmin_probe();
+        let v = eval(&e, env);
+        body.push_str(&format!("    print ({} :: Number)\n", render(&e)));
         expected.push(show_val(&v));
         return;
     }
