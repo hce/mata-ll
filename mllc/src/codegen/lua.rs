@@ -366,8 +366,22 @@ impl Expr {
                 r.render(ind, out);
             }
             Expr::Neg(e) => {
+                // Lua's lexer reads `--` as the start of a comment, so a
+                // unary minus may never stand directly before an operand
+                // whose text begins with `-`: a negative numeric literal
+                // (`Lit("-5")`, an inlined argument), a nested `Neg`, or
+                // Raw text. The printer owns this lexical rule for EVERY
+                // Neg — a builder-side paren at one emission site would
+                // leave the others open — and separates the two signs with
+                // a space (`- -5`), the minimal token boundary; no grouping
+                // is added, so the paren pass's explicit-grouping contract
+                // holds.
                 out.push('-');
+                let operand_start = out.len();
                 e.render(ind, out);
+                if out.as_bytes().get(operand_start) == Some(&b'-') {
+                    out.insert(operand_start, ' ');
+                }
             }
             Expr::Table(items) => {
                 out.push('{');
@@ -829,6 +843,35 @@ mod tests {
         assert!(
             out.contains("\n;("),
             "paren-led statement must be `;`-pinned:\n{out}"
+        );
+    }
+
+    /// A `Neg` whose operand prints with a leading `-` — a negative literal
+    /// token, a nested `Neg`, Raw text — must not print the two signs
+    /// adjacent: `--` opens a Lua comment and the rest of the line is lost
+    /// (O8: `y - (--5)` from an inlined negative argument). The printer
+    /// separates them with a space wherever a Neg is rendered; an operand
+    /// that starts otherwise keeps the bare `-`.
+    #[test]
+    fn negation_never_prints_a_double_minus() {
+        let render = |e: Expr| {
+            let mut s = String::new();
+            e.render(0, &mut s);
+            s
+        };
+        assert_eq!(render(Expr::neg(Expr::lit("-5"))), "- -5");
+        assert_eq!(render(Expr::neg(Expr::lit("-2.5"))), "- -2.5");
+        assert_eq!(render(Expr::neg(Expr::neg(Expr::name("x")))), "- -x");
+        assert_eq!(render(Expr::neg(Expr::raw("-y"))), "- -y");
+        assert_eq!(
+            render(Expr::paren(Expr::neg(Expr::paren(Expr::neg(Expr::name("x")))))),
+            "(-(-x))"
+        );
+        assert_eq!(render(Expr::neg(Expr::lit("5"))), "-5");
+        assert_eq!(render(Expr::neg(Expr::name("x"))), "-x");
+        assert_eq!(
+            render(Expr::binop("-", Expr::name("n"), Expr::neg(Expr::lit("-5")))),
+            "n - - -5"
         );
     }
 }

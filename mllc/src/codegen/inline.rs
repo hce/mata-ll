@@ -213,6 +213,22 @@ impl CodeGen {
                     expr.ty.clone(),
                 )
             }
+            // A negation whose operand turned into a literal through the
+            // substitution (`f x = -x` at `f (-5)`) is folded here, with
+            // the folder's own rule (`fold::negate_literal`): the constant
+            // folder ran before codegen and never meets this node, and
+            // the fold is what keeps `-(-5)` out of the emitted text. The
+            // printer separates two minus signs regardless (lua.rs `Neg`),
+            // so this is the optimization, not the correctness guarantee.
+            TExprKind::Negate(inner) => {
+                let inner = Self::subst_texpr(inner, subst);
+                match crate::fold::unwrap_lit(&inner)
+                    .and_then(|lit| crate::fold::negate_literal(lit, &expr.ty))
+                {
+                    Some(lit) => TExpr::new(TExprKind::Lit(lit), expr.ty.clone()),
+                    None => TExpr::new(TExprKind::Negate(Box::new(inner)), expr.ty.clone()),
+                }
+            }
             _ => expr.clone().map_children(&mut |c| Self::subst_texpr(&c, subst)),
         }
     }

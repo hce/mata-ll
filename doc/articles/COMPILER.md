@@ -969,6 +969,31 @@ Responsibilities beyond the obvious translation:
   is escaped whole under `__usr_`. Tables keyed by Lua name are therefore
   keyed by the mata-ll name. `names::reserved_binder` checks the emitted
   tree for a local declared under a reserved name (an internal error).
+- **The printer owns Lua's lexical rules** (`lua.rs`). The tree carries
+  grouping explicitly (`Paren` nodes placed by the builders, shed only by
+  the paren pass in opt.rs, never added or dropped by the printer), but
+  two adjacent tokens can still fuse into a different token when
+  rendered, and no builder can see what its neighbour prints. The
+  printer therefore checks the rendered text at the two places where
+  this happens and inserts the one separator that keeps the tokens
+  apart: a `Neg` whose operand renders with a leading `-` (a negative
+  literal token such as an inlined `-5`, a nested `Neg`, Raw text) is
+  printed `- -5`, since `--` opens a comment and the rest of the line is
+  lost (O8: `y - (--5)` did not load); a statement whose rendering
+  begins with `(` (an IIFE, a Raw line) is printed with a leading `;`,
+  since Lua 5.2+ reads `f()\n(g)(x)` as one call chain (Q81). The other
+  juxtapositions the grammar makes hazardous are impossible by
+  construction: every binary operator prints with a space on both sides
+  (`x - -5`, `s .. 1` are legal, `x--5`, `s..1` are not); a string
+  literal is always quoted (`lua_quoted_string`), so no long bracket is
+  ever written and `[[` cannot arise from an index whose key is a
+  string; an index key is an expression, and no Lua expression begins
+  with `[` or `=`; a label is its own line. A negated literal normally
+  never reaches the printer: the folder reduces `Negate(Lit)` before
+  codegen (`fold::negate_literal`), and the inliner applies the same rule
+  at a `Negate` whose operand became a literal through substitution
+  (`subst_texpr`) — the optimization; the printer's rule is the
+  invariant.
 
 ---
 

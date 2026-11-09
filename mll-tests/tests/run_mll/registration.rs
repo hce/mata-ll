@@ -780,6 +780,11 @@ mll_test!(st_inline_read_lazy_operands, "st_inline_read_lazy_operands.mll");
 // ((0,n-1))` where catch/try see it, in every access form (inline read,
 // helper call, statement-position write/modify, first-class actions).
 mll_test!(st_array_bounds, "st_array_bounds.mll");
+// O8: a prefix minus over a negative literal that arrives through inlining
+// (`y - (-x)` at `x = -5`) is folded at the substitution, and the Lua
+// printer never juxtaposes two minus signs (`--` is a comment), so the
+// emitted module loads; Int, Number and the Integer method path.
+mll_test!(negate_inlined_negative_literal, "negate_inlined_negative_literal.mll");
 // Guard-established nonzero divisors are evaluated eagerly; a `>=` guard
 // establishes nothing and the modulus stays a suspension.
 mll_test!(guard_nonzero_divisor, "guard_nonzero_divisor.mll");

@@ -439,10 +439,35 @@ fn subst_literals(expr: TExpr, env: &HashMap<&str, &TLiteral>) -> TExpr {
 // ── Paren stripping ─────────────────────────────────────
 
 /// Look through Paren wrappers to find the underlying literal, if any.
-fn unwrap_lit(expr: &TExpr) -> Option<&TLiteral> {
+pub(crate) fn unwrap_lit(expr: &TExpr) -> Option<&TLiteral> {
     match &expr.kind {
         TExprKind::Lit(lit) => Some(lit),
         TExprKind::Paren(inner) => unwrap_lit(inner),
+        _ => None,
+    }
+}
+
+/// The literal `negate lit` denotes at `ty`, or `None` where the negation
+/// must stay a `Negate` node. THE one rule for folding prefix minus over a
+/// literal: the folder's `Negate` arm applies it before codegen, and the
+/// inliner (`subst_texpr`) applies it again at a `Negate` whose operand
+/// became a literal through substitution — `f x y = y - (-x)` at
+/// `f (-5) n` is `y - (-(-5))` only after inlining, which the folder's
+/// pass never sees. One function, so the two sites cannot disagree on a
+/// value.
+///
+/// At `Int` negation wraps like every other Int fold (GHC's
+/// `negate minBound` is `minBound`, the runtime's unary minus on Lua 5.3+
+/// agrees, and a machine literal has no other value to take). At any other
+/// type a bare integer literal is a deferred overloaded literal whose
+/// instance is not known, so the one overflowing case (i64::MIN) is left
+/// unfolded for it — an Integer promotes there, and a wrapped `-n` would
+/// be wrong. A `Number` literal negates in f64.
+pub(crate) fn negate_literal(lit: &TLiteral, ty: &Ty) -> Option<TLiteral> {
+    match lit {
+        TLiteral::Integer(n) if is_int(ty) => Some(TLiteral::Integer(n.wrapping_neg())),
+        TLiteral::Integer(n) => n.checked_neg().map(TLiteral::Integer),
+        TLiteral::Number(n) => Some(TLiteral::Number(-n)),
         _ => None,
     }
 }
@@ -651,27 +676,15 @@ impl Folder {
                 }
                 TExpr::new(TExprKind::InfixApp { op, lhs, rhs }, ty)
             }
-            // At `Int` negation wraps like every other Int fold (GHC's
-            // `negate minBound` is `minBound`, the runtime's unary minus on
-            // Lua 5.3+ agrees, and a machine literal has no other value to
-            // take). At any other type a bare literal reaching here is a
-            // deferred overloaded literal whose instance is not known, so the
-            // one overflowing case (i64::MIN) is left unfolded for it — an
-            // Integer promotes there, and a wrapped `-n` would be wrong.
-            TExprKind::Negate(inner) => match unwrap_lit(&inner) {
-                Some(TLiteral::Integer(n)) if is_int(&ty) => {
+            // Prefix minus over a literal: the rule (Int wraps, an
+            // overloaded literal at i64::MIN declines) is `negate_literal`,
+            // shared with the inliner's post-substitution fold.
+            TExprKind::Negate(inner) => match unwrap_lit(&inner).and_then(|lit| negate_literal(lit, &ty)) {
+                Some(lit) => {
                     self.changed = true;
-                    TExpr::new(TExprKind::Lit(TLiteral::Integer(n.wrapping_neg())), ty)
+                    TExpr::new(TExprKind::Lit(lit), ty)
                 }
-                Some(TLiteral::Integer(n)) if n.checked_neg().is_some() => {
-                    self.changed = true;
-                    TExpr::new(TExprKind::Lit(TLiteral::Integer(-n)), ty)
-                }
-                Some(TLiteral::Number(n)) => {
-                    self.changed = true;
-                    TExpr::new(TExprKind::Lit(TLiteral::Number(-n)), ty)
-                }
-                _ => TExpr::new(TExprKind::Negate(inner), ty),
+                None => TExpr::new(TExprKind::Negate(inner), ty),
             },
             TExprKind::If { cond, then_branch, else_branch } => {
                 if let Some(TLiteral::Bool(b)) = unwrap_lit(&cond) {

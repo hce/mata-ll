@@ -44,6 +44,32 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A prefix minus over a negative literal that arrives through inlining
+  no longer prints `--`, so the emitted module loads.** `f x y = y - (-x)`
+  called as `f (-5) n` compiled to `n - (--5)`: the call-site inliner
+  substituted the already-folded literal `-5` for `x`, the constant
+  folder had run before codegen and never saw the `negate (-5)` this
+  made, and the Lua printer wrote its unary minus directly before the
+  operand's own minus sign — `--` opens a Lua comment, the rest of the
+  line was lost, and the file failed to load with `unexpected symbol
+  near 'return'` on every host (GHC: `-2`). The same at `Number` (`m -
+  (--2.5)`), at any arity and through nested negation. Two changes, one
+  the invariant and one the optimization. The printer owns Lua's lexical
+  rules: a `Neg` whose operand renders with a leading `-` — a negative
+  literal token, a nested negation, preformatted text — is printed with
+  a separating space (`- -5`) wherever a negation is rendered, the same
+  way a statement that begins with `(` is pinned with `;`; no grouping is
+  added. And the fold of prefix minus over a literal is one function
+  (`fold::negate_literal`) the folder and the inliner share: the inliner
+  applies it at a negation whose operand became a literal through the
+  substitution, so `f (-5) n` is emitted as `n - 5`, with the folder's
+  rules unchanged — `Int` wraps, `Number` negates in double, an
+  overloaded literal at `minBound` stays a negation (an `Integer`
+  promotes). Audited alongside: every binary operator prints with spaces
+  (`x - -5` is legal Lua), strings are always quoted (no long bracket
+  can be written, `[[` cannot arise), labels are their own line. Found
+  by the 2026-10 fresh-eyes review (O8). (GHC-goldened case
+  `negate_inlined_negative_literal`.)
 - **`Data.Map`'s `Map` and `Data.Set`'s `Set` have `Eq` and `Ord`, as
   containers defines them; a "No instance" error no longer says that
   tuples, lists and `Maybe` have no `Ord`.** `compare a b` on two `M.Map
