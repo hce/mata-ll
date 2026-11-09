@@ -787,6 +787,23 @@ pub enum SpecKind {
     OrdFromCmp { op: String, cmp: String },
     /// Derived tuple-show projection: force field `idx` (1-based).
     TupGet(usize),
+    /// The constructor's DECLARATION INDEX (1-based) of a value of the
+    /// multi-constructor type `type_name`, read off the value's runtime
+    /// representation in O(1) — the one argument is forced to WHNF. The
+    /// derived `Ord` and `Eq` of a `deriving` clause are built on it: H2010
+    /// §11.1 orders constructors by declaration position, and `compare`,
+    /// `==` and the relational operators of a derived instance decide a
+    /// cross-constructor pair by this index alone, so the instance is one
+    /// clause per constructor (plus one index comparison) instead of one
+    /// per constructor PAIR — the quadratic form that LuaJIT refused to
+    /// load from 66 constructors ("control structure too long", O10/M15).
+    /// Codegen owns the representation (`data_constructor_stmts`) and
+    /// reads the index from wherever that representation keeps it: the
+    /// value itself for an integer-tagged enum, slot 1 of a tagged sum
+    /// value, and a per-type string-to-index table for a LuaDict string
+    /// enum. Never emitted for a single-constructor type, whose values
+    /// carry no tag.
+    ConTag { type_name: String },
     /// Dictionary table literal `{ m = impl, … }` for a concrete instance.
     Dict { class: String, methods: Vec<(String, String)> },
     /// Constructed dictionary for a parameterized instance: each method is

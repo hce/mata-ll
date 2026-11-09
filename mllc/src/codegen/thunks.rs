@@ -406,6 +406,11 @@ impl CodeGen {
             // `is_cheap_with`'s dictionary arms) — the latter needs the
             // force a variable read gets.
             TExprKind::DictAccess { nullary, .. } | TExprKind::DictMethod { nullary, .. } => !nullary,
+            // A constructor index read (`con_tag_ast`): the forced value
+            // itself (an integer enum), a slot of the forced value table
+            // holding a literal integer, or an index-table entry — a Lua
+            // integer on every arm, never a thunk.
+            TExprKind::SpecCall { specialized: SpecKind::ConTag { .. }, .. } => true,
             TExprKind::InfixApp { op, .. } => Self::infix_yields_whnf(op),
             TExprKind::App(func, _) => {
                 if let TExprKind::Var(name) = &func.kind

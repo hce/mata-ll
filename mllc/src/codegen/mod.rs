@@ -257,9 +257,19 @@ struct CodeGen {
     /// `as "tag"` rename when present, the constructor name otherwise). Presence
     /// here means "this nullary constructor is a string, not a positional
     /// integer" — construction emits the string and pattern matching compares
-    /// against it. Ordering stays declaration-order via the derived Ord/Enum,
-    /// which pattern-match on the constructor, not the string.
+    /// against it. Ordering stays declaration-order: the derived Enum
+    /// pattern-matches on the constructor, and the derived Eq/Ord read the
+    /// declaration index through the type's string-to-index table
+    /// (`luadict_tag_index_types`, `con_tag_ast`), never the string.
     luadict_enum_tag: std::collections::HashMap<String, String>,
+    /// The LuaDict string enums whose constructor index some body reads
+    /// (`SpecKind::ConTag` — a derived Eq/Ord). Each gets a module-level
+    /// `{ ["tag"] = index, … }` table (`data_constructor_stmts`), the one
+    /// place a string tag maps back to its declaration position; a type
+    /// nobody indexes gets none, so a module without such a use is
+    /// unchanged. Decided by `module_stmts` from the whole module before
+    /// any emission, like the slot table it names the table in.
+    luadict_tag_index_types: std::collections::HashSet<String>,
     /// Function table: maps sanitized function names to __mll_fn[N] slots.
     /// Used to pack all forward-declared functions into a single table,
     /// avoiding Lua's 200-local-variable limit.
@@ -449,6 +459,7 @@ impl CodeGen {
             luadict_field_key: std::collections::HashMap::new(),
             luadict_type_fields: std::collections::HashMap::new(),
             luadict_enum_tag: std::collections::HashMap::new(),
+            luadict_tag_index_types: std::collections::HashSet::new(),
             fn_table: std::collections::HashMap::new(),
             local_vars: std::collections::HashSet::new(),
             local_count: 0,

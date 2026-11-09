@@ -107,6 +107,7 @@ excluded_reason() {
         cases/lua_iterator_method)       echo "LuaIterator FFI";;
         cases/luacatch)                  echo "LuaCatch FFI";;
         cases/luadict)                   echo "LuaDict FFI";;
+        cases/luadict_enum_ord)          echo "LuaDict deriving (Lua string enum)";;
         cases/poly_recursion_user_class) echo "contains a LuaPure FFI declaration";;
         cases/purehashmap)               echo "LuaPure hash FFI";;
         cases/readline)                  echo "LIO.readLine (Lua io FFI)";;

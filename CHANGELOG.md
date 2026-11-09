@@ -44,6 +44,43 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A derived `Ord` (and `Eq`) is linear in the constructor count, so a
+  type with many constructors loads on LuaJIT; an enumeration's derived
+  methods are each one constructor-index comparison.** `compare` of a
+  `deriving (Ord)` type was emitted as one clause per constructor PAIR —
+  `compare K0 K1 = LT`, `compare K0 K2 = LT`, … — and for an enumeration
+  the four relational operators were four more such tables, so a
+  66-constructor `data E = K0 | … | K65 deriving (Eq, Ord, Show)` compiled
+  to a 9797-line module whose `compare` LuaJIT refused with `control
+  structure too long` (64 constructors loaded, 66 did not; 300 made
+  905 058 lines), and every comparison of two values walked the pair
+  chain — quadratic in the constructor count — before it answered (GHC:
+  `(False,GT,K60)` and a constant-time answer). H2010 §11.1 decides a
+  pair of different constructors by declaration position alone, so the
+  derived `compare` is now one clause per constructor for the
+  same-constructor pairs (fields left to right, as before) plus ONE
+  fall-through clause comparing the two constructor indices; an
+  enumeration, whose same-constructor pairs are all `EQ`, gets a single
+  index comparison for `compare`, each relational operator, `max`, `min`
+  and `==`. The index is read in constant time from the value's runtime
+  representation by a new backend primitive (`SpecKind::ConTag`): the
+  value itself for an integer-tagged enumeration, slot 1 of a tagged sum
+  value, and — for a `LuaDict` string enumeration, whose values are their
+  tags — a per-type string-to-index table emitted only when a derived
+  method of that type survives to codegen. Results are GHC's for every
+  pair: the 66-constructor probe prints `(False,GT,K60)` on Lua 5.5 and
+  LuaJIT, and 300 constructors with `Eq`, `Ord`, `Show`, `Enum` and
+  `Bounded` compile to 4 462 lines and run on both hosts. The remaining
+  derived methods are linear by construction (`show`, `fromEnum`,
+  `toEnum`, `succ`, `pred`: one clause per constructor; the structural
+  `==` of a type with fields: one clause per constructor and a
+  fall-through) and meet LuaJIT's per-function limit only in the
+  thousands of constructors (see CAVEATS). Found by the 2026-10
+  fresh-eyes review (O10; M15 is the same defect seen from the modules
+  review). (GHC-goldened cases `derive_ord_large_enum` — 100 constructors
+  — and `derive_ord_large_sum` — 40 constructors of ten field shapes —
+  self-asserting case `luadict_enum_ord`, shape test
+  `derived_ord_eq_are_linear_in_the_constructor_count`.)
 - **A prefix minus over a negative literal that arrives through inlining
   no longer prints `--`, so the emitted module loads.** `f x y = y - (-x)`
   called as `f (-5) n` compiled to `n - (--5)`: the call-site inliner

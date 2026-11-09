@@ -293,6 +293,18 @@ impl CodeGen {
                 all_fn_names.push(n);
             }
         }
+        // The string-to-index tables of the LuaDict string enums whose
+        // constructor index a body reads (see `luadict_tag_index_types`):
+        // module-level values like the constructors, in a slot like them.
+        self.luadict_tag_index_types = Self::con_tag_types(module)
+            .into_iter()
+            .filter(|t| self.is_luadict_string_enum(t))
+            .collect();
+        let mut tag_index_types: Vec<&String> = self.luadict_tag_index_types.iter().collect();
+        tag_index_types.sort();
+        for t in tag_index_types {
+            all_fn_names.push(Self::luadict_tag_index_name(t));
+        }
         // Instance functions
         for f in &module.instance_fns {
             let n = sanitize_name(&f.name);
@@ -849,7 +861,113 @@ impl CodeGen {
                 stmts.push(self.var_decl_stmt(&sname, ctor));
             }
         }
+        if self.luadict_tag_index_types.contains(&def.name) {
+            // The LuaDict string enum's declaration index, keyed by its
+            // runtime string: `{ ["tagA"] = 1, ["tagB"] = 2 }`. The only
+            // place that order is recoverable from the string at runtime
+            // (`con_tag_ast`); the integer enum and the tagged sum carry
+            // theirs in the value. The string is the one construction and
+            // pattern matching agreed on (`luadict_enum_tag`, filled for
+            // every constructor of the type by `register_data_type`).
+            let items = def.constructors.iter().enumerate().map(|(i, con)| {
+                let tag = self.luadict_enum_tag.get(&con.name).unwrap_or_else(|| panic!(
+                    "internal compiler error: LuaDict string enum '{}' has no registered tag for '{}'",
+                    def.name, con.name,
+                ));
+                Item::KV(
+                    format!("[{}] = ", lua_quoted_string(tag.as_bytes())),
+                    Expr::lit((i + 1).to_string()),
+                )
+            }).collect();
+            stmts.push(self.var_decl_stmt(
+                &Self::luadict_tag_index_name(&def.name),
+                Expr::Table(items),
+            ));
+        }
         stmts.push(Stmt::Raw(String::new()));
         stmts
+    }
+
+    /// The Lua name of a LuaDict string enum's string-to-index table.
+    fn luadict_tag_index_name(type_name: &str) -> String {
+        format!("__mll_tagidx_{}", sanitize_name(type_name))
+    }
+
+    /// Is `type_name` laid out as a LuaDict string enum — every constructor
+    /// a Lua string (`register_data_type`)?
+    fn is_luadict_string_enum(&self, type_name: &str) -> bool {
+        self.constructors.iter()
+            .any(|(cn, tn, ..)| tn == type_name && self.luadict_enum_tag.contains_key(cn))
+    }
+
+    /// Every type whose constructor index some body of the module reads
+    /// (`SpecKind::ConTag`), over every expression of every function and
+    /// instance method: clause bodies, guards and where-bindings.
+    fn con_tag_types(module: &TModule) -> std::collections::HashSet<String> {
+        fn walk(e: &TExpr, out: &mut std::collections::HashSet<String>) {
+            if let TExprKind::SpecCall { specialized: SpecKind::ConTag { type_name }, .. } = &e.kind {
+                out.insert(type_name.clone());
+            }
+            e.for_each_child(&mut |c| walk(c, out));
+        }
+        let mut out = std::collections::HashSet::new();
+        for f in module.functions.iter().chain(module.instance_fns.iter()) {
+            for c in &f.clauses {
+                for g in &c.guards {
+                    walk(&g.condition, &mut out);
+                    walk(&g.body, &mut out);
+                }
+                if let Some(b) = &c.body {
+                    walk(b, &mut out);
+                }
+                for wb in &c.where_binds {
+                    walk(&wb.body, &mut out);
+                }
+            }
+        }
+        out
+    }
+
+    /// `SpecKind::ConTag`: the declaration index (1-based) of `value`'s
+    /// constructor, read from the representation `data_constructor_stmts`
+    /// gives the type — the mirror of its three arms, in the same order of
+    /// decision. A LuaDict string enum's value IS its string tag, mapped
+    /// back through the type's index table; an integer enum's value IS its
+    /// index; a tagged sum keeps the index in slot 1 of the value table.
+    /// The value is forced to WHNF first (a thunk has no tag). A
+    /// single-constructor type never reaches here: its values carry no tag
+    /// (the derives build no `ConTag` for one), so asking is a compiler
+    /// bug, reported as one.
+    pub(super) fn con_tag_ast(&mut self, type_name: &str, value: &TExpr) -> Expr {
+        let Some((_, _, _, total, is_enum)) = self.constructors.iter()
+            .find(|(_, tn, ..)| tn == type_name)
+            .cloned()
+        else {
+            self.internal_error.get_or_insert_with(|| format!(
+                "internal compiler error: the constructor index of '{}' was asked for, \
+                 but codegen registered no constructor of that type",
+                type_name,
+            ));
+            return Expr::lit("nil");
+        };
+        if total < 2 {
+            self.internal_error.get_or_insert_with(|| format!(
+                "internal compiler error: the constructor index of '{}' was asked for, \
+                 but a type with one constructor keeps no tag in its values",
+                type_name,
+            ));
+            return Expr::lit("nil");
+        }
+        let forced = self.forced_prefix_ast(value);
+        if self.is_luadict_string_enum(type_name) {
+            let table = self.lua_ref(&Self::luadict_tag_index_name(type_name));
+            let mut key = String::new();
+            forced.render(0, &mut key);
+            Expr::index(Expr::name(table), format!("[{}]", key))
+        } else if is_enum {
+            forced
+        } else {
+            Expr::index(forced, "[1]")
+        }
     }
 }

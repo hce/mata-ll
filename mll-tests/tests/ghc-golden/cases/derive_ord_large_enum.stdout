@@ -1,0 +1,26 @@
+LT [False,True,True,True,False,False,True,True]
+GT [False,True,False,False,True,True,False,False]
+LT [False,True,True,True,False,False,True,True]
+GT [False,True,False,False,True,True,False,False]
+EQ [True,False,False,True,False,True,True,True]
+EQ [True,False,False,True,False,True,True,True]
+EQ [True,False,False,True,False,True,True,True]
+LT [False,True,True,True,False,False,True,True]
+LT [False,True,True,True,False,False,True,True]
+GT [False,True,False,False,True,True,False,False]
+LT [False,True,True,True,False,False,True,True]
+EQ [True,False,False,True,False,True,True,True]
+LT [False,True,True,True,False,False,True,True]
+LT [False,True,True,True,False,False,True,True] (C70,C07)
+GT [False,True,False,False,True,True,False,False] (C70,C07)
+EQ [True,False,False,True,False,True,True,True] (C33,C33)
+19
+(C90,C90,C10,C10,C45,C45)
+(C60,C03,C99,C00)
+([C00,C05,C05,C13,C50,C72,C99],True)
+(True,Just 77,10,10)
+([0,1,65,66,99],[C00,C65,C99],C66,C65,[C97,C98,C99])
+(100,[C00,C01,C02],[C00,C25,C50,C75],1,True)
+([("C00",C00),("C05",C05),("C50",C50),("C90",C90),("C99",C99)],True,Just C50,C99,C00)
+(LT,False,True,True,[("C50",C50),("C90",C90),("C99",C99)],[("C00",C01),("C05",C06),("C50",C51),("C90",C91)])
+(True,Just C66)

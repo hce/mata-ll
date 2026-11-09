@@ -124,6 +124,7 @@ cases/linear_mult_poly	GHC's -XLinearTypes rejects unrestricted use of a %1-boun
 cases/lua_iterator_method	LuaIterator FFI
 cases/luacatch	LuaCatch FFI
 cases/luadict	LuaDict FFI
+cases/luadict_enum_ord	LuaDict deriving (Lua string enum)
 cases/names_generic_metadata	mata-ll Generics substrate (Data.Generics is not GHC's)
 cases/names_lua_globals	imports LString (Lua string FFI)
 cases/newtypes	'newtype Age = Int' implicit-constructor sugar is not Haskell

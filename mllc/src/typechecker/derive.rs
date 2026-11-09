@@ -168,6 +168,64 @@ impl Checker {
         self.derived_field_tys(con).is_empty()
     }
 
+    /// `conTag v` — the declaration index of `v`'s constructor as an `Int`,
+    /// read in O(1) from the runtime representation (`SpecKind::ConTag`).
+    /// The derived `Eq` and `Ord` of a type with two or more constructors
+    /// decide every cross-constructor pair by it: H2010 §11.1 derived
+    /// `Ord` orders constructors by declaration position, and GHC's
+    /// derived `==` of two different constructors is `False` whatever
+    /// the fields. Never built for a single-constructor type (no tag).
+    fn con_tag_expr(type_name: &str, var: &str, value_ty: &Ty) -> TExpr {
+        TExpr::new(
+            TExprKind::SpecCall {
+                original: "__mll_con_tag".to_string(),
+                specialized: SpecKind::ConTag { type_name: type_name.to_string() },
+                args: vec![TExpr::new(TExprKind::Var(var.to_string()), value_ty.clone())],
+            },
+            Ty::Con("Int".into()),
+        )
+    }
+
+    /// `conTag _a OP conTag _b` at `Int` — the one comparison the enum
+    /// forms of the derived `Eq`/`Ord` methods are: the monomorphizer
+    /// resolves `op` at `Int` to the native Lua operator.
+    fn con_tag_compare(type_name: &str, op: &str, value_ty: &Ty) -> TExpr {
+        TExpr::new(
+            TExprKind::InfixApp {
+                op: op.into(),
+                lhs: Box::new(Self::con_tag_expr(type_name, "_a", value_ty)),
+                rhs: Box::new(Self::con_tag_expr(type_name, "_b", value_ty)),
+            },
+            Ty::Con("Bool".into()),
+        )
+    }
+
+    /// The one-clause function `name _a _b = body` over two values of
+    /// `value_ty` — the shape of every derived `Eq`/`Ord` method whose body
+    /// is decided by the constructor index (`con_tag_expr`) or by the
+    /// instance's own `compare`. `derived_strict` is claimed by the caller's
+    /// construction: each such body forces both operands before it returns.
+    fn two_arg_clause_fn(name: String, value_ty: &Ty, result_ty: Ty, body: TExpr) -> TFunction {
+        TFunction {
+            name,
+            ty: Ty::fun(&[value_ty.clone(), value_ty.clone()], result_ty),
+            clauses: vec![TClause {
+                span: None,
+                patterns: vec![
+                    TPattern::Var("_a".into(), value_ty.clone()),
+                    TPattern::Var("_b".into(), value_ty.clone()),
+                ],
+                guards: vec![],
+                body: Some(body),
+                where_binds: vec![],
+            }],
+            specialized: false,
+            spec_origin: None,
+            dict_params: vec![],
+            derived_strict: true,
+        }
+    }
+
     /// Every (constructor, field type) a structural derive walks — what
     /// the derived instance demands the class of (GHC: "arising from the
     /// first field of 'P' (type 'A')"), checked by `DerivedObligation`.
@@ -555,7 +613,30 @@ impl Checker {
 
         let mut clauses = Vec::new();
 
-        for con in constructors {
+        // An enumeration of two or more constructors: there are no fields
+        // to compare, so two values are equal exactly when their
+        // constructors are — ONE clause, `conTag _a == conTag _b`, in
+        // place of a clause per constructor (`K_i == K_i`) walked
+        // linearly at every call. A one-constructor enum (`data U = U`)
+        // has no tag to read and takes the structural form below.
+        let is_enum = constructors.iter().all(|c| self.derived_is_nullary(c));
+        let structural = if is_enum && constructors.len() > 1 {
+            clauses.push(TClause {
+                span: None,
+                patterns: vec![
+                    TPattern::Var("_a".into(), result_type.clone()),
+                    TPattern::Var("_b".into(), result_type.clone()),
+                ],
+                guards: vec![],
+                body: Some(Self::con_tag_compare(type_name, "==", &result_type)),
+                where_binds: vec![],
+            });
+            &[][..]
+        } else {
+            constructors
+        };
+
+        for con in structural {
             let con_key = con.name.clone();
             let field_tys = self.derived_field_tys(con);
             let field_count = field_tys.len();
@@ -617,7 +698,7 @@ impl Checker {
         }
 
         // Add catch-all clause for different constructors: _ _ = False
-        if constructors.len() > 1 {
+        if structural.len() > 1 {
             clauses.push(TClause {
                 span: None,
                 patterns: vec![
@@ -694,6 +775,8 @@ impl Checker {
             // has forced both scrutinees (the first argument's constructor is
             // inspected by clause 1, and whichever constructor it is, that
             // constructor's own clause then inspects the second argument).
+            // The enum form reads both constructor indices (`conTag` forces
+            // its operand) before it compares them.
             derived_strict: true,
         }, ne_fn]
     }
@@ -706,62 +789,76 @@ impl Checker {
     ) -> Vec<TFunction> {
         let (_, result_type) = Self::data_result_type(type_name, type_vars);
         let bool_ty = Ty::Con("Bool".into());
-        let fn_ty = Ty::fun(&[result_type.clone(), result_type.clone()], bool_ty.clone());
-
-        // For enums (no fields), use constructor index comparison.
-        // Constructors earlier in the declaration are "less than" later ones.
-        let is_enum = constructors.iter().all(|c| self.derived_is_nullary(c));
-
-        let mut functions = Vec::new();
-
         let ordering_ty = Ty::Con("Ordering".into());
         let compare_fn_ty = Ty::fun(&[result_type.clone(), result_type.clone()], ordering_ty.clone());
         let compare_name = minted("ord_compare_", type_name);
+        let n = constructors.len();
 
-        // compare: cross-constructor pairs order by declaration index
-        // (earlier constructor < later); same-constructor pairs compare
-        // fields left-to-right, lexicographically, using each field type's
+        // An enumeration (every constructor nullary) of two or more
+        // constructors: the constructor index decides every method, so
+        // each is ONE clause over `conTag _a` and `conTag _b` (a constant
+        // amount of code, whatever the constructor count). A single-
+        // constructor type has no tag and takes the structural form.
+        let is_enum = n > 1 && constructors.iter().all(|c| self.derived_is_nullary(c));
+
+        let mut functions = Vec::new();
+
+        // compare. H2010 §11.1: constructors compare by declaration
+        // position first; two values of the SAME constructor compare their
+        // fields left to right, lexicographically, with each field type's
         // own `compare` (resolved by the monomorphizer exactly like the
-        // per-field `==` in derive_eq). A nullary constructor is EQ to itself.
-        let mut compare_clauses = Vec::new();
-        for (i, con_a) in constructors.iter().enumerate() {
-            let fc_a = self.derived_field_tys(con_a).len();
-            for (j, con_b) in constructors.iter().enumerate() {
-                let fc_b = self.derived_field_tys(con_b).len();
-                if i != j {
-                    // Different constructors: index decides; fields are irrelevant.
-                    let ord_con = if i < j { "LT" } else { "GT" };
-                    let a_args: Vec<TPattern> = (0..fc_a).map(|_| TPattern::Wildcard).collect();
-                    let b_args: Vec<TPattern> = (0..fc_b).map(|_| TPattern::Wildcard).collect();
-                    compare_clauses.push(TClause {
-                        span: None,
-                        patterns: vec![
-                            TPattern::ctor(con_a.name.clone(), a_args),
-                            TPattern::ctor(con_b.name.clone(), b_args),
-                        ],
-                        guards: vec![],
-                        body: Some(TExpr::new(TExprKind::Con(ord_con.to_string()), ordering_ty.clone())),
-                        where_binds: vec![],
-                    });
-                    continue;
-                }
-
-                // Same constructor: bind fields with their real types (as
-                // derive_eq does) so the monomorphizer can resolve `compare`
-                // per field type.
-                let con_key = con_a.name.clone();
-                let field_tys: Vec<Ty> = self.constructors.get(&con_key)
-                    .map(|ci| ci.field_types.clone())
-                    .unwrap_or_default();
-                let a_names: Vec<String> = (0..fc_a).map(|k| format!("_a{}", k)).collect();
-                let b_names: Vec<String> = (0..fc_a).map(|k| format!("_b{}", k)).collect();
-                let pat_a = TPattern::ctor(con_key.clone(), a_names.iter().enumerate().map(|(k, n)| {
+        // per-field `==` in derive_eq); a nullary constructor is EQ to
+        // itself. One clause per constructor for the same-constructor
+        // pairs, then ONE fall-through clause for every cross-constructor
+        // pair, deciding by the indices — never a clause per PAIR: that
+        // quadratic form made a 66-constructor enum's `compare` thousands
+        // of lines, which LuaJIT refuses to load (O10/M15), and walked the
+        // pair chain linearly in n² at every call.
+        let compare_clauses = if is_enum {
+            // Same-constructor pairs are EQ, so the index comparison alone
+            // is the whole method:
+            //   compare a b | ta < tb = LT | ta == tb = EQ | otherwise = GT
+            vec![TClause {
+                span: None,
+                patterns: vec![
+                    TPattern::Var("_a".into(), result_type.clone()),
+                    TPattern::Var("_b".into(), result_type.clone()),
+                ],
+                guards: vec![],
+                body: Some(TExpr::new(
+                    TExprKind::If {
+                        cond: Box::new(Self::con_tag_compare(type_name, "<", &result_type)),
+                        then_branch: Box::new(TExpr::new(TExprKind::Con("LT".into()), ordering_ty.clone())),
+                        else_branch: Box::new(TExpr::new(
+                            TExprKind::If {
+                                cond: Box::new(Self::con_tag_compare(type_name, "==", &result_type)),
+                                then_branch: Box::new(TExpr::new(TExprKind::Con("EQ".into()), ordering_ty.clone())),
+                                else_branch: Box::new(TExpr::new(TExprKind::Con("GT".into()), ordering_ty.clone())),
+                            },
+                            ordering_ty.clone(),
+                        )),
+                    },
+                    ordering_ty.clone(),
+                )),
+                where_binds: vec![],
+            }]
+        } else {
+            let mut clauses = Vec::new();
+            for con in constructors {
+                // Bind the fields with their real types (as derive_eq does)
+                // so the monomorphizer can resolve `compare` per field type.
+                let con_key = con.name.clone();
+                let field_tys = self.derived_field_tys(con);
+                let fc = field_tys.len();
+                let a_names: Vec<String> = (0..fc).map(|k| format!("_a{}", k)).collect();
+                let b_names: Vec<String> = (0..fc).map(|k| format!("_b{}", k)).collect();
+                let pat_a = TPattern::ctor(con_key.clone(), a_names.iter().enumerate().map(|(k, nm)| {
                     let ty = field_tys.get(k).cloned().unwrap_or(Ty::Unit);
-                    TPattern::Var(n.clone(), ty)
+                    TPattern::Var(nm.clone(), ty)
                 }).collect());
-                let pat_b = TPattern::ctor(con_key, b_names.iter().enumerate().map(|(k, n)| {
+                let pat_b = TPattern::ctor(con_key, b_names.iter().enumerate().map(|(k, nm)| {
                     let ty = field_tys.get(k).cloned().unwrap_or(Ty::Unit);
-                    TPattern::Var(n.clone(), ty)
+                    TPattern::Var(nm.clone(), ty)
                 }).collect());
 
                 // Lexicographic chain, built inside-out:
@@ -787,12 +884,12 @@ impl Checker {
                     )
                 };
 
-                let mut body = if fc_a == 0 {
+                let mut body = if fc == 0 {
                     TExpr::new(TExprKind::Con("EQ".into()), ordering_ty.clone())
                 } else {
-                    mk_field_compare(fc_a - 1)
+                    mk_field_compare(fc - 1)
                 };
-                for k in (0..fc_a.saturating_sub(1)).rev() {
+                for k in (0..fc.saturating_sub(1)).rev() {
                     body = TExpr::new(
                         TExprKind::Case {
                             scrutinee: Box::new(mk_field_compare(k)),
@@ -813,7 +910,7 @@ impl Checker {
                     );
                 }
 
-                compare_clauses.push(TClause {
+                clauses.push(TClause {
                     span: None,
                     patterns: vec![pat_a, pat_b],
                     guards: vec![],
@@ -821,7 +918,31 @@ impl Checker {
                     where_binds: vec![],
                 });
             }
-        }
+
+            // Different constructors — the fall-through, reached only when
+            // no same-constructor clause matched, so the indices differ and
+            // EQ is impossible:  compare a b = if ta < tb then LT else GT
+            if n > 1 {
+                clauses.push(TClause {
+                    span: None,
+                    patterns: vec![
+                        TPattern::Var("_a".into(), result_type.clone()),
+                        TPattern::Var("_b".into(), result_type.clone()),
+                    ],
+                    guards: vec![],
+                    body: Some(TExpr::new(
+                        TExprKind::If {
+                            cond: Box::new(Self::con_tag_compare(type_name, "<", &result_type)),
+                            then_branch: Box::new(TExpr::new(TExprKind::Con("LT".into()), ordering_ty.clone())),
+                            else_branch: Box::new(TExpr::new(TExprKind::Con("GT".into()), ordering_ty.clone())),
+                        },
+                        ordering_ty.clone(),
+                    )),
+                    where_binds: vec![],
+                });
+            }
+            clauses
+        };
         functions.push(TFunction {
             name: compare_name.clone(),
             ty: compare_fn_ty.clone(),
@@ -829,73 +950,52 @@ impl Checker {
             specialized: false,
             spec_origin: None,
             dict_params: vec![],
-            // Strict in both operands by construction: the clauses cover every
-            // (constructor, constructor) pair, each matching a constructor
-            // pattern on BOTH positions, so no clause can be selected before
-            // both scrutinees are forced.
+            // Strict in both operands by construction: every
+            // same-constructor clause matches a constructor pattern on BOTH
+            // positions, so the fall-through is reached only after both
+            // scrutinees were forced — and its body (like the whole enum
+            // form) reads both constructor indices, which forces both.
             derived_strict: true,
         });
 
+        // The class method `compare` at this type, as GHC's default
+        // bodies spell it — not the mangled `compare` function by name:
+        // method dispatch resolves it to that function (and its
+        // specialization) on the specialized path, and the dictionary form
+        // of this instance reads it from the instance's own composed
+        // dictionary — a direct call by name would reach the unspecialized
+        // original there.
+        let cmp_call = || TExpr::new(
+            TExprKind::App(
+                Box::new(TExpr::new(
+                    TExprKind::App(
+                        Box::new(TExpr::new(
+                            TExprKind::Var("compare".into()),
+                            compare_fn_ty.clone(),
+                        )),
+                        Box::new(TExpr::new(TExprKind::Var("_a".into()), result_type.clone())),
+                    ),
+                    Ty::fun(std::slice::from_ref(&result_type), ordering_ty.clone()),
+                )),
+                Box::new(TExpr::new(TExprKind::Var("_b".into()), result_type.clone())),
+            ),
+            ordering_ty.clone(),
+        );
+
         for (op, op_name) in &[("<", "lt"), (">", "gt"), ("<=", "le"), (">=", "ge")] {
             let mangled = minted(&format!("ord_{}_", op_name), type_name);
-
-            let clauses = if is_enum {
-                // Enum: fields can't exist, so the constructor index fully
-                // decides every relational op. Emit direct Bool clauses per
-                // constructor pair (no Ordering round-trip on hot paths).
-                let mut cls = Vec::new();
-                for (i, con_a) in constructors.iter().enumerate() {
-                    for (j, con_b) in constructors.iter().enumerate() {
-                        let result = match *op {
-                            "<" => i < j,
-                            ">" => i > j,
-                            "<=" => i <= j,
-                            ">=" => i >= j,
-                            _ => unreachable!(),
-                        };
-                        cls.push(TClause {
-                            span: None,
-                            patterns: vec![
-                                TPattern::ctor(con_a.name.clone(), vec![]),
-                                TPattern::ctor(con_b.name.clone(), vec![]),
-                            ],
-                            guards: vec![],
-                            body: Some(TExpr::new(TExprKind::Lit(TLiteral::Bool(result)), bool_ty.clone())),
-                            where_binds: vec![],
-                        });
-                    }
-                }
-                cls
+            let body = if is_enum {
+                // Enum: the constructor index fully decides every relational
+                // op — the native Int comparison of the two indices, no
+                // Ordering round-trip.
+                Self::con_tag_compare(type_name, op, &result_type)
             } else {
                 // Non-enum: derive each relational op from `compare` so the
                 // lexicographic field ordering above is the single source of
                 // truth:  a < b = case compare a b of { LT -> True; _ -> False }
-                // The CLASS METHOD `compare` at this type, as GHC's default
-                // bodies spell it, not the mangled `compare` function by
-                // name: method dispatch resolves it to that function (and
-                // its specialization) on the specialized path, and the
-                // dictionary form of this instance reads it from the
-                // instance's own composed dictionary — a direct call by
-                // name would reach the unspecialized original there.
-                let cmp_call = TExpr::new(
-                    TExprKind::App(
-                        Box::new(TExpr::new(
-                            TExprKind::App(
-                                Box::new(TExpr::new(
-                                    TExprKind::Var("compare".into()),
-                                    compare_fn_ty.clone(),
-                                )),
-                                Box::new(TExpr::new(TExprKind::Var("_a".into()), result_type.clone())),
-                            ),
-                            Ty::fun(std::slice::from_ref(&result_type), ordering_ty.clone()),
-                        )),
-                        Box::new(TExpr::new(TExprKind::Var("_b".into()), result_type.clone())),
-                    ),
-                    ordering_ty.clone(),
-                );
-                // (match_con, on_match, otherwise): < and > are True exactly on
-                // their own Ordering; <= and >= are False exactly on the
-                // opposite strict Ordering.
+                // (match_con, on_match): < and > are True exactly on their
+                // own Ordering; <= and >= are False exactly on the opposite
+                // strict Ordering.
                 let (match_con, on_match) = match *op {
                     "<" => ("LT", true),
                     ">" => ("GT", true),
@@ -903,116 +1003,79 @@ impl Checker {
                     ">=" => ("LT", false),
                     _ => unreachable!(),
                 };
-                vec![TClause {
-                    span: None,
-                    patterns: vec![
-                        TPattern::Var("_a".into(), result_type.clone()),
-                        TPattern::Var("_b".into(), result_type.clone()),
-                    ],
-                    guards: vec![],
-                    body: Some(TExpr::new(
-                        TExprKind::Case {
-                            scrutinee: Box::new(cmp_call),
-                            branches: vec![
-                                TCaseBranch {
-                                    pattern: TPattern::ctor(match_con.into(), vec![]),
-                                    guards: vec![],
-                                    body: Some(TExpr::new(TExprKind::Lit(TLiteral::Bool(on_match)), bool_ty.clone())),
-                                },
-                                TCaseBranch {
-                                    pattern: TPattern::Wildcard,
-                                    guards: vec![],
-                                    body: Some(TExpr::new(TExprKind::Lit(TLiteral::Bool(!on_match)), bool_ty.clone())),
-                                },
-                            ],
-                        },
-                        bool_ty.clone(),
-                    )),
-                    where_binds: vec![],
-                }]
+                TExpr::new(
+                    TExprKind::Case {
+                        scrutinee: Box::new(cmp_call()),
+                        branches: vec![
+                            TCaseBranch {
+                                pattern: TPattern::ctor(match_con.into(), vec![]),
+                                guards: vec![],
+                                body: Some(TExpr::new(TExprKind::Lit(TLiteral::Bool(on_match)), bool_ty.clone())),
+                            },
+                            TCaseBranch {
+                                pattern: TPattern::Wildcard,
+                                guards: vec![],
+                                body: Some(TExpr::new(TExprKind::Lit(TLiteral::Bool(!on_match)), bool_ty.clone())),
+                            },
+                        ],
+                    },
+                    bool_ty.clone(),
+                )
             };
-
-            functions.push(TFunction {
-                name: mangled.clone(),
-                ty: fn_ty.clone(),
-                clauses,
-                specialized: false,
-                spec_origin: None,
-                dict_params: vec![],
-                // Strict in both operands by construction, in both shapes: the
-                // enum clauses match constructor patterns on both positions,
-                // and the non-enum body immediately scrutinizes
-                // `compare _a _b`, whose derived implementation (above) forces
-                // both.
-                derived_strict: true,
-            });
+            // Strict in both operands in both shapes: the enum body reads
+            // both constructor indices, and the non-enum body immediately
+            // scrutinizes `compare _a _b`, whose derived implementation
+            // (above) forces both.
+            functions.push(Self::two_arg_clause_fn(mangled, &result_type, bool_ty.clone(), body));
         }
 
-        // max/min, derived from `compare` like the relational ops so the
-        // lexicographic ordering stays the single source of truth. GHC's
-        // default bodies are
+        // max/min. GHC's default bodies are
         //   max x y = if x <= y then y else x   -- tie: SECOND argument
         //   min x y = if x <= y then x else y   -- tie: FIRST argument
-        // which in Ordering terms is: max is `_a` exactly on GT, min is `_b`
-        // exactly on GT. The class method `compare`, as for the relational
-        // ops above.
-        let sel_ty = Ty::fun(&[result_type.clone(), result_type.clone()], result_type.clone());
-        for (method, on_gt, otherwise) in &[("max", "_a", "_b"), ("min", "_b", "_a")] {
+        // An enum spells `x <= y` as the index comparison; a non-enum
+        // derives it from `compare` like the relational ops, so the
+        // lexicographic ordering stays the single source of truth — in
+        // Ordering terms max is `_a` exactly on GT, min is `_b` exactly on
+        // GT.
+        for (method, on_le, otherwise) in &[("max", "_b", "_a"), ("min", "_a", "_b")] {
             let mangled = minted(&format!("ord_{}_", method), type_name);
-            let cmp_call = TExpr::new(
-                TExprKind::App(
-                    Box::new(TExpr::new(
-                        TExprKind::App(
-                            Box::new(TExpr::new(
-                                TExprKind::Var("compare".into()),
-                                compare_fn_ty.clone(),
-                            )),
-                            Box::new(TExpr::new(TExprKind::Var("_a".into()), result_type.clone())),
-                        ),
-                        Ty::fun(std::slice::from_ref(&result_type), ordering_ty.clone()),
-                    )),
-                    Box::new(TExpr::new(TExprKind::Var("_b".into()), result_type.clone())),
-                ),
-                ordering_ty.clone(),
+            let (on_le, otherwise) = (
+                TExpr::new(TExprKind::Var((*on_le).into()), result_type.clone()),
+                TExpr::new(TExprKind::Var((*otherwise).into()), result_type.clone()),
             );
-            functions.push(TFunction {
-                name: mangled,
-                ty: sel_ty.clone(),
-                clauses: vec![TClause {
-                    span: None,
-                    patterns: vec![
-                        TPattern::Var("_a".into(), result_type.clone()),
-                        TPattern::Var("_b".into(), result_type.clone()),
-                    ],
-                    guards: vec![],
-                    body: Some(TExpr::new(
-                        TExprKind::Case {
-                            scrutinee: Box::new(cmp_call),
-                            branches: vec![
-                                TCaseBranch {
-                                    pattern: TPattern::ctor("GT".into(), vec![]),
-                                    guards: vec![],
-                                    body: Some(TExpr::new(TExprKind::Var((*on_gt).into()), result_type.clone())),
-                                },
-                                TCaseBranch {
-                                    pattern: TPattern::Wildcard,
-                                    guards: vec![],
-                                    body: Some(TExpr::new(TExprKind::Var((*otherwise).into()), result_type.clone())),
-                                },
-                            ],
-                        },
-                        result_type.clone(),
-                    )),
-                    where_binds: vec![],
-                }],
-                specialized: false,
-                spec_origin: None,
-                dict_params: vec![],
-                // Strict in both operands: the body immediately scrutinizes
-                // `compare _a _b`, whose derived implementation forces both —
-                // exactly GHC's `if x <= y then ...` strictness.
-                derived_strict: true,
-            });
+            let body = if is_enum {
+                TExpr::new(
+                    TExprKind::If {
+                        cond: Box::new(Self::con_tag_compare(type_name, "<=", &result_type)),
+                        then_branch: Box::new(on_le),
+                        else_branch: Box::new(otherwise),
+                    },
+                    result_type.clone(),
+                )
+            } else {
+                TExpr::new(
+                    TExprKind::Case {
+                        scrutinee: Box::new(cmp_call()),
+                        branches: vec![
+                            TCaseBranch {
+                                pattern: TPattern::ctor("GT".into(), vec![]),
+                                guards: vec![],
+                                body: Some(otherwise),
+                            },
+                            TCaseBranch {
+                                pattern: TPattern::Wildcard,
+                                guards: vec![],
+                                body: Some(on_le),
+                            },
+                        ],
+                    },
+                    result_type.clone(),
+                )
+            };
+            // Strict in both operands: the body's test reads both indices
+            // or scrutinizes `compare _a _b`, whose derived implementation
+            // forces both — exactly GHC's `if x <= y then ...` strictness.
+            functions.push(Self::two_arg_clause_fn(mangled, &result_type, result_type.clone(), body));
         }
 
         // Register the Ord instance

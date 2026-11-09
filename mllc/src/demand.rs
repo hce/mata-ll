@@ -1731,11 +1731,18 @@ fn demanded_vars_in(
             HashSet::new()
         }
 
-        TExprKind::SpecCall { original, args, .. } => {
+        TExprKind::SpecCall { original, specialized, args } => {
             // Specialized call: look up the original function's strictness.
             let mut s = HashSet::new();
             if let Some(callee_strict) = env.get(original.as_str()) {
                 demand_strict_args(&mut s, callee_strict, args.iter(), &rec);
+            }
+            // A constructor index read forces its one argument to WHNF: a
+            // thunk has no tag (mirrors `con_tag_ast`).
+            if let SpecKind::ConTag { .. } = specialized
+                && let Some(arg) = args.first()
+            {
+                s.extend(whnf_only_demands(arg, &rec));
             }
             s
         }
@@ -2389,6 +2396,14 @@ fn demand_expr<'t>(cx: &RowCx<'_, 't>, expr: &'t TExpr, rd: &Demand, run_pos: bo
                 let mut fields: Vec<Option<Demand>> = vec![None; *idx];
                 fields[*idx - 1] = Some(rd.clone());
                 map_join(&mut m, demand_expr(cx, &args[0], &Demand::Fields(fields), false));
+                return m;
+            }
+            // Constructor index read: the value is forced to WHNF, and
+            // only that — an integer is read off it, no field is touched.
+            if let SpecKind::ConTag { .. } = specialized
+                && args.len() == 1
+            {
+                map_join(&mut m, demand_expr(cx, &args[0], &Demand::Head, false));
                 return m;
             }
             if let Some(row) = cx.callee_row(original, &Demand::Head) {

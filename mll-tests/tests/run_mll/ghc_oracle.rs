@@ -226,6 +226,8 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_derive_functor, "cases", "derive_functor.mll"),
         (ghc_oracle_derive_functor_nested, "cases", "derive_functor_nested.mll"),
         (ghc_oracle_derive_ord, "cases", "derive_ord.mll"),
+        (ghc_oracle_derive_ord_large_enum, "cases", "derive_ord_large_enum.mll"),
+        (ghc_oracle_derive_ord_large_sum, "cases", "derive_ord_large_sum.mll"),
         (ghc_oracle_ord_max_min, "cases", "ord_max_min.mll"),
         (ghc_oracle_action_value_bindings, "cases", "action_value_bindings.mll"),
         (ghc_oracle_action_value_positions, "cases", "action_value_positions.mll"),

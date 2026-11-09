@@ -287,6 +287,52 @@ Order matters because later passes depend on earlier registrations:
   its `DerivedObligation` (see pass 4a/4b above); the check runs after
   every instance of the module exists.
 
+  **Shape of the derived `Eq`/`Ord` (O10/M15).** Every derived method is
+  linear in the constructor count, and the cross-constructor decision is
+  one read of the constructor's declaration index. The index is the TIR
+  primitive `SpecKind::ConTag { type_name }` (`derive.rs::con_tag_expr`,
+  type `Int`, one argument forced to WHNF), which codegen lowers in O(1)
+  from the representation it chose in `data_constructor_stmts`
+  (`module.rs::con_tag_ast`, the mirror of that choice, arm for arm): an
+  integer-tagged enumeration's value IS its index; a tagged sum keeps it
+  in slot 1 of the value table; a `LuaDict` string enumeration's value is
+  its tag string, mapped back through a per-type table
+  `{ ["tag"] = index, … }` that `module_stmts` emits (in a `__mll_fn`
+  slot) only for the types some surviving body reads the index of
+  (`con_tag_types`, `luadict_tag_index_types`). A single-constructor
+  type has no tag and the derives never build a `ConTag` for one
+  (`con_tag_ast` reports an internal error if asked). The forms:
+
+  - *Enumeration of n ≥ 2 constructors*: `==` is `conTag a == conTag b`;
+    `compare` is `if conTag a < conTag b then LT else if conTag a ==
+    conTag b then EQ else GT`; `<`, `<=`, `>`, `>=` are the Int operator on
+    the two indices; `max`/`min` are GHC's defaults with `x <= y` spelled
+    as the index comparison. Constant size whatever n is.
+  - *Type with fields (or one constructor)*: `==` and `compare` are one
+    clause per constructor for the same-constructor pairs (fields left to
+    right, each field through its type's own `==`/`compare`, resolved by
+    the monomorphizer), then one fall-through: `_ _ = False` for `==`,
+    `if conTag a < conTag b then LT else GT` for `compare` (EQ is
+    impossible there: the same-constructor clauses already matched). The
+    relational operators, `max` and `min` are GHC's class defaults over
+    the class method `compare` at this type (not the mangled function by
+    name, so the dictionary form reads the instance's own composed
+    dictionary). Before this, `compare` was one clause per constructor
+    PAIR — n² clauses, which LuaJIT's control-structure span refused from
+    66 constructors — and an enumeration's relational operators were
+    four more such tables.
+
+  `derived_strict` stays true for every method: each body forces both
+  operands on every path (the same-constructor clauses match constructor
+  patterns on both positions, and the index read forces its operand), so
+  the demand analysis pins the all-strict row as before. The consumers
+  that know the primitive: `demand.rs` (the argument is demanded to WHNF,
+  both walkers), `thunks.rs::expr_yields_whnf` (an index read is a Lua
+  integer, never a thunk), `dce.rs` (no function reference), and
+  `module.rs`/`expr.rs` for emission; the shape test
+  `derived_ord_eq_are_linear_in_the_constructor_count` pins the linear
+  size.
+
 ---
 
 ## 4. Monomorphization (`mono.rs`)

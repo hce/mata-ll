@@ -2560,6 +2560,7 @@ impl CodeGen {
                 let base = self.forced_prefix_ast(&args[0]);
                 Expr::force(Expr::index(base, format!("[{}]", idx)))
             }
+            SpecKind::ConTag { type_name } => self.con_tag_ast(type_name, &args[0]),
             SpecKind::Iter(host) => {
                 // Iterator FFI: the result type is a list `[element]` (see the
                 // LuaIterator reduction). Each iterator step is a host call

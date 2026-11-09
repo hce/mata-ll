@@ -54,6 +54,43 @@ operation. Suspending the accumulator with a lazy `$`
 chain that overflows when finally forced — pass the accumulator directly
 (`loop (n-1) (acc+n)`) so demand analysis can keep it strict.
 
+## Lua's structural limits bound the size of one generated function
+
+The emitted module is one Lua chunk, and Lua hosts cap what one function
+may contain: Lua 5.x allows 200 local variables per function and LuaJIT
+caps the distance a control-structure jump may span (a function whose
+`if … elseif … end` chain compiles to more than 65 535 bytecode
+instructions fails to load with `control structure too long`). The
+compiler stays under the first by packing top-level names into a table
+instead of module-level locals, so a program may define any number of
+functions and constructors. The second is met only by a single generated
+function with a very long clause chain, and the largest such functions
+are the derived instance methods of a type with many constructors:
+
+- A derived `Ord`/`Eq` is linear in the constructor count: `compare` of a
+  type with fields is one clause per constructor plus one
+  constructor-index comparison, and every derived method of an
+  enumeration is a single index comparison (constant size). They never
+  hit the limit. (Earlier releases emitted the derived `compare` — and an
+  enumeration's four relational operators — as one clause per
+  constructor PAIR; LuaJIT refused the `compare` of a 66-constructor
+  type.)
+- A derived `Show`, and a derived `Enum`'s `fromEnum`, `toEnum`, `succ`
+  and `pred`, are one clause per constructor. Measured on this build: an
+  enumeration of 4000 constructors deriving `Eq`, `Ord`, `Show`, `Enum`
+  and `Bounded` loads and runs on LuaJIT (and Lua 5.5); at 8000 the
+  derived `show` is the first function LuaJIT refuses. A sum type whose
+  constructors each carry one `Int` field and derive `Eq`, `Ord` and
+  `Show` loads at 1400 constructors on LuaJIT and is refused at 1450 (the
+  structural `==`'s clause chain is the first to exceed the span; each
+  field adds to a clause's length, so the figure falls with more fields).
+  Lua 5.5 has no comparable span limit and loads every size tried.
+
+A type with more constructors than that needs a hand-written instance
+(or a representation where the index does the work: `fromEnum`). The
+limit is the host's per-function bytecode span; splitting one function
+across several is not something the compiler does for a derived method.
+
 ## Non-exhaustive patterns are rejected at compile time (mostly)
 
 When a case expression or function definition doesn't cover all constructors,
