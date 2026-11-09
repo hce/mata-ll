@@ -661,6 +661,51 @@ impl TClause {
     }
 }
 
+/// A statically known host function as an FFI declaration names it, with
+/// the declared shape of what one call of it hands back.
+///
+/// `name` is the host function exactly as the declaration spelled it — a
+/// bare or dotted path (`string.rep`), or `:method` for a method call on
+/// the first argument. Codegen keeps that one-character dispatch; it is a
+/// property of host names, not of this encoding.
+///
+/// `tuple` is `Some(n)` when the DECLARED result of one call is a
+/// top-level n-tuple: a Lua function hands several values back as multiple
+/// return values, so the call's first n values are the tuple's elements.
+/// `None` is every other result — exactly one value, the call's first.
+/// The fact is taken from the declaration (`HostFn::declared`), never
+/// from the monomorphized type of a use: a declared type VARIABLE
+/// instantiated at a tuple (the threaded state of a fold-style host
+/// function) is one value the host holds and hands back, not n of them.
+#[derive(Debug, Clone)]
+pub struct HostFn {
+    pub name: String,
+    pub tuple: Option<usize>,
+}
+
+impl HostFn {
+    /// The host function `name` whose one call is declared to hand back
+    /// `payload` — the declared result with its effect and convention
+    /// wrappers already peeled by the caller (`IO`, the `Either String _`
+    /// of a guarded form, the list of an iterator).
+    pub fn declared(name: &str, payload: &Ty) -> Self {
+        HostFn { name: name.to_string(), tuple: Self::tuple_arity(payload) }
+    }
+
+    /// How many return values of one host call a declared result consumes
+    /// when it is a top-level tuple; `None` for a result that is one
+    /// value. THE result-count rule of the FFI boundary: every position
+    /// where a host function's call results cross in — an import of any
+    /// form, a host callback handed to an exported function — asks here,
+    /// with the DECLARED type of what the call hands back.
+    pub fn tuple_arity(payload: &Ty) -> Option<usize> {
+        match payload {
+            Ty::Tuple(elems) => Some(elems.len()),
+            _ => None,
+        }
+    }
+}
+
 /// What a `SpecCall` dispatches to. Previously a `helper:payload` STRING
 /// protocol, encoded in mono / the typechecker's FFI lowering / derive and
 /// re-parsed independently by codegen, DCE and demand analysis — fragile
@@ -669,28 +714,27 @@ impl TClause {
 /// split exactly the way its encoder joined. The typed vocabulary makes
 /// the payloads unmistakable; nothing parses anything.
 ///
-/// Host-name convention (`Host`, `Io`, `IoTup`, `TupRet`, `Iter`, `Try`,
-/// `Pcall`, `IoPcall`): the string is the host function exactly as the
-/// FFI declaration spelled it — a bare or dotted path (`string.rep`), or
-/// `:method` for a method call on the first argument. Codegen keeps that
-/// one-character dispatch; it is a property of host names, not of this
-/// encoding.
+/// Host-function convention (`Host`, `Io`, `Iter`, `Try`, `Pcall`,
+/// `IoPcall`): each carries a [`HostFn`] — the host function exactly as
+/// the FFI declaration spelled it, and the one fact about the DECLARED
+/// result the call itself must know (how many of the call's return values
+/// the result consumes). Everything else about the result is read off the
+/// node's type at emission.
 #[derive(Debug, Clone)]
 pub enum SpecKind {
-    /// Pure single-return FFI: `host(args…)`, result type-decoded.
-    Host(String),
-    /// IO FFI: the call wrapped as an action closure.
-    Io(String),
-    /// IO FFI with an N-value multi-return packed into a tuple table.
-    IoTup { arity: usize, host: String },
-    /// Pure FFI with an N-value multi-return packed into a tuple table.
-    TupRet { arity: usize, host: String },
-    /// LuaIterator FFI: drain the host iterator into a list.
-    Iter(String),
-    /// LuaTry / LuaCatch / LuaIOCatch FFI: pcall-captured host call.
-    Try(String),
-    Pcall(String),
-    IoPcall(String),
+    /// Pure FFI (`LuaPure`): `host(args…)`, result type-decoded.
+    Host(HostFn),
+    /// IO FFI (`LuaIO`): the call wrapped as an action closure.
+    Io(HostFn),
+    /// LuaIterator FFI: drain the host iterator into a list; the declared
+    /// result shape is that of one iterator step (the list's element).
+    Iter(HostFn),
+    /// LuaTry / LuaCatch / LuaIOCatch FFI: the host call under the
+    /// `(value, err)` convention or `pcall`; the declared result shape is
+    /// that of the success payload (the `a` of `Either String a`).
+    Try(HostFn),
+    Pcall(HostFn),
+    IoPcall(HostFn),
     /// A Lua constant path (`math.pi`) — read, not called.
     Const(String),
     /// Runtime element-wise helpers, threading one element function

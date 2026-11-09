@@ -1,20 +1,31 @@
 //! FFI boundary marshalling: calls into host Lua and type-directed decoding
 //! of what comes back.
 //!
-//! Results are decoded by descriptor: the `ffi_decode_desc*` family builds a
-//! Lua descriptor expression consumed at runtime by `__mll_ffi_decode`, and
-//! returns `None` when the raw host value already matches the mata-ll
-//! representation, so no wrapper is emitted. Descriptor text is carried as
-//! `lua::Expr::Raw` leaves (the descriptor mini-language stays textual);
-//! the call shapes around it are built as AST. Arguments are forced at the
-//! boundary; `Maybe`-declared arguments become optional Lua parameters
-//! (`__mll_opt` / `__mll_opt_tail`). LuaCatch / LuaIOCatch calls go through
-//! `pcall` wrappers (`pcall_call_ast`) that build the `Either` tags.
+//! Every host value crossing IN as a result goes through ONE decision,
+//! `CodeGen::ffi_result`: how many of a call's return values the declared
+//! result consumes (a top-level tuple is Lua's multiple return values,
+//! packed by arity; anything else is one value) and how that one value is
+//! decoded (by descriptor: the `ffi_decode_desc_inner` family builds a Lua
+//! descriptor expression consumed at runtime by `__mll_ffi_decode`, `None`
+//! when the raw host value already matches the mata-ll representation, so
+//! no wrapper is emitted). Every call form asks there — `LuaPure`, `LuaIO`,
+//! their `:method` forms, `LuaTry`, `LuaCatch`, `LuaIOCatch`, a
+//! `LuaIterator` step, a constant read, a host callback handed to an
+//! exported function — and renders the answer one of two ways: inline,
+//! where the compiled code holds the host value itself (`ffi_result_ast`),
+//! or as the `n, desc, root` arguments of the runtime helper that makes the
+//! call (`ffi_result_args`, read by `__mll_ffi_ret`). Descriptor text is
+//! carried as `lua::Expr::Raw` leaves (the descriptor mini-language stays
+//! textual); the call shapes around it are built as AST. Arguments are
+//! forced at the boundary; `Maybe`-declared arguments become optional Lua
+//! parameters (`__mll_opt` / `__mll_opt_tail`). LuaCatch / LuaIOCatch calls
+//! go through `pcall` wrappers (`pcall_call_ast`) that build the `Either`
+//! tags.
 
 use crate::tir::*;
 use crate::types::Ty;
 use super::CodeGen;
-use super::lua::{Expr, FuncBody, Stmt};
+use super::lua::{Expr, FuncBody, Item, Stmt};
 use super::names::{lua_quoted_string};
 use super::util::{con_name, decompose_app, subst_tyvars};
 
@@ -41,6 +52,71 @@ pub(super) enum FfiShape {
     /// variables, `LuaUserData`, functions, plain ADTs. The value crosses
     /// as-is (possibly under a scalar check on the decode side).
     Opaque,
+}
+
+/// How a host result becomes one mata-ll value — the answer of
+/// `CodeGen::ffi_result`, the one place the question is decided.
+pub(super) struct FfiResult {
+    /// `Some(n)`: the declared result is a top-level n-tuple, received as
+    /// the call's first n return values packed into one tuple table.
+    /// `None`: one value — a call's first, a read's only one.
+    tuple: Option<usize>,
+    /// The decode descriptor of that one value (the packed tuple
+    /// included); `None` when the host's value already is the mata-ll
+    /// representation.
+    desc: Option<String>,
+    /// The one value is a bare `Number` (`desc` is then its `num` leaf):
+    /// where the compiled code holds the value itself the normalization is
+    /// an inline multiply instead of a decoder call.
+    number: bool,
+    /// The location phrase a decode error names ("in the result of …").
+    root: String,
+}
+
+impl FfiResult {
+    /// The decision as Lua argument text for a runtime helper that makes
+    /// the host call itself: `n` (`false` = one value), `desc` (`false` =
+    /// no decoding), `root` — read by `__mll_ffi_ret`.
+    pub(super) fn runtime_args(&self) -> [String; 3] {
+        [
+            self.tuple.map_or_else(|| "false".to_string(), |n| n.to_string()),
+            self.desc.clone().unwrap_or_else(|| "false".to_string()),
+            self.root_literal(),
+        ]
+    }
+
+    /// `root` as a Lua string literal.
+    fn root_literal(&self) -> String {
+        format!("{:?}", self.root)
+    }
+}
+
+/// A host value as the compiled code holds it, for the inline rendering
+/// of a result: a CALL may return any number of values (so a single-value
+/// result truncates it and a tuple result counts its values), a READ of a
+/// host name has exactly one.
+pub(super) enum HostValue {
+    Call(Expr),
+    Read(Expr),
+}
+
+impl HostValue {
+    /// The value in a position that may take several values (an operand,
+    /// a `return`): a call is truncated to its first value by the paren.
+    fn single(self) -> Expr {
+        match self {
+            HostValue::Call(call) => Expr::paren(call),
+            HostValue::Read(name) => name,
+        }
+    }
+
+    /// The value as a non-final argument of a call, a position Lua itself
+    /// truncates to one value.
+    fn as_argument(self) -> Expr {
+        match self {
+            HostValue::Call(e) | HostValue::Read(e) => e,
+        }
+    }
 }
 
 impl CodeGen {
@@ -76,75 +152,180 @@ impl CodeGen {
             }
         }
     }
-    /// Build a Lua *descriptor* expression that drives type-directed decoding of
-    /// a value of type `ty` that has just crossed the Lua FFI boundary (an FFI
-    /// result). The descriptor is consumed at runtime by `__mll_ffi_decode`.
+    /// THE result-shape decision of the FFI boundary: how the host's answer
+    /// becomes the one mata-ll value its declared type names. Every form
+    /// that receives a host result asks here and nowhere else, so a result
+    /// type means the same thing under all of them.
     ///
-    /// Returns `None` when the host's raw Lua value already matches the mata-ll
-    /// representation (scalars, opaque type variables, and records/tuples/maybes
-    /// built only from those), so no decode wrapper is needed. Returns `Some`
-    /// when a structural conversion is required — notably any list (Lua array →
-    /// cons list) or hashmap (key-type validation + value decode).
-    pub(super) fn ffi_decode_desc(&self, ty: &Ty) -> Option<String> {
-        // The FFI body carries the action type `IO a` / `LuaIO s a`; the value
-        // that crosses the boundary is the inner `a`. Peel the effect wrapper.
-        let inner = match ty {
-            Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
-            other => other,
-        };
-        // A bare `Number` result is normalized inline at the call site
-        // (`ffi_number_result_ast`), not through the decoder: one float
-        // multiply instead of a call per scalar FFI result (`sqrt`).
-        if Self::ffi_bare_number(inner) {
-            return None;
-        }
-        self.ffi_decode_desc_inner(inner, &mut Vec::new(), None).map(|d| d.0)
-    }
-
-    /// Is `ty` (an FFI result or constant type, its `IO`/`LuaIO` wrapper
-    /// peeled) the bare scalar `Number`?
-    pub(super) fn ffi_bare_number(ty: &Ty) -> bool {
-        let inner = match ty {
-            Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
-            other => other,
-        };
-        con_name(inner) == Some("Number")
-    }
-
-    /// A bare scalar FFI result (no decode descriptor) as mata-ll reads it:
-    /// a `Number` result is normalized to the float subtype — `(value) *
-    /// 1.0` — because a Number is an IEEE double on every host and a host
-    /// returns numbers in whatever subtype it has (`tonumber "5"` and
-    /// `string.len` are integers on Lua 5.3+); `* 1.0` keeps a -0.0's sign
-    /// where `+ 0.0` would not. Every other scalar passes through as
-    /// before. A non-number host value raises Lua's arithmetic error at the
-    /// call (bare scalar results carry no `chk`, by design — see
-    /// `ffi_decode_desc_inner`).
-    pub(super) fn ffi_number_result_ast(ty: &Ty, value: Expr) -> Expr {
-        if Self::ffi_bare_number(ty) {
-            Expr::paren(Expr::binop("*", value, Expr::lit("1.0")))
-        } else {
-            value
+    /// `payload` is the type of what ONE host call (or read) hands back,
+    /// its form's wrappers already peeled (`ffi_payload`,
+    /// `ffi_guarded_payload`, a list's element for an iterator step).
+    /// `tuple` is the DECLARED result count (`HostFn::tuple`): `Some(n)`
+    /// packs the call's first n return values into one tuple table — a
+    /// top-level tuple is Lua's multiple return values — and `None` takes
+    /// one value. `root` is the location phrase a decode error names.
+    ///
+    /// The value (the packed tuple, or the one value) is then decoded by
+    /// its descriptor: a list becomes a cons list, a `Maybe` its tagged
+    /// form, a record/tuple/map is rebuilt or validated, a `Number` is
+    /// normalized to a double; a scalar or opaque value has no descriptor
+    /// and passes as it is.
+    pub(super) fn ffi_result(&self, payload: &Ty, tuple: Option<usize>, root: String) -> FfiResult {
+        FfiResult {
+            tuple,
+            desc: self.ffi_decode_desc_inner(payload, &mut Vec::new(), None).map(|d| d.0),
+            number: tuple.is_none() && con_name(payload) == Some("Number"),
+            root,
         }
     }
 
-    /// Decode descriptor for a LuaCatch/LuaIOCatch success payload. The declared
-    /// result is `Either String a` (optionally under `IO` for LuaIOCatch); the
-    /// `pcall` wrapper builds the `Left`/`Right` tags itself, so only the inner
-    /// `a` may need FFI decoding. Peels the `IO` and `Either String _` layers,
-    /// then reuses the ordinary result decoder on `a`.
-    pub(super) fn ffi_catch_decode_desc(&self, ty: &Ty) -> Option<String> {
-        let inner = match ty {
+    /// The type of the value an FFI result or constant of type `ty`
+    /// delivers: the action type `IO a` / `LuaIO s a` peeled to the `a`
+    /// that crosses the boundary.
+    pub(super) fn ffi_payload(ty: &Ty) -> &Ty {
+        match ty {
             Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
             other => other,
-        };
+        }
+    }
+
+    /// The success payload of a LuaTry/LuaCatch/LuaIOCatch result: the
+    /// declared result is `Either String a` (under `IO` for the effectful
+    /// forms) and the wrapper builds the `Left`/`Right` tags itself, so
+    /// only the inner `a` crosses the boundary. The typechecker's
+    /// `ffi_call_payload` peels the declared type the same way.
+    pub(super) fn ffi_guarded_payload(ty: &Ty) -> &Ty {
+        let inner = Self::ffi_payload(ty);
         let (head, args) = decompose_app(inner);
         match head {
-            Some("Either") if args.len() == 2 => {
-                self.ffi_decode_desc_inner(args[1], &mut Vec::new(), None).map(|d| d.0)
-            }
-            _ => None,
+            Some("Either") if args.len() == 2 => args[1],
+            _ => inner,
         }
+    }
+
+    /// A host result where the compiled code itself holds the host value,
+    /// as `(statements to run first, the decoded value)`:
+    ///
+    ///   * a top-level tuple binds the call's first n return values to n
+    ///     locals and packs them (a missing value is a nil slot the
+    ///     decoder reports; extra values are dropped), then decodes the
+    ///     tuple like any other;
+    ///   * a bare `Number` is `(value) * 1.0` — one float multiply instead
+    ///     of a decoder call per scalar result (`sqrt`). A Number is an
+    ///     IEEE double on every host and a host returns numbers in
+    ///     whatever subtype it has (`tonumber "5"` and `string.len` are
+    ///     integers on Lua 5.3+); `* 1.0` keeps a -0.0's sign where
+    ///     `+ 0.0` would not. A value Lua's arithmetic does not take
+    ///     raises Lua's own error at the call;
+    ///   * a value with a descriptor is `__mll_ffi_decode(desc, value,
+    ///     root)`;
+    ///   * every other value — a scalar, an opaque value — is the value
+    ///     itself, with no call around it: scalar FFI (bit ops) is the hot
+    ///     path, and a check would tax every call (inside structures
+    ///     scalars ARE checked, see `ffi_child_desc`).
+    ///
+    /// A call that yields ONE value is truncated to it (`(call)`, or its
+    /// position as a middle argument of the decoder), so extra return
+    /// values cannot spread into whatever position the result lands in —
+    /// which is also what makes compiled-function references provably
+    /// single-return for the paren-normalization pass (opt.rs).
+    pub(super) fn ffi_result_inline(res: &FfiResult, value: HostValue) -> (Vec<Stmt>, Expr) {
+        let decode = |desc: &str, v: Expr| Expr::call_named(
+            "__mll_ffi_decode",
+            vec![Expr::raw(desc), v, Expr::lit(res.root_literal())],
+        );
+        match (res.tuple, value) {
+            (Some(arity), HostValue::Call(call)) => {
+                let vars: Vec<String> = (0..arity).map(|i| format!("_r{}", i)).collect();
+                let tuple = Expr::Table(
+                    vars.iter().map(|v| Item::Pos(Expr::name(v.clone()))).collect(),
+                );
+                let value = match &res.desc {
+                    Some(desc) => decode(desc, tuple),
+                    None => tuple,
+                };
+                (vec![Stmt::Local(vars, Some(call))], value)
+            }
+            (Some(_), HostValue::Read(_)) => unreachable!(
+                "a constant read has one value; only a call's result is counted"),
+            (None, value) => {
+                let value = if res.number {
+                    Expr::paren(Expr::binop("*", value.single(), Expr::lit("1.0")))
+                } else if let Some(desc) = &res.desc {
+                    decode(desc, value.as_argument())
+                } else {
+                    value.single()
+                };
+                (Vec::new(), value)
+            }
+        }
+    }
+
+    /// `ffi_result_inline` as one expression: the value itself, or — when
+    /// statements must run first (the tuple's locals) — a function called
+    /// on the spot.
+    pub(super) fn ffi_result_ast(res: &FfiResult, value: HostValue) -> Expr {
+        let (mut stmts, value) = Self::ffi_result_inline(res, value);
+        if stmts.is_empty() {
+            return value;
+        }
+        stmts.push(Stmt::Return(value));
+        Expr::call(Expr::paren(Expr::Func(vec![], FuncBody::Inline(stmts))), vec![])
+    }
+
+    /// `ffi_result_inline` as an action closure: the function that makes
+    /// the host call and returns its decoded result each time it is run.
+    pub(super) fn ffi_result_action_ast(res: &FfiResult, value: HostValue) -> Expr {
+        let (mut stmts, value) = Self::ffi_result_inline(res, value);
+        stmts.push(Stmt::Return(value));
+        Expr::Func(vec![], FuncBody::Inline(stmts))
+    }
+
+    /// A host result where a RUNTIME helper makes the call (the `pcall` of
+    /// LuaCatch/LuaIOCatch, LuaTry's `(value, err)` test, an iterator
+    /// step, a host callback): the decision as the helper's leading
+    /// `n, desc, root` arguments, which it hands to `__mll_ffi_ret` with
+    /// the call's results — the same pack-by-arity and the same decoder
+    /// the inline rendering emits. `false` stands for "one value" and for
+    /// "no descriptor". A bare `Number` has its `num` descriptor here: the
+    /// helper is a call already, and the decoder's check names the
+    /// declared type where the inline multiply raises Lua's own error.
+    ///
+    /// The count, an absent descriptor and the location phrase are literal
+    /// tokens and are built as such; only a descriptor — a table
+    /// constructor in the textual descriptor language — is a `Raw` leaf. A
+    /// suspended call with no descriptor therefore stays free of `Raw`
+    /// fragments, which the thunk lifter requires of a body it lifts.
+    pub(super) fn ffi_result_args(res: &FfiResult) -> Vec<Expr> {
+        let [n, desc, root] = res.runtime_args();
+        let desc = match res.desc {
+            Some(_) => Expr::raw(desc),
+            None => Expr::lit(desc),
+        };
+        vec![Expr::lit(n), desc, Expr::lit(root)]
+    }
+
+    /// The host call itself: `host(args…)`, or `receiver:method(args…)`
+    /// for a `:method` name (the receiver is the first argument, forced —
+    /// there is no call without one).
+    pub(super) fn ffi_call_ast(&mut self, host: &str, args: &[TExpr]) -> Expr {
+        if let Some(method) = host.strip_prefix(':') {
+            let recv = self.forced_prefix_ast(&args[0]);
+            let margs = self.ffi_args_ast(&args[1..]);
+            Expr::method(recv, method, margs)
+        } else {
+            Expr::call_named(host, self.ffi_args_ast(args))
+        }
+    }
+
+    /// A LuaPure/LuaIO host call with its result decoded, as the inline
+    /// decision over the call (`ffi_result`): what the pure form evaluates
+    /// to and what the IO form performs.
+    pub(super) fn ffi_host_call(&mut self, host: &HostFn, args: &[TExpr], ty: &Ty) -> (FfiResult, HostValue) {
+        let res = self.ffi_result(
+            Self::ffi_payload(ty), host.tuple, Self::ffi_root_name(&host.name));
+        let call = self.ffi_call_ast(&host.name, args);
+        (res, HostValue::Call(call))
     }
 
     /// Build an FFI call's argument list (the expressions between the parens,
@@ -330,25 +511,23 @@ impl CodeGen {
         }
     }
 
-    /// Build `__mll_pcall(desc, root, fn, forced-args...)` for LuaCatch/
-    /// LuaIOCatch — `root` is the human-readable name of the host function,
-    /// threaded through so a decode error on the *successful* result can say
-    /// whose result it was. The forced arguments are evaluated *outside* the
-    /// protected call, so only errors raised by the Lua function itself become
-    /// `Left` — not errors from forcing our own thunks. A leading `:` in
-    /// `lua_func` is a method call on arg0; the receiver is bound once to
-    /// avoid re-evaluating it.
-    pub(super) fn pcall_call_ast(&mut self, lua_func: &str, desc: &Option<String>, args: &[TExpr]) -> Expr {
-        let desc_str = desc.as_deref().unwrap_or("false");
-        let root = Self::ffi_root_name(lua_func);
-        if let Some(method) = lua_func.strip_prefix(':') {
+    /// Build `__mll_pcall(n, desc, root, fn, forced-args...)` for LuaCatch/
+    /// LuaIOCatch — `n, desc, root` are the result decision for the success
+    /// payload (`ffi_result_args`; `root` is the human-readable name of the
+    /// host function, so a decode error on the *successful* result can say
+    /// whose result it was). The forced arguments are evaluated *outside*
+    /// the protected call, so only errors raised by the Lua function itself
+    /// become `Left` — not errors from forcing our own thunks. A leading
+    /// `:` in the host name is a method call on arg0; the receiver is
+    /// bound once to avoid re-evaluating it.
+    pub(super) fn pcall_call_ast(&mut self, host: &HostFn, ty: &Ty, args: &[TExpr]) -> Expr {
+        let res = self.ffi_result(
+            Self::ffi_guarded_payload(ty), host.tuple, Self::ffi_root_name(&host.name));
+        let mut pargs = Self::ffi_result_args(&res);
+        if let Some(method) = host.name.strip_prefix(':') {
             let recv = self.forced_ast(&args[0]);
-            let mut pargs = vec![
-                Expr::raw(desc_str),
-                Expr::raw(format!("{:?}", root)),
-                Expr::name(format!("__recv.{}", method)),
-                Expr::name("__recv"),
-            ];
+            pargs.push(Expr::name(format!("__recv.{}", method)));
+            pargs.push(Expr::name("__recv"));
             pargs.extend(self.ffi_args_ast(&args[1..]));
             Expr::call(
                 Expr::paren(Expr::Func(
@@ -361,11 +540,7 @@ impl CodeGen {
                 vec![],
             )
         } else {
-            let mut pargs = vec![
-                Expr::raw(desc_str),
-                Expr::raw(format!("{:?}", root)),
-                Expr::name(lua_func),
-            ];
+            pargs.push(Expr::name(host.name.as_str()));
             pargs.extend(self.ffi_args_ast(args));
             Expr::call_named("__mll_pcall", pargs)
         }

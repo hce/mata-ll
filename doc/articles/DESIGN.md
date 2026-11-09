@@ -815,6 +815,14 @@ generation and then erases:
   function signals failure by *raising* rather than by the `(nil, err)`
   convention.
 
+Every form receives what the host hands back by one rule (SPEC "FFI
+results: one rule for every call form"): the declared result of one call
+— under its `IO`, inside its `Either String _`, one element of an
+iterator's list — is a top-level tuple taken from the call's return
+values by arity, or one value, decoded by its type. The typechecker
+records the count with the import (`HostFn`), codegen decides the rest
+in `ffi_result`, and the runtime helpers end in `__mll_ffi_ret`.
+
 `Maybe` arguments in FFI signatures translate to optional Lua
 parameters: `Nothing` omits the argument, relying on Lua's `nil`
 default.

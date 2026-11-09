@@ -3208,14 +3208,16 @@ fn collect_fn_refs<'t>(
             if fn_names.contains(original.as_str()) {
                 poisoned.insert(original.clone());
             }
-            // Only the bare-host form can spell a tracked name directly
-            // (the string protocol's other payloads carried a helper
-            // prefix, so the old whole-string comparison never matched
-            // them — preserved exactly by the typed match).
-            if let SpecKind::Host(name) = specialized
-                && fn_names.contains(name.as_str())
+            // The pure host form can spell a tracked name directly (the
+            // string protocol's other payloads carried a helper prefix,
+            // so the old whole-string comparison never matched them —
+            // preserved by the typed match). A declared tuple result is
+            // the same form with a result count, and names its host the
+            // same way.
+            if let SpecKind::Host(host) = specialized
+                && fn_names.contains(host.name.as_str())
             {
-                poisoned.insert(name.clone());
+                poisoned.insert(host.name.clone());
             }
         }
         TExprKind::DictCall { func_name, .. } => {

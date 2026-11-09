@@ -197,6 +197,7 @@ mll_test!(int_sign_of_zero, "int_sign_of_zero.mll");
 mll_test!(int_sign_of_zero_boundary, "int_sign_of_zero_boundary.mll");
 mll_test!(number_map_keys, "number_map_keys.mll");
 mll_test!(number_host_boundary, "number_host_boundary.mll");
+mll_test!(ffi_result_forms, "ffi_result_forms.mll");
 // G1: locals shadow dict-passing globals in the dictionary rewrite passes
 // (clause/lambda/let/case/where binders); a function named `f` no longer
 // collides with Prelude parameters of the same name.

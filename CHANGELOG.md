@@ -44,6 +44,61 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A host result is received the same way under every FFI call form.**
+  `sfind :: String -> String -> LuaPure ":find" (Maybe Int)` printed
+  `Nothing` for a miss and died on a hit with `attempt to index a number
+  value`: the method spelling of a pure call returned the host's raw
+  value, so the 3 that `("hello"):find("l")` returns never became `Just
+  3`, a list arrived as a raw table (`show: expected a list but got a raw
+  table value`) and a record, map or nested tuple likewise — while
+  `LuaPure "string.find"` and `LuaIO ":find"` of the same function
+  decoded. A method-spelled tuple result (`LuaPure ":find" (Int, Int)`,
+  `LuaIO ":byte" (Int, Int)`) emitted `:find(…)` with no receiver, Lua
+  that does not load (`unexpected symbol near ':'`), taking the whole
+  module with it. And `modfC :: Number -> LuaCatch "math.modf" (Either
+  String (Number, Number))` raised `FFI result: declared (Number, Number)
+  but the host returned the number 3; a tuple must arrive from the host
+  as a Lua array`, as did the same payload under `LuaIOCatch` and
+  `LuaTry`, where `LuaPure "math.modf" (Number, Number)` is `(3.0,0.75)`:
+  the `pcall` and `(value, err)` wrappers kept one return value and
+  handed it to the tuple decoder. Each call form had its own copy of the
+  question "what does the host's answer become", and three of the copies
+  had missed a case. There is now one: the typechecker records with every
+  import the declared result count of one call (a top-level tuple is
+  Lua's multiple return values, counted by arity; anything else is one
+  value — taken from the declaration, since a type variable instantiated
+  at a tuple is one opaque value), and codegen's `ffi_result` turns that
+  count and the payload type's decode descriptor into the result, either
+  inline where the compiled code holds the host value (`LuaPure`, `LuaIO`,
+  both spellings, constant reads) or as the leading arguments of the
+  runtime helper that makes the call (`LuaTry`, `LuaCatch`, `LuaIOCatch`,
+  an iterator step, a host callback), all of which end in the runtime's
+  one result function `__mll_ffi_ret`. The separate tuple-returning call
+  kinds are gone; every host-call kind carries the count. The inline
+  scalar paths are unchanged: a bare scalar result is the truncated call
+  with nothing around it and a bare `Number` one multiply, in either
+  spelling. Three conventions change with the rule, all toward what
+  `LuaPure`/`LuaIO` already did (see Changed). A `nil` where `Number` is
+  declared raises under every form but `LuaTry` (whose convention makes
+  it the failure) — Lua's arithmetic error where the value is normalized
+  inline, the decoder's `declared Number but the host returned nil` where
+  the runtime makes the call — and is never a `Left`: `Left` is the host
+  function's own failure, a successful result of the wrong shape is an
+  integration error. The SPEC gains the rule as a table ("FFI results:
+  one rule for every call form"). Found by the 2026-10 fresh-eyes review
+  (HF1, the review's F1; HF3) and the Number-boundary work (Q37). (Case
+  `ffi_result_forms`, self-asserting on both hosts over the standard
+  library only: one line per cell of call form × result shape — scalar,
+  Number, Maybe present/absent, list, top-level tuple, nested tuple,
+  record, HashMap, unit — for `LuaPure`, `LuaIO`, `LuaTry`, `LuaCatch`,
+  `LuaIOCatch` in both spellings, constant reads and iterator steps, with
+  the failure payloads and the nil-Number and missing-tuple-value edges;
+  host-defined tests `host_callback_results_cross_like_any_host_call`,
+  `lua_iterator_steps_cross_like_any_host_call` and
+  `guarded_tuple_results_are_the_calls_return_values`; the codegen-shape
+  pin `ffi_method_form_takes_the_shared_result_path`. No GHC twin: FFI
+  declarations.)
+
 - **A map read whose key reads another version of the same map answers
   for the version it was asked about.** `M.lookup (2, M.size m2) m1` with
   `m1 = M.fromList [((1, 1), "a")]` and `m2 = M.insert (2, 2) "b" m1` was
@@ -2202,6 +2257,24 @@ API of the `mllc` library crate.)
   `module_reexport{,_chain,_alias}.mll`.
 
 ### Changed
+
+- **A declared tuple is the host call's return values wherever a host
+  function's call result is received** (breaking for a host that relied
+  on the old per-form conventions). Three positions used to differ from
+  `LuaPure`/`LuaIO` and now follow them. The success payload of
+  `LuaTry`/`LuaCatch`/`LuaIOCatch`: a function returning ONE positional
+  table for `Either String (a, b)` was accepted and now reports its table
+  as element 1 of the tuple; return the values (`return a, b`). The
+  result of a callback the host hands to an exported function (`(Int ->
+  LuaIO s (a, b))`): likewise. A `LuaIterator` step: the declared element
+  type counts the step's values — a tuple element takes the first n, so a
+  step yielding `k, nil` for `[(String, Maybe Int)]` is `(k, Nothing)`
+  where it was a decode error, and one positional table per step is no
+  longer a tuple; any other element takes the step's first value, where
+  several values used to be packed into a table whatever the element type
+  (a two-capture `gmatch` at `[String]` produced tables typed `String`;
+  at `[[String]]` it happened to decode as the list of captures and now
+  needs the tuple type `[(String, String)]`).
 
 - **The per-pass shadow checks for a local named `div`, `mod`, `quot`,
   `rem` or `seq` are retired.** The emitter's backtick-operator arm, its

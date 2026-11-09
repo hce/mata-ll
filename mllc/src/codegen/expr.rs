@@ -20,6 +20,7 @@
 use crate::tir::*;
 use crate::types::Ty;
 use super::CodeGen;
+use super::ffi::HostValue;
 use super::function::{FnSpillScope, LocalRowsSnapshot, VarsSnapshot};
 use super::pattern::ClauseCond;
 use super::lua::{Block, Expr, FuncBody, Item, Stmt};
@@ -2198,28 +2199,18 @@ impl CodeGen {
     /// The performing host call of a LuaTry import: the call under
     /// `__mll_try`, which wraps the host's (value, error) convention in
     /// Either. The SUCCESS payload crosses the FFI boundary like any other
-    /// result, so it carries the same type-directed decode descriptor (a
-    /// raw Lua array where [Int] was declared must become a cons list, not
-    /// be walked as a cons cell later). Evaluating it PERFORMS: value
+    /// result, so the helper receives the same result decision every form
+    /// uses (`ffi_result`: a raw Lua array where [Int] was declared must
+    /// become a cons list, a declared tuple is the call's first n values)
+    /// ahead of the call's own values. Evaluating it PERFORMS: value
     /// position wraps it in the action closure, run position emits it
     /// directly.
-    pub(super) fn ffi_try_call_ast(&mut self, host: &str, args: &[TExpr], ty: &Ty) -> Expr {
-        let desc = self.ffi_catch_decode_desc(ty);
-        let desc_str = desc.as_deref().unwrap_or("false").to_string();
-        let root = Self::ffi_root_name(host);
-        let call = if let Some(method) = host.strip_prefix(':') {
-            // Method call try: handle:method(args)
-            let recv = self.forced_prefix_ast(&args[0]);
-            let margs = self.ffi_args_ast(&args[1..]);
-            Expr::method(recv, method, margs)
-        } else {
-            // Global function try
-            Expr::call_named(host, self.ffi_args_ast(args))
-        };
-        Expr::call_named(
-            "__mll_try",
-            vec![Expr::raw(desc_str), Expr::raw(format!("{:?}", root)), call],
-        )
+    pub(super) fn ffi_try_call_ast(&mut self, host: &HostFn, args: &[TExpr], ty: &Ty) -> Expr {
+        let res = self.ffi_result(
+            Self::ffi_guarded_payload(ty), host.tuple, Self::ffi_root_name(&host.name));
+        let mut targs = Self::ffi_result_args(&res);
+        targs.push(self.ffi_call_ast(&host.name, args));
+        Expr::call_named("__mll_try", targs)
     }
 
     /// The SpecCall arms of the expression walk, split out only to keep
@@ -2543,26 +2534,18 @@ impl CodeGen {
             }
             SpecKind::Const(lua_name) => {
                 // Constant access: math.pi (no function call). The read is
-                // still an FFI boundary, so the result decodes exactly like
-                // a call's would (a scalar's descriptor is None and the
-                // bare name passes through): a host table declared
-                // `HashMap k v` must become a map handle, a host array
-                // declared `[a]` a cons list, a bare value declared
-                // `Maybe a` a tagged Just. The enclosing CAF thunk
-                // memoizes, so the decode runs once per program.
-                let decode = self.ffi_decode_desc(&expr.ty);
-                let name = Expr::name(lua_name.as_str());
-                match &decode {
-                    Some(desc) => Expr::call_named(
-                        "__mll_ffi_decode",
-                        vec![
-                            Expr::raw(desc.clone()),
-                            name,
-                            Expr::raw(format!("{:?}", Self::ffi_root_name(lua_name))),
-                        ],
-                    ),
-                    None => Self::ffi_number_result_ast(&expr.ty, name),
-                }
+                // still an FFI boundary, so the value decodes by the same
+                // decision a call's result does (`ffi_result`; a scalar has
+                // no descriptor and the bare name passes through): a host
+                // table declared `HashMap k v` must become a map handle, a
+                // host array declared `[a]` a cons list, a bare value
+                // declared `Maybe a` a tagged Just. A read has exactly one
+                // value, so there is nothing to count: a constant declared
+                // as a tuple is the host's positional table. The enclosing
+                // CAF thunk memoizes, so the decode runs once per program.
+                let res = self.ffi_result(
+                    Self::ffi_payload(&expr.ty), None, Self::ffi_root_name(lua_name));
+                Self::ffi_result_ast(&res, HostValue::Read(Expr::name(lua_name.as_str())))
             }
             SpecKind::TupGet(idx) => {
                 // Tuple field access for the derived tuple `show`: force
@@ -2577,68 +2560,24 @@ impl CodeGen {
                 let base = self.forced_prefix_ast(&args[0]);
                 Expr::force(Expr::index(base, format!("[{}]", idx)))
             }
-            SpecKind::TupRet { arity, host } => {
-                // Multi-return FFI: pack Lua multiple returns into a tuple table
-                let lua_func = host.as_str();
-                let vars: Vec<String> = (0..*arity).map(|i| format!("_r{}", i)).collect();
-                let call = Expr::call_named(lua_func, self.ffi_args_ast(args));
-                // Decode the packed tuple like every other FFI result: a
-                // missing or wrong-typed return value fails with a clear
-                // localized error, and structured elements (lists, Maybe,
-                // records) are converted to the mata-ll representation.
-                let decode = self.ffi_decode_desc(&expr.ty);
-                let tuple = Expr::Table(
-                    vars.iter().map(|v| Item::Pos(Expr::name(v.clone()))).collect(),
-                );
-                let ret = match &decode {
-                    Some(desc) => Expr::call_named(
-                        "__mll_ffi_decode",
-                        vec![
-                            Expr::raw(desc.clone()),
-                            tuple,
-                            Expr::raw(format!("{:?}", Self::ffi_root_name(lua_func))),
-                        ],
-                    ),
-                    None => tuple,
-                };
-                Expr::call(
-                    Expr::paren(Expr::Func(
-                        vec![],
-                        FuncBody::Inline(vec![
-                            Stmt::Local(vars, Some(call)),
-                            Stmt::Return(ret),
-                        ]),
-                    )),
-                    vec![],
-                )
-            }
             SpecKind::Iter(host) => {
                 // Iterator FFI: the result type is a list `[element]` (see the
-                // LuaIterator reduction). Each iterator step yields one
-                // `element`, which must be decoded the same way an ordinary
-                // FFI result is — a list element becomes a cons list, a Maybe
-                // is wrapped, a structured element is validated. Without this,
-                // a structured element (a list, chiefly) was stored as a raw
+                // LuaIterator reduction). Each iterator step is a host call
+                // whose result is one `element`, received by the same result
+                // decision an ordinary FFI call uses (`ffi_result`): a
+                // declared tuple element is the step's first n values, a
+                // list element becomes a cons list, a Maybe is wrapped, a
+                // structured element is validated. Without the decode, a
+                // structured element (a list, chiefly) was stored as a raw
                 // Lua value, so `show`/any consumer failed later with a
-                // baffling "raw value" error. A scalar/opaque element needs
-                // no descriptor (`nil`), keeping the common iterator's exact
-                // old codegen.
-                let lua_func = host.as_str();
-                let elem_desc = match &expr.ty {
-                    Ty::List(elem) =>
-                        self.ffi_decode_desc_inner(elem, &mut Vec::new(), None).map(|d| d.0),
-                    _ => None,
+                // baffling "raw value" error.
+                let lua_func = host.name.as_str();
+                let elem = match &expr.ty {
+                    Ty::List(elem) => elem.as_ref(),
+                    other => other,
                 };
-                let desc_args = |elem_desc: &Option<String>| -> Vec<Expr> {
-                    match elem_desc {
-                        Some(desc) => vec![
-                            Expr::raw(desc.clone()),
-                            Expr::raw(format!("{:?}", Self::ffi_root_name(lua_func))),
-                        ],
-                        None => vec![Expr::lit("nil"), Expr::lit("nil")],
-                    }
-                };
-                // __mll_iter(factory, decode_desc, root, arg0, arg1, ...)
+                let res = self.ffi_result(elem, host.tuple, Self::ffi_root_name(lua_func));
+                // __mll_iter(factory, n, desc, root, arg0, arg1, ...)
                 if let Some(method) = lua_func.strip_prefix(':') {
                     // Method-form iterator (`LuaIterator ":gmatch" [...]`):
                     // the factory is a method on the first argument. A
@@ -2648,7 +2587,7 @@ impl CodeGen {
                     // (`__recv.m(__recv, ...)` ≡ `__recv:m(...)`).
                     let recv = self.forced_ast(&args[0]);
                     let mut iter_args = vec![Expr::name(format!("__recv.{}", method))];
-                    iter_args.extend(desc_args(&elem_desc));
+                    iter_args.extend(Self::ffi_result_args(&res));
                     iter_args.push(Expr::name("__recv"));
                     iter_args.extend(self.ffi_args_ast(&args[1..]));
                     Expr::call(
@@ -2663,7 +2602,7 @@ impl CodeGen {
                     )
                 } else {
                     let mut iter_args = vec![Expr::name(lua_func)];
-                    iter_args.extend(desc_args(&elem_desc));
+                    iter_args.extend(Self::ffi_result_args(&res));
                     iter_args.extend(self.ffi_args_ast(args));
                     Expr::call_named("__mll_iter", iter_args)
                 }
@@ -2675,109 +2614,34 @@ impl CodeGen {
             SpecKind::Try(host) => Expr::inline_fn0(self.ffi_try_call_ast(host, args, &expr.ty)),
             SpecKind::Pcall(host) => {
                 // LuaCatch: pure call under pcall, result Either String a.
-                let desc = self.ffi_catch_decode_desc(&expr.ty);
-                self.pcall_call_ast(host, &desc, args)
+                self.pcall_call_ast(host, &expr.ty, args)
             }
             SpecKind::IoPcall(host) => {
                 // LuaIOCatch: same pcall capture, deferred as an IO action thunk.
                 // Zero-arg still needs a wrapper: the value IS the action.
-                let desc = self.ffi_catch_decode_desc(&expr.ty);
-                let call = self.pcall_call_ast(host, &desc, args);
+                let call = self.pcall_call_ast(host, &expr.ty, args);
                 Expr::inline_fn0(call)
             }
             SpecKind::Io(host) => {
                 // IO FFI in value position: the action closure that makes
                 // the host call when run — whatever the argument count, so
-                // evaluating it never performs. Run position (the import
-                // wrapper's own body, a bind statement) emits the call
-                // itself (action_run_ast's HostCall arm).
-                let lua_func = host.as_str();
-                // Type-directed decode of the FFI result (see action_run_ast).
-                let decode = self.ffi_decode_desc(&expr.ty);
-                let call = if let Some(method) = lua_func.strip_prefix(':') {
-                    // Method call IO: handle:method(args)
-                    let recv = self.forced_prefix_ast(&args[0]);
-                    let margs = self.ffi_args_ast(&args[1..]);
-                    Expr::method(recv, method, margs)
-                } else {
-                    Expr::call_named(lua_func, self.ffi_args_ast(args))
-                };
-                let inner = match &decode {
-                    Some(desc) => Expr::call_named(
-                        "__mll_ffi_decode",
-                        vec![
-                            Expr::raw(desc.clone()),
-                            call,
-                            Expr::raw(format!("{:?}", Self::ffi_root_name(lua_func))),
-                        ],
-                    ),
-                    // The declared result is ONE value (multi-return IO uses the
-                    // IoTup arm): truncate the raw host call so extra
-                    // return values cannot spread.
-                    None => Self::ffi_number_result_ast(&expr.ty, Expr::paren(call)),
-                };
-                Expr::inline_fn0(inner)
-            }
-            SpecKind::IoTup { arity, host } => {
-                // IO FFI with multi-return: wrap in action thunk
-                let lua_func = host.as_str();
-                let vars: Vec<String> = (0..*arity).map(|i| format!("_r{}", i)).collect();
-                let call = Expr::call_named(lua_func, self.ffi_args_ast(args));
-                // Decode the packed tuple (see the TupRet arm).
-                let decode = self.ffi_decode_desc(&expr.ty);
-                let tuple = Expr::Table(
-                    vars.iter().map(|v| Item::Pos(Expr::name(v.clone()))).collect(),
-                );
-                let ret = match &decode {
-                    Some(desc) => Expr::call_named(
-                        "__mll_ffi_decode",
-                        vec![
-                            Expr::raw(desc.clone()),
-                            tuple,
-                            Expr::raw(format!("{:?}", Self::ffi_root_name(lua_func))),
-                        ],
-                    ),
-                    None => tuple,
-                };
-                Expr::Func(
-                    vec![],
-                    FuncBody::Inline(vec![Stmt::Local(vars, Some(call)), Stmt::Return(ret)]),
-                )
-            }
-            SpecKind::Host(host) if host.starts_with(':') => {
-                // Method call FFI: arg0:method(arg1, arg2, ...)
-                // The declared result is ONE value; parenthesize so a
-                // multi-returning host method cannot spread extra values into
-                // whatever position this call lands in.
-                let method = &host[1..];
-                let recv = self.forced_prefix_ast(&args[0]);
-                let margs = self.ffi_args_ast(&args[1..]);
-                Self::ffi_number_result_ast(&expr.ty, Expr::paren(Expr::method(recv, method, margs)))
+                // evaluating it never performs — and returns the result as
+                // every form decodes it (`ffi_result`). Run position (the
+                // import wrapper's own body, a bind statement) emits the
+                // call itself (action_run_ast's HostCall arm).
+                let (res, call) = self.ffi_host_call(host, args, &expr.ty);
+                Self::ffi_result_action_ast(&res, call)
             }
             SpecKind::Host(host) => {
-                // Regular (pure) FFI: lua_func(arg0, arg1, ...)
-                // Type-directed decode of the result, symmetric with the IO
-                // arms above: e.g. a `Maybe a` result from the host must be
-                // wrapped into the tagged `Just`/`Nothing` representation.
-                let decode = self.ffi_decode_desc(&expr.ty);
-                let call = Expr::call_named(host, self.ffi_args_ast(args));
-                match &decode {
-                    Some(desc) => Expr::call_named(
-                        "__mll_ffi_decode",
-                        vec![
-                            Expr::raw(desc.clone()),
-                            call,
-                            Expr::raw(format!("{:?}", Self::ffi_root_name(host))),
-                        ],
-                    ),
-                    // The declared result is ONE value (multi-return uses the
-                    // TupRet arm): truncate the raw host call so extra
-                    // return values cannot spread — this is also what makes
-                    // compiled-function references provably single-return for
-                    // the paren-normalization pass (opt.rs). A bare Number
-                    // result is normalized to the float subtype on top.
-                    None => Self::ffi_number_result_ast(&expr.ty, Expr::paren(call)),
-                }
+                // Pure FFI: `lua_func(arg0, arg1, ...)`, or
+                // `arg0:method(arg1, ...)` for a `:method` name, with the
+                // result decoded by the one decision every form shares
+                // (`ffi_result`): a `Maybe a` result from the host is
+                // wrapped into the tagged `Just`/`Nothing` representation
+                // whichever way the call is spelled, a declared tuple is
+                // the call's first n return values.
+                let (res, call) = self.ffi_host_call(host, args, &expr.ty);
+                Self::ffi_result_ast(&res, call)
             }
         }
     }

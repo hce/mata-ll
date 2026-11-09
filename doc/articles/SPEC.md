@@ -671,13 +671,90 @@ FFI call is strict in its arguments, forcing what the host reads evaluates
 nothing the call does not already demand. The result crossing back IN is decoded
 by the dual mechanism (arrays → cons lists, host tables → records/tuples, dict
 values → `HashMap` values, a present field → `Just`/a missing one → `Nothing`),
-validating each declared scalar's Lua type.
+validating each declared scalar's Lua type — under every call form alike; see
+"FFI results: one rule for every call form" below.
 
 (A *top-level optional positional argument* declared `Maybe` in the FFI
 signature is a separate feature — "Optional parameters" — where the
 `Just`/`Nothing` wrapper is instead consumed positionally: `Nothing`
 omits the argument. That path keeps the wrapper until it is consumed and
 only marshals the payload's structure.)
+
+## FFI results: one rule for every call form
+
+What a host function hands back is received the same way under every
+form that calls one. The DECLARED result type of one call decides two
+things, and nothing else decides anything:
+
+1. **How many of the call's return values the result takes.** A result
+   declared as a top-level tuple `(a, b, …)` is Lua's multiple return
+   values: the call's first n values are the tuple's n elements. A value
+   the host left out is `nil` in its slot — a `Maybe` element reads it as
+   `Nothing`, any other checked element reports it — and values past the
+   n-th are dropped. Every other declared result is ONE value, the
+   call's first; further values are dropped. The count is the
+   declaration's: a declared type variable that a use instantiates at a
+   tuple (the opaque threaded state of a fold-style host function) is
+   one value.
+2. **How that one value (the packed tuple included) is decoded**, by its
+   type, recursively:
+
+| Declared type | The host hands back | Received as |
+|---|---|---|
+| `Int`, `String`, `ByteString`, `Bool`, `()` | the value | the value, unchecked at the top level of a result (a `()` is whatever came back, conventionally nothing) |
+| `Number` | a Lua number of either subtype | the double; `nil` or a non-number raises |
+| an opaque type (`LuaUserData`, a type variable, a newtype over one) | any value | the value, untouched |
+| `Maybe a` | `nil` / a value | `Nothing` / `Just` the value decoded as `a` |
+| `[a]` | a Lua array (`nil` is the empty one) | the list, each element decoded as `a` |
+| `(a, b, …)` as the result of a call | the call's first n return values | the tuple, each element decoded |
+| `(a, b, …)` anywhere else — a list element, a `Maybe` payload, a record field, a map value, a constant | a positional table | the tuple, each element decoded |
+| a `LuaDict` record | a table holding the declared keys | the record, each field decoded |
+| `HashMap k v` | a keyed table | the map, keys checked against `k`, values decoded as `v` |
+| `Any` | a string, number, boolean or `nil` | the tagged dynamic value |
+
+   Inside a structure every declared scalar is checked against its Lua
+   type, and a mismatch — or a shape mismatch anywhere (a number where a
+   list was declared) — raises an error naming the declared type, the
+   value that arrived, the position and the host function.
+
+The forms differ only in WHEN the call is made and in what a FAILURE is;
+each receives the result `T` by the rule above:
+
+| Form | The call | The result |
+|---|---|---|
+| `LuaPure "f" T` | `f(args…)`, when the value is demanded | `T` |
+| `LuaIO "f" T` | `f(args…)`, each time the action runs | `T` |
+| `LuaTry "f" (Either String T)` | `f(args…)`, each time the action runs | a first value of `nil` is `Left` (the second value as its message, `"unknown error"` without one); otherwise `Right T` |
+| `LuaCatch "f" (Either String T)` | `pcall(f, args…)`, when the value is demanded | a raised error is `Left` its message; otherwise `Right T` |
+| `LuaIOCatch "f" (Either String T)` | `pcall(f, args…)`, each time the action runs | as `LuaCatch` |
+| `LuaIterator "f" [T]` | `f(args…)` returns the step function; each call of it is one element | one `T` per step; a step whose first value is `nil` ends the list |
+| any of the above with `":m"` | the same call spelled `arg0:m(rest…)` | as the form |
+| a constant (`LuaPure "path" T` with no arguments) | none: `path` is read, and a read has exactly one value | `T`; a tuple is therefore a positional table |
+| a host callback `(a -> … -> LuaIO s T)` handed to an exported function | the host's function, called by mata-ll | `T` |
+
+Three consequences of the rule:
+
+- **`nil` where `Maybe a` is declared** is `Nothing` under every form
+  but `LuaTry`, whose convention claims a `nil` first value as the
+  failure whatever the payload type (so is a `nil` for `()` there).
+- **`nil` where `Number` is declared** raises under every form but
+  `LuaTry` (where it is the failure): a `nil` is not a number, and
+  `Maybe Number` is how a result that may be absent is declared. Where
+  the compiled code holds the value itself (`LuaPure`, `LuaIO`, a
+  constant) the normalization is the inline `(value) * 1.0`, so the
+  error is Lua's own arithmetic error (and a numeric string, which Lua's
+  arithmetic coerces, is taken as its number); where the runtime makes
+  the call
+  (`LuaCatch`, `LuaIOCatch`, an iterator step, a host callback) it is
+  the decoder's `declared Number but the host returned nil`, which
+  refuses every non-number. A bare `Int`, `String` or `Bool` result is
+  not checked under any form.
+- **A wrong shape in a successful result is not a `Left`.** `Left` is
+  the host function's own failure — its `error` under `LuaCatch`/
+  `LuaIOCatch`, its `nil, message` under `LuaTry`. A result that does
+  not fit the declared type (a missing tuple value, a `nil` Number) is
+  an integration error and raises, under the guarded forms as under the
+  others.
 
 ## Passing mata-ll callbacks to FFI functions
 
@@ -996,7 +1073,8 @@ recursively, is:
     a table field holding `3` are Lua integers on 5.3+): a bare result
     is normalized at the call, a nested one (a list element, a tuple
     or `LuaDict` field, a map value, a `Maybe` payload, a `LuaTry`/
-    `LuaCatch` payload, an exported function's argument) by the decoder
+    `LuaCatch` payload, an iterator element, a host callback's result,
+    an exported function's argument) by the decoder
     — and for a validation-only record or tuple, which stays the host's
     own table, the normalized double is written back into that table's
     field, the one write the pass-through makes;
@@ -2363,7 +2441,9 @@ The following are known limitations of the current implementation:
   eagerly — lazy IO is not supported. Use `fileLines :: String -> IO
   [String]` from LIO for file reading. The `LuaIterator "f" [E]` type
   argument is always an explicit list naming the RESULT: it reduces to
-  `[E]` and the iterator yields one `E` per step, each decoded as the
-  element type. A bare (non-list) element type is rejected.
+  `[E]` and the iterator yields one `E` per step, each received as any
+  FFI result of type `E` is (a tuple `E` is the step's first n values,
+  any other `E` its first value). A bare (non-list) element type is
+  rejected.
 - No lazy IO. File and stream operations read eagerly into lists.
   For streaming, a conduit-style approach may be added in the future.

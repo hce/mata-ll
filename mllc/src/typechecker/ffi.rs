@@ -169,6 +169,43 @@ fn export_ffi_note(culprit: &Ty, dir: FfiDir) -> String {
     }
 }
 
+/// The type of what ONE host call hands back for an import of `ffi_kind`
+/// whose resolved result (the arrows peeled) is `res` — the type the
+/// result decoder is driven by, and the type whose top-level shape decides
+/// how many of the call's return values are consumed (`HostFn`):
+///
+///   * `LuaPure` / `LuaIO`: the result itself, under its `IO`;
+///   * `LuaTry` / `LuaCatch` / `LuaIOCatch`: the success payload — the `a`
+///     of `Either String a`, under its `IO`. The wrapper builds the
+///     `Left`/`Right` tags, so only `a` crosses. A result that is not the
+///     expected `Either` shape is returned whole, so validation still sees
+///     it rather than silently skipping it;
+///   * `LuaIterator`: one step's element — the `a` of the result list
+///     `[a]`.
+///
+/// Codegen peels the monomorphized type of a use the same way
+/// (`CodeGen::ffi_guarded_payload`, the `Iter` arm).
+pub(super) fn ffi_call_payload(ffi_kind: FfiKind, res: &Ty) -> &Ty {
+    let inner = match res {
+        Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
+        other => other,
+    };
+    match ffi_kind {
+        FfiKind::Pure | FfiKind::IO => inner,
+        FfiKind::Try | FfiKind::Catch | FfiKind::IOCatch => {
+            let (head, args) = decompose_ty_app(inner);
+            match head {
+                Some("Either") if args.len() == 2 => args[1],
+                _ => inner,
+            }
+        }
+        FfiKind::Iterator => match inner {
+            Ty::List(elem) => elem.as_ref(),
+            other => other,
+        },
+    }
+}
+
 /// Free type variables a callback carries through its argument and result
 /// *values*, excluding the phantom `LuaIO s` scope variable.
 pub(crate) fn callback_value_vars(cb_ty: &Ty) -> Vec<TyVar> {
@@ -224,7 +261,7 @@ impl Checker {
     /// Lua with. `ty` is the FINAL resolved type (the `LuaIO`/… wrappers already
     /// reduced to `IO`/the raw result), `ffi_kind` says which FFI form it is so
     /// the `Try`/`IOCatch` `Either String _` layer is peeled exactly as
-    /// codegen's `ffi_catch_decode_desc` does.
+    /// codegen's `ffi_guarded_payload` does.
     pub(super) fn validate_ffi_import_types(&mut self, name: &str, ffi_kind: FfiKind, ty: &Ty) {
         let mut t = ty;
         while let Ty::Forall(_, inner) = t { t = inner; }
@@ -245,30 +282,15 @@ impl Checker {
             }
         }
 
-        // The result crosses IN from Lua. For a plain Pure/IO import that is the
-        // whole result (its `IO` peeled here, so a bare `IO a` result validates
-        // `a`); for a Try/IOCatch import the `pcall` wrapper builds the
-        // `Either String _` tags itself, so only the inner payload is decoded —
-        // peel `IO`/`Either String` exactly like `ffi_catch_decode_desc`.
+        // The result crosses IN from Lua, and what is decoded is what one
+        // call hands back (`ffi_call_payload`): the whole result under its
+        // `IO` for a plain Pure/IO import, the inner payload for a
+        // Try/Catch/IOCatch import (the wrapper builds the `Either String _`
+        // tags itself). An iterator's result is validated as the list it
+        // is: the element rule is the list rule's own recursion.
         let payload = match ffi_kind {
-            FfiKind::Try | FfiKind::Catch | FfiKind::IOCatch => {
-                let inner = match res {
-                    Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
-                    other => other,
-                };
-                let (head, args) = decompose_ty_app(inner);
-                match head {
-                    Some("Either") if args.len() == 2 => args[1],
-                    // Not the expected `Either String a` shape: validate the
-                    // whole inner result rather than silently skipping it.
-                    _ => inner,
-                }
-            }
-            // A plain IO/LuaIO result: decode the yielded value.
-            _ => match res {
-                Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
-                other => other,
-            },
+            FfiKind::Iterator => res,
+            _ => ffi_call_payload(ffi_kind, res),
         };
         self.validate_boundary_positions(
             BoundaryKind::FfiImport, name, &arg_tys, payload, &opaque);

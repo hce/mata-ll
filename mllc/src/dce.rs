@@ -227,8 +227,6 @@ fn collect_expr(e: &TExpr, refs: &mut HashSet<String>) {
                 }
                 SpecKind::Host(_)
                 | SpecKind::Io(_)
-                | SpecKind::IoTup { .. }
-                | SpecKind::TupRet { .. }
                 | SpecKind::Iter(_)
                 | SpecKind::Try(_)
                 | SpecKind::Pcall(_)

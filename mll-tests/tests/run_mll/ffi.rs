@@ -654,9 +654,10 @@ main = do
 
 #[test]
 fn lua_iterator_multi_value_yields_pack_into_tuples() {
-    // Each iterator step's RESULTS decide the element shape: a single value
-    // is the element itself, several values pack into a tuple (a pairs-style
-    // `k, v` iterator is a `[(k, v)]`), and trailing nils do not count (a
+    // Each iterator step is a host call whose result is one element, and
+    // the DECLARED element type says how many of the step's values it
+    // takes: a tuple element takes them by arity (a pairs-style `k, v`
+    // iterator is a `[(k, v)]`), any other element takes the first (a
     // `k, nil` step is the single value k). Iteration ends on a first-value
     // nil, even when later values are non-nil (`nil, 5` is the end).
     let src = r#"
@@ -2804,4 +2805,279 @@ doit = print (runFirst 1 + readCfg 2)
 "#;
     compile(source, Path::new("."), &[])
         .expect("indexed-path and path:method FFI targets must pass validation");
+}
+
+// --- One result rule for every call form (HF1, HF3, Q37). The stdlib-only
+// --- case tests/cases/ffi_result_forms.mll covers the forms a standalone
+// --- program can reach on both hosts; the cells below need a host that
+// --- defines its own functions: a callback handed to an exported function,
+// --- and iterator steps yielding structured values.
+
+#[test]
+fn host_callback_results_cross_like_any_host_call() {
+    // A callback the host hands to an exported function is a host function
+    // mata-ll calls, so its result is received exactly as an import's is:
+    // one value decoded by the declared type, and a declared TUPLE result
+    // as the callback's return values, counted by arity — a missing value
+    // is reported against its element, extra values are dropped.
+    let source = r#"
+data Pt = Pt { px :: Int, py :: Number } deriving (Show, LuaDict)
+
+hmShow :: HashMap String Int -> String
+hmShow m = show (hmSize m, hmLookup "b" m)
+
+export cbInt :: forall s. (Int -> LuaIO s Int) -> LuaIO s String
+cbInt f = do
+    v <- f 1
+    pure (show v)
+
+export cbNum :: forall s. (Int -> LuaIO s Number) -> LuaIO s String
+cbNum f = do
+    v <- f 1
+    pure (show (v, v * 4611686018427387904))
+
+export cbMaybe :: forall s. (Int -> LuaIO s (Maybe Int)) -> LuaIO s String
+cbMaybe f = do
+    v <- f 1
+    pure (show v)
+
+export cbList :: forall s. (Int -> LuaIO s [Int]) -> LuaIO s String
+cbList f = do
+    v <- f 1
+    pure (show v)
+
+export cbPair :: forall s. (Int -> LuaIO s (Int, String)) -> LuaIO s String
+cbPair f = do
+    v <- f 1
+    pure (show v)
+
+export cbPairOpt :: forall s. (Int -> LuaIO s (Number, Maybe [Int])) -> LuaIO s String
+cbPairOpt f = do
+    v <- f 1
+    pure (show v)
+
+export cbNested :: forall s. (Int -> LuaIO s [(Int, String)]) -> LuaIO s String
+cbNested f = do
+    v <- f 1
+    pure (show v)
+
+export cbRecord :: forall s. (Int -> LuaIO s Pt) -> LuaIO s String
+cbRecord f = do
+    v <- f 1
+    pure (show v)
+
+export cbMap :: forall s. (Int -> LuaIO s (HashMap String Int)) -> LuaIO s String
+cbMap f = do
+    v <- f 1
+    pure (hmShow v)
+
+export cbUnit :: forall s. (Int -> LuaIO s ()) -> LuaIO s String
+cbUnit f = do
+    v <- f 1
+    pure (show v)
+
+main :: IO ()
+main = pure ()
+"#;
+    let (lua, module) = compile_ffi_module(source);
+    let call = |export: &str, callback: &str| -> Result<String, String> {
+        let f: mlua::Function = module.get(export).unwrap();
+        let cb = lua.load(callback).eval::<mlua::Function>().unwrap();
+        f.call::<String>(cb).map_err(|e| e.to_string())
+    };
+    let ok = |export: &str, callback: &str| -> String {
+        call(export, callback).unwrap_or_else(|e| panic!("{export} with `{callback}`: {e}"))
+    };
+
+    assert_eq!(ok("cbInt", "function(n) return n + 2 end"), "3");
+    // The host's integer 3 is the Number 3.0, and its arithmetic is a double's.
+    assert_eq!(ok("cbNum", "function(n) return n + 2 end"), "(3.0,1.3835058055282164e19)");
+    assert_eq!(ok("cbMaybe", "function(n) return n + 2 end"), "Just 3");
+    assert_eq!(ok("cbMaybe", "function(n) return nil end"), "Nothing");
+    assert_eq!(ok("cbList", "function(n) return {n, 2, 3} end"), "[1,2,3]");
+    // A declared tuple result is the callback's return VALUES.
+    assert_eq!(ok("cbPair", "function(n) return n, 'a' end"), "(1,\"a\")");
+    assert_eq!(ok("cbPair", "function(n) return n, 'a', 'dropped' end"), "(1,\"a\")");
+    assert_eq!(ok("cbPairOpt", "function(n) return n, {4, 5} end"), "(1.0,Just [4,5])");
+    assert_eq!(ok("cbPairOpt", "function(n) return n end"), "(1.0,Nothing)");
+    // A tuple NESTED in a structure is a positional table.
+    assert_eq!(ok("cbNested", "function(n) return {{n, 'a'}, {2, 'b'}} end"), "[(1,\"a\"),(2,\"b\")]");
+    assert_eq!(ok("cbRecord", "function(n) return {px = n, py = 2} end"), "Pt {px = 1, py = 2.0}");
+    assert_eq!(ok("cbMap", "function(n) return {a = n, b = 2} end"), "(2,Just 2)");
+    assert_eq!(ok("cbUnit", "function(n) end"), "()");
+
+    // A value the callback left out is reported against its element.
+    let e = call("cbPair", "function(n) return n end").unwrap_err();
+    assert!(e.contains("declared String but the host returned nil"), "got: {e}");
+    assert!(e.contains("element 2 of the tuple declared (Int, String)"), "got: {e}");
+    assert!(e.contains("in the result of a callback passed to the exported function 'cbPair'"), "got: {e}");
+    // One table is one value: it is the tuple's FIRST element, not the tuple.
+    let e = call("cbPair", "function(n) return {n, 'a'} end").unwrap_err();
+    assert!(e.contains("declared Int but the host returned a table value"), "got: {e}");
+    assert!(e.contains("element 1 of the tuple declared (Int, String)"), "got: {e}");
+    // A nil where a Number was declared is refused by the decoder, by name.
+    let e = call("cbNum", "function(n) return nil end").unwrap_err();
+    assert!(e.contains("declared Number but the host returned nil"), "got: {e}");
+}
+
+#[test]
+fn lua_iterator_steps_cross_like_any_host_call() {
+    // Each iterator step is a host call whose result is one element of the
+    // declared list, received exactly as an import's result is: a declared
+    // tuple element is the step's return values counted by arity (so a
+    // trailing nil is the tuple's Nothing, not a shorter element), any other
+    // element is the step's first value, decoded by its type.
+    let src = r#"
+data Pt = Pt { px :: Int, py :: Number } deriving (Show, LuaDict)
+
+opts   :: LuaIterator "host.opts" [(String, Maybe Int)]
+firsts :: LuaIterator "host.opts" [String]
+lists  :: LuaIterator "host.lists" [[Int]]
+recs   :: LuaIterator "host.recs" [Pt]
+maps   :: LuaIterator "host.maps" [HashMap String Int]
+nums   :: LuaIterator "host.nums" [Number]
+tables :: LuaIterator "host.tables" [(Int, String)]
+
+expect :: String -> String -> IO ()
+expect actual expected =
+    assert (actual == expected) ("expected " <> expected <> ", got " <> actual)
+
+main :: IO ()
+main = do
+    expect (show opts) "[(\"a\",Just 1),(\"b\",Nothing),(\"c\",Just 3)]"
+    expect (show firsts) "[\"a\",\"b\",\"c\"]"
+    expect (show lists) "[[1,2],[],[3]]"
+    expect (show recs) "[Pt {px = 1, py = 2.0},Pt {px = 3, py = 4.0}]"
+    expect (show (map (hmLookup "k") maps)) "[Just 1,Just 2]"
+    expect (show (map (\n -> n * 4611686018427387904) nums)) "[4.611686018427388e18,9.223372036854776e18]"
+    r <- try (putStrLn (show tables))
+    case r of
+        Left m -> putStrLn m
+        Right _ -> error "one table per step is one value, not a tuple's two"
+"#;
+    let lua_code = compile(src, Path::new("."), &[])
+        .expect("compile should succeed")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(
+        r#"
+        host = {}
+        local function steps(...)
+            local items, n = {...}, select('#', ...)
+            return function()
+                local i = 0
+                return function()
+                    i = i + 1
+                    if i > n then return nil end
+                    return items[i]()
+                end
+            end
+        end
+        host.opts = steps(
+            function() return "a", 1 end,
+            function() return "b", nil end,
+            function() return "c", 3, "dropped" end)
+        host.lists = steps(
+            function() return {1, 2} end,
+            function() return {} end,
+            function() return {3} end)
+        host.recs = steps(
+            function() return {px = 1, py = 2} end,
+            function() return {px = 3, py = 4} end)
+        host.maps = steps(
+            function() return {k = 1} end,
+            function() return {k = 2} end)
+        host.nums = steps(
+            function() return 1 end,
+            function() return 2 end)
+        host.tables = steps(function() return {1, "a"} end)
+        shown = {}
+        print = function(s) shown[#shown + 1] = s end
+        "#,
+    )
+    .exec()
+    .expect("define host iterator factories");
+    lua.load(&lua_code)
+        .set_name("iter_steps")
+        .exec()
+        .expect("every iterator element decodes by its declared type");
+    let message: String = lua.load("return table.concat(shown, '\\n')").eval().unwrap();
+    assert!(
+        message.contains("declared Int but the host returned a table value"),
+        "a table yielded for a tuple element must be refused as element 1: {message}"
+    );
+    assert!(message.contains("element 1 of the tuple declared (Int, String)"), "got: {message}");
+    assert!(message.contains("in the result of host.tables"), "got: {message}");
+}
+
+#[test]
+fn guarded_tuple_results_are_the_calls_return_values() {
+    // LuaTry / LuaCatch / LuaIOCatch receive a declared tuple payload as the
+    // call's return values, like LuaPure and LuaIO do — the wrappers used to
+    // keep ONE value and hand it to the tuple decoder ("declared (Number,
+    // Number) but the host returned the number 3"). A host that returns one
+    // table has returned one value: the tuple's first element.
+    let source = r#"
+pairC  :: Int -> LuaCatch "host.pair" (Either String (Int, String))
+pairIC :: Int -> LuaIOCatch "host.pair" (Either String (Int, String))
+pairT  :: Int -> LuaTry "host.pair" (Either String (Int, String))
+
+export viaCatch :: Int -> String
+viaCatch n = show (pairC n)
+
+export viaIOCatch :: Int -> IO String
+viaIOCatch n = do
+    r <- pairIC n
+    pure (show r)
+
+export viaTry :: Int -> IO String
+viaTry n = do
+    r <- pairT n
+    pure (show r)
+
+main :: IO ()
+main = pure ()
+"#;
+    let (lua, module) = compile_ffi_module(source);
+    lua.load(
+        r#"
+        host = {}
+        function host.pair(n)
+            if n == 0 then return 7, "seven" end
+            if n == 1 then return 7, "seven", "dropped" end
+            if n == 2 then error("raised", 0) end
+            if n == 3 then return nil, "refused" end
+            if n == 4 then return 7 end
+            return {7, "seven"}
+        end
+    "#,
+    )
+    .exec()
+    .unwrap();
+    for export in ["viaCatch", "viaIOCatch", "viaTry"] {
+        let f: mlua::Function = module.get(export).unwrap();
+        let ok = |n: i64| -> String {
+            f.call::<String>(n).unwrap_or_else(|e| panic!("{export} {n}: {e}"))
+        };
+        assert_eq!(ok(0), "Right (7,\"seven\")", "{export}");
+        assert_eq!(ok(1), "Right (7,\"seven\")", "{export}: values past the arity are dropped");
+        // A missing value and a wrong shape in a SUCCESSFUL result are host
+        // integration errors: they raise, they are not a Left.
+        let e = f.call::<String>(4).unwrap_err().to_string();
+        assert!(e.contains("declared String but the host returned nil"), "{export}: {e}");
+        assert!(e.contains("element 2 of the tuple declared (Int, String)"), "{export}: {e}");
+        assert!(e.contains("in the result of host.pair"), "{export}: {e}");
+        let e = f.call::<String>(5).unwrap_err().to_string();
+        assert!(e.contains("declared Int but the host returned a table value"), "{export}: {e}");
+        assert!(e.contains("element 1 of the tuple declared (Int, String)"), "{export}: {e}");
+    }
+    // The failure conventions are each form's own: a raise under pcall, a
+    // nil first value under LuaTry (where a raise is not caught).
+    let via_catch: mlua::Function = module.get("viaCatch").unwrap();
+    assert_eq!(via_catch.call::<String>(2).unwrap(), "Left \"raised\"");
+    let via_io_catch: mlua::Function = module.get("viaIOCatch").unwrap();
+    assert_eq!(via_io_catch.call::<String>(2).unwrap(), "Left \"raised\"");
+    let via_try: mlua::Function = module.get("viaTry").unwrap();
+    assert_eq!(via_try.call::<String>(3).unwrap(), "Left \"refused\"");
+    assert!(via_try.call::<String>(2).unwrap_err().to_string().contains("raised"));
 }

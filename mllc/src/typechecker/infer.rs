@@ -3640,36 +3640,21 @@ impl Checker {
             })
             .collect();
 
-        // A declared tuple result is Lua's multi-value return. `IO (a, b)`
-        // is `Ty::IO(Tuple)` — `Ty::app` normalizes `App(Con "IO", t)` to
-        // `Ty::IO(t)` and `Type::LuaIO` maps through `Ty::io`, so an
-        // `App(Con "IO", …)` arm here can never match (it once was the only
-        // IO arm, leaving every LuaIO tuple result on the single-value
-        // wrapper, which truncates the host call to its first value).
-        let tuple_arity = match &ret_ty {
-            Ty::Tuple(elems) => Some(elems.len()),
-            Ty::IO(inner) => match inner.as_ref() {
-                Ty::Tuple(elems) => Some(elems.len()),
-                _ => None,
-            },
-            _ => None,
-        };
+        // The declared shape of what ONE call hands back — the result with
+        // its form's wrappers peeled (`IO`, the `Either String _` of
+        // LuaTry/LuaCatch/LuaIOCatch, the list of a LuaIterator) — decides
+        // how many of the call's return values the result consumes: a
+        // top-level tuple is Lua's multi-value return, under EVERY form.
+        // Decided once, here, from the declaration (see `HostFn`).
+        let host = HostFn::declared(lua_name, super::ffi::ffi_call_payload(ffi_kind, &ret_ty));
 
         let specialized = match ffi_kind {
-            FfiKind::Iterator => SpecKind::Iter(lua_name.to_string()),
-            FfiKind::Try => SpecKind::Try(lua_name.to_string()),
-            FfiKind::Catch => SpecKind::Pcall(lua_name.to_string()),
-            FfiKind::IOCatch => SpecKind::IoPcall(lua_name.to_string()),
-            FfiKind::IO if tuple_arity.is_some() => SpecKind::IoTup {
-                arity: tuple_arity.unwrap(),
-                host: lua_name.to_string(),
-            },
-            FfiKind::IO => SpecKind::Io(lua_name.to_string()),
-            _ if tuple_arity.is_some() => SpecKind::TupRet {
-                arity: tuple_arity.unwrap(),
-                host: lua_name.to_string(),
-            },
-            _ => SpecKind::Host(lua_name.to_string()),
+            FfiKind::Iterator => SpecKind::Iter(host),
+            FfiKind::Try => SpecKind::Try(host),
+            FfiKind::Catch => SpecKind::Pcall(host),
+            FfiKind::IOCatch => SpecKind::IoPcall(host),
+            FfiKind::IO => SpecKind::Io(host),
+            FfiKind::Pure => SpecKind::Host(host),
         };
 
         let body = TExpr::new(

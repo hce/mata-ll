@@ -1259,7 +1259,19 @@ depth.
     inside a structure is read from a positional table.
   \item A \emph{top-level} tuple result is the one exception to
     ``tables in, tables out'': it is received as Lua's multiple return
-    values (\texttt{return a, b}), not as a single table.
+    values (\texttt{return a, b}), not as a single table.  The call's
+    first $n$ values are the tuple's $n$ elements; a value the host left
+    out is \texttt{nil} in its slot (\texttt{Nothing} for a
+    \texttt{Maybe} element) and values past the $n$-th are dropped.
+    This holds wherever a host function's call result is received: the
+    payload of a \texttt{LuaTry}, \texttt{LuaCatch} or
+    \texttt{LuaIOCatch} result (\texttt{LuaCatch "math.modf" (Either
+    String (Number, Number))}), one step of a \texttt{LuaIterator}
+    (a \texttt{pairs}-style step yielding \texttt{k, v} is a
+    \texttt{(k, v)}), the result of a callback the host hands to an
+    exported function, and the \texttt{:method} spelling of each.  A
+    constant is read, not called, so a tuple constant is a positional
+    table.
   \item A \texttt{HashMap k v} is read from a keyed table; each value
     is decoded by \texttt{v}.  Keys are validated against \texttt{k}
     (string vs.\ numeric) but kept as they are --- the argument
@@ -1351,7 +1363,15 @@ counter :: LuaIterator "count" [Int]
 
 -- host yields Lua arrays of ints -> a list of lists
 rows :: LuaIterator "rows" [[Int]]
+
+-- host yields two values per step -> a list of pairs
+kvs :: LuaIterator "kvs" [(Int, String)]
 \end{lstlisting}
+
+Each step is a host call, and its result is received as any FFI result
+of the element type is: a tuple element takes the step's first $n$
+values, any other element takes the first (further values are dropped).
+A step whose first value is \texttt{nil} ends the list.
 
 The result is always written as an explicit list. A bare element type
 (\texttt{LuaIterator "string.gmatch" String}) is rejected: because a
@@ -1453,7 +1473,10 @@ readAll :: Handle -> LuaIOCatch ":read" (Either String String)
 \texttt{LuaIOCatch "name" (Either String T)} reduces to
 \texttt{IO (Either String T)}.  The result \emph{must} be written as
 \texttt{Either String a} --- the compiler rejects any other shape.  The
-success payload is marshalled as usual, inside the \texttt{Right}:
+success payload is received exactly as a \texttt{LuaPure} result of
+that type is (a tuple payload is the call's return values, structure is
+decoded; see \emph{Receiving Values from Lua}), inside the
+\texttt{Right}:
 
 \begin{lstlisting}
 main :: IO ()

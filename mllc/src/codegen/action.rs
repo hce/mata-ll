@@ -31,8 +31,8 @@ enum ActionShape<'a> {
     Value,
     PlainValue,
     MaybeAction,
-    HostCall { host: &'a String, args: &'a [TExpr] },
-    HostTry { host: &'a String, args: &'a [TExpr] },
+    HostCall { host: &'a HostFn, args: &'a [TExpr] },
+    HostTry { host: &'a HostFn, args: &'a [TExpr] },
     Fused { fused: &'static str, head: &'a TExpr, args: Vec<&'a TExpr> },
     Runner,
 }
@@ -298,35 +298,14 @@ impl CodeGen {
                 let e = self.expr_ast(expr);
                 Expr::call_named(runner, vec![e])
             }
-            // IO SpecCall: inline the Lua call directly (skip closure)
+            // IO SpecCall: inline the Lua call directly (skip closure). The
+            // host's raw Lua result (arrays, dicts, nested records, the n
+            // return values of a declared tuple) is converted into the
+            // mata-ll representation before it reaches mata-ll code, by
+            // the decision every FFI form shares (`ffi_result`).
             ActionShape::HostCall { host, args } => {
-                let lua_func = host.as_str();
-                // Type-directed decode of the FFI result: the host's raw Lua
-                // value (arrays, dicts, nested records) is converted into the
-                // mata-ll representation before it reaches mata-ll code.
-                let decode = self.ffi_decode_desc(&expr.ty);
-                let call = if let Some(method) = lua_func.strip_prefix(':') {
-                    let recv = self.forced_prefix_ast(&args[0]);
-                    let margs = self.ffi_args_ast(&args[1..]);
-                    Expr::method(recv, method, margs)
-                } else {
-                    let cargs = self.ffi_args_ast(args);
-                    Expr::call_named(lua_func, cargs)
-                };
-                match &decode {
-                    Some(desc) => Expr::call_named(
-                        "__mll_ffi_decode",
-                        vec![
-                            Expr::raw(desc.clone()),
-                            call,
-                            Expr::raw(format!("{:?}", Self::ffi_root_name(lua_func))),
-                        ],
-                    ),
-                    // The declared result is ONE value: truncate the raw
-                    // host call so extra return values cannot spread; a bare
-                    // Number result is normalized to the float subtype.
-                    None => Self::ffi_number_result_ast(&expr.ty, Expr::paren(call)),
-                }
+                let (res, call) = self.ffi_host_call(host, args, &expr.ty);
+                Self::ffi_result_ast(&res, call)
             }
             ActionShape::HostTry { host, args } => self.ffi_try_call_ast(host, args, &expr.ty),
             // Fully-applied ST intrinsic in run-once position: emit the

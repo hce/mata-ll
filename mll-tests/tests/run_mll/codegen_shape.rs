@@ -245,7 +245,7 @@ fn ffi_wrapper_keeps_truncating_paren() {
         .expect("ffi probe must compile")
         .lua_code;
     // The probe's result is a Number, which the boundary normalizes to the
-    // float subtype (`* 1.0`, see ffi_number_result_ast): the truncating
+    // float subtype (`* 1.0`, see ffi_result_inline): the truncating
     // paren sits around the raw host call, as the multiply's operand.
     assert!(
         lua.contains("return (math.modf(__ffi0)) * 1.0"),
@@ -264,6 +264,41 @@ fn ffi_wrapper_keeps_truncating_paren() {
         lua2.contains("((math.modf(3.75)) * 1.0)"),
         "spliced FFI call must keep the truncating paren around the raw host call: {lua2}"
     );
+}
+
+/// The `:method` spelling of an FFI call is the same call form as the
+/// function spelling, so it takes the same result path (HF1, Q37): a bare
+/// scalar result is the truncated call with no decoder around it, a bare
+/// Number result is that call times 1.0, and a result with structure goes
+/// through `__mll_ffi_decode` — which the method arm used to skip, handing
+/// a raw host number to code expecting a tagged `Just`. The guarded forms'
+/// runtime helper receives the same decision as its leading arguments
+/// (`false, false` = one value, no decoding).
+#[test]
+fn ffi_method_form_takes_the_shared_result_path() {
+    let dir = Path::new("tests/cases");
+    let source = "slen :: String -> LuaPure \":len\" Int\n\
+                  slenN :: String -> LuaPure \":len\" Number\n\
+                  sfind :: String -> String -> LuaPure \":find\" (Maybe Int)\n\
+                  span2 :: String -> String -> LuaPure \":find\" (Int, Int)\n\
+                  charOf :: Int -> LuaCatch \"string.char\" (Either String String)\n\
+                  main :: IO ()\n\
+                  main = do\n\
+                  \x20   let s = \"hello\"\n\
+                  \x20   print (slen s, slenN s, sfind s \"l\", span2 s \"l\")\n\
+                  \x20   print (charOf (slen s))\n";
+    let lua = compile(source, dir, &[])
+        .expect("ffi probe must compile")
+        .lua_code;
+    for expected in [
+        "return (__ffi0:len())\n",
+        "return (__ffi0:len()) * 1.0\n",
+        "return __mll_ffi_decode({k=\"maybe\",t=\"Maybe Int\",e={k=\"chk\",t=\"Int\",lt=\"number\",w=\"the payload of the declared Maybe Int\"}}, __ffi0:find(__ffi1), \"in the result of the :find method call\")\n",
+        "local _r0, _r1 = __ffi0:find(__ffi1)\n",
+        "return __mll_pcall(false, false, \"in the result of string.char\", string.char, __ffi0)\n",
+    ] {
+        assert!(lua.contains(expected), "expected `{expected}` in: {lua}");
+    }
 }
 
 /// Where-bound function-group names hold Lua function values from their

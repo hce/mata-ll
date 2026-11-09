@@ -8042,3 +8042,25 @@ main = print (succ T)
 "#;
     expect_compile_error(source, &[], &["No instance for 'Enum T'", "at 5:6,", "5 | main = print (succ T)"]);
 }
+
+/// The guarded FFI forms build their `Either` themselves, so their declared
+/// result is always `Either String a` and what crosses the boundary is the
+/// `a` — the one peel the result decision makes for them (the declared
+/// arity of `a` counts the call's return values; `a`'s type drives the
+/// decoder). A result written any other way has no payload to peel and
+/// stays rejected, under all three forms, as a tuple-shaped result does.
+#[test]
+fn guarded_ffi_result_must_be_written_as_either() {
+    let tail = "main :: IO ()\nmain = pure ()\n";
+    for (form, why) in [
+        ("LuaCatch", "so a raised Lua `error(...)` can be returned as `Left`"),
+        ("LuaIOCatch", "so a raised Lua `error(...)` can be returned as `Left`"),
+        ("LuaTry", "so a Lua `(val, err)` failure can be returned as `Left`"),
+    ] {
+        for result in ["String", "(Number, Number)", "(Maybe Int)"] {
+            let source = format!("f :: Number -> {form} \"math.modf\" {result}\n{tail}");
+            let needle = format!("{form} requires the result to be written as `(Either String a)`, {why}");
+            expect_compile_error(&source, &[], &[&needle]);
+        }
+    }
+}

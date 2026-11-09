@@ -70,6 +70,7 @@ excluded_reason() {
         cases/exitvalue_prelude)         echo "ExitValue/exit (Lua process control)";;
         cases/ffi)                       echo "FFI declarations";;
         cases/ffi_multi_return)          echo "LuaPure FFI declarations (math.modf multi-return)";;
+        cases/ffi_result_forms)          echo "FFI declarations of every call form (LuaPure/LuaIO/LuaTry/LuaCatch/LuaIOCatch/LuaIterator, :method, constant reads): host results have no GHC twin";;
         cases/ffi_constructed_values)    echo "FFI declarations";;
         cases/ffi_maybe_args)            echo "FFI declarations";;
         cases/ffi_action_values)         echo "FFI declarations";;

@@ -455,9 +455,11 @@ constant folding (§7) can then recognize them.
   - the FFI boundary: `ffi_decode_desc_inner` gives a `Number` leaf the
     `num` descriptor (checked and normalized by `__mll_ffi_decode`, and
     written back into a validation-only record/tuple so the host's table
-    holds the double); a BARE `Number` result is `(call) * 1.0` inline at
-    every result site (`ffi_number_result_ast`: pure/IO/method calls and
-    `Const` reads) — one multiply, no decoder call on the `sqrt` path.
+    holds the double); a BARE `Number` result is `(call) * 1.0` inline
+    wherever the compiled code holds the host value (`ffi_result_inline`:
+    pure/IO calls in either spelling and `Const` reads) — one multiply, no
+    decoder call on the `sqrt` path — and the `num` descriptor where a
+    runtime helper makes the call (see the FFI bullet under Codegen).
     The arg direction needs nothing (a Number leaving is a double);
   - the HashMap Number flavor above (keys enumerate as doubles);
   - lib/JSON.mll: `JNum` is a double, integer syntax and Ints beyond 2^53
@@ -809,6 +811,42 @@ Responsibilities beyond the obvious translation:
   no parse", 0)`.
 - **FFI:** `LuaPure`/`LuaIO` bindings become direct Lua calls; method-call FFI
   (`":write"`) becomes `handle:write(...)`.
+  **A host result has one path, shared by every call form** (SPEC "FFI
+  results: one rule for every call form"). The typechecker records with
+  each import the declared result count of ONE call (`HostFn::tuple` in
+  tir.rs, computed by `HostFn::declared` over `ffi_call_payload`: the
+  result under its `IO`, the `a` of a guarded form's `Either String a`,
+  the element of an iterator's list) — `Some(n)` for a top-level n-tuple,
+  which is Lua's multiple return values. It is taken from the declaration
+  because a declared type variable instantiated at a tuple (a fold's
+  threaded state) is one opaque value. The six host-call `SpecKind`s
+  (`Host`, `Io`, `Try`, `Pcall`, `IoPcall`, `Iter`) all carry that
+  `HostFn`; there is no separate tuple-returning kind. In codegen,
+  `ffi_result(payload, tuple, root)` (codegen/ffi.rs) is the only place a
+  result's shape is decided: take n values or one, then the payload
+  type's decode descriptor (`ffi_decode_desc_inner`; `None` for a scalar
+  or opaque value). The decision has two renderings and no third:
+  - inline, where the compiled code holds the host value
+    (`ffi_result_inline`, as an expression `ffi_result_ast` or an action
+    closure `ffi_result_action_ast`): `LuaPure` and `LuaIO` in value and
+    run position, in the function and the `:method` spelling
+    (`ffi_host_call`), and `Const` reads. A tuple is `local _r0, _r1 =
+    call` and a table constructor; a bare `Number` is `(call) * 1.0`;
+    structure is `__mll_ffi_decode(desc, call, root)`; a bare scalar is
+    the truncated `(call)` with nothing around it (the hot path — pinned
+    by `ffi_wrapper_keeps_truncating_paren` and
+    `ffi_method_form_takes_the_shared_result_path`);
+  - as the leading `n, desc, root` arguments (`ffi_result_args`) of the
+    runtime helper that makes the call — `__mll_try`, `__mll_pcall`,
+    `__mll_iter`, `__mll_wrap_callback_in` — each of which hands them,
+    with the call's values, to `__mll_ffi_ret`, the runtime's one result
+    function (pack the first n values or take the first, then
+    `__mll_ffi_decode`).
+  A new call form asks `ffi_result` and picks a rendering; it has no
+  decode logic of its own. The method spelling skipping the decoder, a
+  method-spelled tuple result emitting `:find(…)` with no receiver, and
+  the guarded wrappers keeping one return value were three arms that had
+  each re-derived this decision and missed a case.
 - **IO:** an action-typed expression in a value position compiles to an
   action value and performs nothing; a runner (`__mll_run`,
   `__mll_run_tail`) performs it. A single-clause IO function is emitted as

@@ -393,6 +393,14 @@ runtime crash. To capture it instead:
 - Wrapping a `LuaIO` call in **`try`** also catches errors as
   `IO (Either String a)`.
 
+Under all three FFI forms the success payload `a` is received exactly as
+a `LuaPure`/`LuaIO` result of type `a` is: a tuple payload is the call's
+return values counted by arity (`LuaCatch "math.modf" (Either String
+(Number, Number))`), structure is decoded by its type. A successful
+result of the wrong shape — a missing tuple value, a `nil` where a
+`Number` was declared — raises; `Left` is only the host function's own
+failure. See the SPEC's "FFI results: one rule for every call form".
+
 ## The module-header export list does not export to Lua
 
 `module M (addup) where` looks like it publishes `addup`, and inside

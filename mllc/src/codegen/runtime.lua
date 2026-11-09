@@ -553,6 +553,35 @@ local function __mll_ffi_decode(desc, v, root, dir)
     return v
 end
 
+-- The results of ONE host call as the one mata-ll value its declared type
+-- names — the result rule of the FFI boundary for every form where the
+-- runtime makes the call itself (LuaTry, LuaCatch/LuaIOCatch, a LuaIterator
+-- step, a host callback handed to an exported function). `n`, `desc`, `root`
+-- are the compiler's result decision (ffi_result in codegen/ffi.rs), `...`
+-- the call's return values:
+--   n      a number: the declared result is a top-level n-tuple, received
+--          as Lua's multiple return values — the first n are packed into
+--          one tuple table (a missing value is a nil slot, which the
+--          decoder reports against the element's declared type; values
+--          past the n-th are dropped). false: the result is one value, the
+--          call's first.
+--   desc   the decode descriptor of that value (see __mll_ffi_decode);
+--          false passes it through.
+--   root   the location phrase for decode errors.
+-- A direct LuaPure/LuaIO call emits the same two steps inline (n locals
+-- and a table constructor, then the same decoder call).
+local function __mll_ffi_ret(n, desc, root, ...)
+    local v
+    if n then
+        v = {...}
+        for i = select('#', ...), n + 1, -1 do v[i] = nil end
+    else
+        v = (...)
+    end
+    if desc then return __mll_ffi_decode(desc, v, root) end
+    return v
+end
+
 -- Type-directed marshalling of an mata-ll value crossing the FFI boundary in
 -- the ARGUMENT direction — the dual of __mll_ffi_decode. `d` is the descriptor
 -- built from the declared FFI argument type by ffi_arg_marshal_desc; it names
@@ -841,19 +870,18 @@ end
 -- functions, where the declared type is known. Each of the n arguments
 -- crosses mata-ll→Lua and is marshalled by its declared type (out_descs[i]:
 -- an argument-marshal descriptor, or false to shallow-force an opaque/scalar
--- value); the host's result crosses Lua→mata-ll and is decoded by the
--- declared result type (ret_desc: an FFI decode descriptor, or false to pass
--- the raw value through). `root` locates decode errors.
-__mll_wrap_callback_in = function(f, n, out_descs, ret_desc, root)
+-- value); the host's results cross Lua→mata-ll as every host call's do
+-- (__mll_ffi_ret with the declared result type's decision: ret_n the count
+-- of a declared tuple result or false, ret_desc an FFI decode descriptor or
+-- false to pass the raw value through, `root` locating decode errors).
+__mll_wrap_callback_in = function(f, n, out_descs, ret_n, ret_desc, root)
     return function(...)
         local args = {...}
         for i = 1, n do
             local d = out_descs[i]
             if d then args[i] = __mll_arg_marshal(args[i], d) else args[i] = __force(args[i]) end
         end
-        local r = f(__unpack(args, 1, n))
-        if ret_desc then r = __mll_ffi_decode(ret_desc, r, root) end
-        return r
+        return __mll_ffi_ret(ret_n, ret_desc, root, f(__unpack(args, 1, n)))
     end
 end
 
@@ -2650,34 +2678,38 @@ local function __mll_show_list(elem_show, xs)
 end
 
 -- Lua error convention wrapper: converts (val, err) to Either String a.
--- Success: Right (decoded val), Failure: Left errmsg. `desc` is the FFI decode
--- descriptor for the success payload (false = pass through) and `root` the
--- location phrase for decode error messages — a structured success value (a
--- list, a record) crosses the FFI boundary here exactly like any other FFI
--- result and must be decoded the same way. The error value is tostring'd:
--- hosts may signal failure with a non-string error object, while Left is
--- declared String.
-local function __mll_try(desc, root, val, err)
+-- Success: Right (decoded result), Failure: Left errmsg. `...` are the host
+-- call's return values. A first value of nil is the failure, the second
+-- value its message; the error value is tostring'd: hosts may signal failure
+-- with a non-string error object, while Left is declared String. Any other
+-- first value is success, and the SUCCESS payload crosses the FFI boundary
+-- exactly like any other FFI result (__mll_ffi_ret with the payload type's
+-- decision `n`, `desc`, `root`): a declared tuple is the call's first n
+-- values, a structured value (a list, a record) is decoded.
+local function __mll_try(n, desc, root, ...)
+    local val, err = ...
     if val == nil then
         if err == nil then return {1, "unknown error"} end
         return {1, tostring(err)}
     end
-    if desc then val = __mll_ffi_decode(desc, val, root) end
-    return {2, val}
+    return {2, __mll_ffi_ret(n, desc, root, ...)}
 end
 -- LuaCatch/LuaIOCatch: run a Lua function under pcall, returning Either String a.
--- Success: Right (decoded), Failure: Left errmsg. `desc` is the FFI decode
--- descriptor for the success payload (false = pass through) and `root` the
--- Lua-side function name for decode error messages. tostring() because
--- error() can raise non-string values, while Left is declared String. Arguments
--- are already forced by the caller (outside pcall) so only the Lua function's
--- own error() is captured — a shape mismatch in the *successful* result is a
--- host-integration bug and still raises, it does not become a Left.
-local function __mll_pcall(desc, root, f, ...)
-    local ok, res = pcall(f, ...)
-    if not ok then return {1, tostring(res)} end
-    if desc then res = __mll_ffi_decode(desc, res, root) end
-    return {2, res}
+-- Success: Right (decoded result), Failure: Left errmsg. The success payload
+-- is everything the function returned, received exactly like any other FFI
+-- result (__mll_ffi_ret with the payload type's decision `n`, `desc`,
+-- `root`): a declared tuple is the function's first n return values.
+-- tostring() because error() can raise non-string values, while Left is
+-- declared String. Arguments are already forced by the caller (outside
+-- pcall) so only the Lua function's own error() is captured — a shape
+-- mismatch in the *successful* result is a host-integration bug and still
+-- raises, it does not become a Left.
+local function __mll_pcall_ret(n, desc, root, ok, ...)
+    if not ok then return {1, tostring((...))} end
+    return {2, __mll_ffi_ret(n, desc, root, ...)}
+end
+local function __mll_pcall(n, desc, root, f, ...)
+    return __mll_pcall_ret(n, desc, root, pcall(f, ...))
 end
 -- Exception handling: `try` and `catch` are ordinary first-class functions
 -- over ACTION VALUES. Their action argument arrives under the plain lazy
@@ -2713,28 +2745,23 @@ local function catch_(action, handler)
 end
 
 -- Iterator-to-lazy-list: calls a Lua iterator factory and builds a lazy MLL list.
--- Single-value iterators produce a flat list; multi-value iterators pack into tuples.
--- `decode_desc` (may be nil) is the type-directed decoder for the ELEMENT type:
--- each yielded value crosses the FFI boundary and is decoded exactly as an
--- ordinary FFI result is (a list element -> cons list, a Maybe -> Just/Nothing,
--- a mismatched shape -> a clear localized error). nil means the element already
--- matches the mata-ll representation (a scalar/opaque element) -- pass it raw.
-local function __mll_iter(factory, decode_desc, root, ...)
+-- Each iterator step is a host call whose results are ONE element, received
+-- exactly like any other FFI result (__mll_ffi_ret with the ELEMENT type's
+-- decision `n`, `desc`, `root`): an element declared as a tuple is the
+-- step's first n values (a pairs-style `k, v` step is a `(k, v)`), any
+-- other element is the step's first value, and the value is decoded by its
+-- descriptor (a list element -> cons list, a Maybe -> Just/Nothing, a
+-- mismatched shape -> a clear localized error). A step whose first value is
+-- nil ends the list, whatever follows it (`nil, 5` is the end).
+local function __mll_iter(factory, n, desc, root, ...)
     local iter = factory(...)
     local go
     -- `step` receives one iterator call's results as varargs, so a
-    -- single-value iterator (the common case) allocates nothing per element;
-    -- only a genuine multi-value yield is packed into a tuple table.
-    -- Trailing nils are ignored, as `#{iter()}` did: a yield of `k, nil` is
-    -- the single value k.
+    -- single-value element (the common case) allocates nothing per element;
+    -- only a declared tuple element is packed into a table.
     local function step(...)
-        local n = select('#', ...)
-        while n > 0 and select(n, ...) == nil do n = n - 1 end
-        if n == 0 or (...) == nil then return nil end
-        local val
-        if n == 1 then val = (...) else val = {...} end
-        if decode_desc ~= nil then val = __mll_ffi_decode(decode_desc, val, root) end
-        return __mll_lazy_cons(val, go)
+        if (...) == nil then return nil end
+        return __mll_lazy_cons(__mll_ffi_ret(n, desc, root, ...), go)
     end
     go = function() return step(iter()) end
     return go()

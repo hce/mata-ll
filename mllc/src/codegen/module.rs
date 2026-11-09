@@ -683,21 +683,23 @@ impl CodeGen {
                                 }
                             })
                             .collect();
-                        let produced = match cb_ret {
-                            Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
-                            other => other,
-                        };
-                        let ret_desc = self
-                            .ffi_decode_desc_inner(produced, &mut Vec::new(), None)
-                            .map(|d| d.0)
-                            .unwrap_or_else(|| "false".into());
+                        // The callback is a host function mata-ll calls:
+                        // its result is received by the decision every
+                        // host call's result is (`ffi_result`), counted by
+                        // the callback's declared result type — an
+                        // export's signature is monomorphic, so the type
+                        // here IS the declaration.
+                        let produced = Self::ffi_payload(cb_ret);
                         let root = format!(
                             "in the result of a callback passed to the exported function '{}'",
                             host
                         );
+                        let [ret_n, ret_desc, root] = self
+                            .ffi_result(produced, HostFn::tuple_arity(produced), root)
+                            .runtime_args();
                         body.push(Stmt::Raw(format!(
-                            "if type({arg}) == \"function\" then {arg} = __mll_wrap_callback_in({arg}, {}, {{{}}}, {}, {:?}) end",
-                            cb_args.len(), out_descs.join(", "), ret_desc, root)));
+                            "if type({arg}) == \"function\" then {arg} = __mll_wrap_callback_in({arg}, {}, {{{}}}, {}, {}, {}) end",
+                            cb_args.len(), out_descs.join(", "), ret_n, ret_desc, root)));
                     } else if let Some((desc, _)) =
                         self.ffi_decode_desc_inner(ty, &mut Vec::new(), None)
                     {

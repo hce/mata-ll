@@ -250,7 +250,7 @@ struct CodeGen {
     luadict_field_key: std::collections::HashMap<String, String>,
     /// LuaDict data types keyed by *type* name: (type_vars, [(field_name,
     /// field_ty)]). Used to build type-directed decoders for values that cross
-    /// the Lua FFI boundary (see ffi_decode_desc).
+    /// the Lua FFI boundary (see ffi_decode_desc_inner).
     luadict_type_fields: LuaDictTypeFields,
     /// LuaDict *enum* constructors (an all-nullary sum type deriving LuaDict):
     /// TIR constructor name -> the Lua string tag it becomes at runtime (the
