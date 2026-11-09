@@ -39,6 +39,34 @@ data Either a b = Left a | Right b
 data Ordering = LT | EQ | GT
     deriving (Show, Eq, Ord, Enum, Bounded)
 
+-- Eq and Ord for the map type — and so for Data.Map's Map and Data.Set's
+-- Set, which are aliases of it — are containers' instances
+-- (Data.Map.Internal / Data.Set.Internal), with containers' contexts.
+-- In the library's classic formulation (later versions walk the two
+-- trees with an iterator and compute the same answers, the size test
+-- included):
+--     instance (Eq k, Eq a) => Eq (Map k a) where
+--         t1 == t2 = (size t1 == size t2) && (toAscList t1 == toAscList t2)
+--     instance (Ord k, Ord v) => Ord (Map k v) where
+--         compare m1 m2 = compare (toAscList m1) (toAscList m2)
+-- hmToList IS toAscList: it enumerates in ascending key order — the key
+-- type's own `compare` (scalar keys sort natively, a structural key by
+-- the compare every write stamps on the map) — so two maps holding the
+-- same entries are equal whatever order they were built in,
+-- and the order between maps is the lexicographic order of their ascending
+-- entry lists — a proper prefix is smaller, the empty map smallest. The
+-- size test comes first as in containers: maps of different sizes are
+-- unequal without one entry being compared. `compare` is the only Ord
+-- method defined, as in containers; `<`, `<=`, `>`, `>=`, `max` and `min`
+-- are the class defaults over it. A Set is a map to True, so its entry
+-- list compares exactly as its element list does (containers' Set
+-- instances are the same two definitions over the elements).
+instance (Eq k, Eq v) => Eq (HashMap k v) where
+    a == b = hmSize a == hmSize b && hmToList a == hmToList b
+
+instance (Ord k, Ord v) => Ord (HashMap k v) where
+    compare a b = compare (hmToList a) (hmToList b)
+
 -- Identity and combinators
 id :: a -> a
 id x = x

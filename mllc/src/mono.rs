@@ -19,19 +19,6 @@ use crate::types::{Diagnostic, DiagnosticKind, InstHead, Ty, TyVar, TyConstraint
 /// its shared generic copy.
 const SPEC_LIMIT: usize = 16;
 
-/// The message and optional note of a "No instance" error. The note carries a
-/// mata-ll-specific hint when the (method, type) pair is a known
-/// GHC-vs-mata-ll divergence.
-fn no_instance_parts(method: &str, ty: &Ty) -> (String, Option<&'static str>) {
-    let msg = format!("No instance for '{}' on type '{}'", method, ty);
-    let hint = match method {
-        ">" | "<" | ">=" | "<=" | "compare" | "max" | "min" if matches!(ty, Ty::Tuple(_)) =>
-            Some("tuples have no Ord instance in mata-ll; compare their components individually"),
-        _ => None,
-    };
-    (msg, hint)
-}
-
 /// A specialization demand: function name + the concrete type it is
 /// instantiated at. Keyed on the structured type — never its Display string —
 /// so two distinct types can never collide into one specialization.
@@ -2234,8 +2221,8 @@ impl Monomorphizer {
     /// says so, so the reader is sent to the declaration rather than
     /// hunting for an instance that exists.
     fn push_no_instance(&mut self, method: &str, ty: &Ty) {
-        let (msg, hint) = no_instance_parts(method, ty);
-        let mut notes: Vec<String> = hint.map(str::to_string).into_iter().collect();
+        let msg = format!("No instance for '{}' on type '{}'", method, ty);
+        let mut notes: Vec<String> = Vec::new();
         if let Some(class) = self.method_to_class.get(method)
             && let Some(head) = InstHead::of(ty)
             && let Some(inst) = self.instances.get(&(class.clone(), head))

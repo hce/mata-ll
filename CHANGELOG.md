@@ -44,6 +44,57 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **`Data.Map`'s `Map` and `Data.Set`'s `Set` have `Eq` and `Ord`, as
+  containers defines them; a "No instance" error no longer says that
+  tuples, lists and `Maybe` have no `Ord`.** `compare a b` on two `M.Map
+  Int String` was rejected with `No instance for 'Ord (HashMap Int
+  String)'` and the note "mata-ll has no Ord instance for tuples, lists,
+  or Maybe; compare their components individually" — and `a == b` with
+  `No instance for 'Eq (HashMap Int String)'`, so a map could not be
+  compared, sorted, searched for with `elem`, or be a field of a type
+  that derives `Eq`. The note was false twice over: `Ord` IS structural
+  over tuples, lists and `Maybe` (GHC's lexicographic order), and the
+  type it was printed for was a map. containers has both instances —
+  `(Eq k, Eq a) => Eq (Map k a)`: the same size and the same ascending
+  entry list; `(Ord k, Ord v) => Ord (Map k v)`: `compare` of the
+  ascending entry lists, the other six methods the class defaults over it
+  — and so does mata-ll now, as two ordinary `instance` declarations in
+  the Prelude over the primitive map type (`Map` and `Set` are aliases of
+  it): `a == b = hmSize a == hmSize b && hmToList a == hmToList b` and
+  `compare a b = compare (hmToList a) (hmToList b)`. `hmToList` is
+  `toAscList` — every map carries its key order, the key type's own
+  `compare` — so two maps with the same entries are equal whatever order
+  they were built in or whichever version of one persistent store they
+  are, a proper prefix is smaller, and the empty map is the smallest; the
+  size test comes first, as in containers, so maps of different sizes are
+  unequal without an entry being compared. A `Set` is a map to `True`,
+  and its entry list compares as its element list does. Being ordinary
+  instances with a context, they work wherever instances do: specialized
+  at a concrete map type, through a dictionary (a class-polymorphic
+  function past the specialization limit, an existential — where the
+  instance is composed from the hidden key and value dictionaries), under
+  lists, tuples, `Maybe`, `Either` and other maps, and in `deriving (Eq,
+  Ord)` of a type with map fields; `sort`, `maximum`, `elem`, `lookup`
+  over maps follow. What stays rejected is what GHC rejects — a key or
+  value type without the class (`Ord (HashMap Int E)` "needs 'Ord E', and
+  there is no instance 'Ord E'"), a polymorphic key or value the
+  signature does not constrain — plus one documented deviation: a map or
+  set is still not a KEY type (`Set (Set Int)`), keys being the
+  `Hashable` types. The stale note is gone for every type it fired on (a
+  list, a tuple, a `Maybe`, an `Either`, a map, a user type); in its
+  place a failed instance says which demand failed, for the structural
+  rule as it already did for an instance context and for every structural
+  class alike: `No instance for 'Ord [(Int, E)]'` — "'Ord [(Int, E)]'
+  needs 'Ord (Int, E)'; 'Ord (Int, E)' needs 'Ord E', and there is no
+  instance 'Ord E'" (`context_failure_note` walks the structural demands
+  of `entail_step` too). The monomorphizer's "No instance for '<' on type
+  …" carried the same stale claim for tuples ("tuples have no Ord
+  instance in mata-ll"); that hint is removed. (H8, Q32. GHC-goldened
+  case `map_set_eq_ord`; rejections pinned in
+  `map_eq_and_ord_need_the_element_instances`,
+  `no_instance_note_names_the_component_that_lacks_it` and
+  `map_and_set_are_not_key_types`.)
+
 - **Every `STArray` access is bounds-checked, as GHC's is: an index
   outside `0 .. n-1` raises `Ix{Int}.index: Index (i) out of range
   ((0,n-1))`.** `runST (do arr <- newSTArray 3 7; writeSTArray arr 5 1; x

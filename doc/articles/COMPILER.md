@@ -235,7 +235,22 @@ Order matters because later passes depend on earlier registrations:
   superclass check: a deferred variable is satisfied only by the
   instance's context or a superclass of a context class, since nothing
   discharges it later), `collect_required_var_constraints` and
-  `context_failure_note` are all thin walks over it.
+  `context_failure_note` are all thin walks over it. The last is the
+  one explanation a "No instance" error carries for a compound type:
+  it follows the first unsatisfied demand down to the type that has no
+  instance, through an instance context ("there is an instance '(Ord k,
+  Ord v) => Ord (HashMap k v)', but using it at 'HashMap Int E' needs
+  'Ord E'") and through the structural rule alike ("'Ord [E]' needs
+  'Ord E'"). `Diagnostic::hint` holds no per-class claim about which
+  shapes have instances — the fixed Ord note it once had ("no Ord
+  instance for tuples, lists, or Maybe") outlived the structural Ord it
+  denied. `Eq`/`Ord` of the map type are not builtin registrations but
+  two `instance (…) => … (HashMap k v)` declarations in Prelude.mll
+  over `hmSize`/`hmToList` (containers' definitions; the enumerator is
+  the ascending entry list), so resolution, specialization, dictionary
+  composition and these notes treat them like any instance with a
+  context; inside their dictionary form the key type is a variable and
+  `hmToList` is the handle-dispatched enumerator (`hm_op_use`, below).
 - **Function clauses and GADT refinement** (`check_function` /
   `check_clause` in `infer.rs`). A signature's variables are freshened
   (`freshen_sig_type_mapped`) and every clause is checked against the

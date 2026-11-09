@@ -491,6 +491,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_dead_var_specialization, "cases", "dead_var_specialization.mll"),
         (ghc_oracle_foldl_lazy_accumulator, "cases", "foldl_lazy_accumulator.mll"),
         (ghc_oracle_nan_map_keys, "cases", "nan_map_keys.mll"),
+        (ghc_oracle_map_set_eq_ord, "cases", "map_set_eq_ord.mll"),
         (ghc_oracle_local_signatures, "cases", "local_signatures.mll"),
         (ghc_oracle_local_fn_equations, "cases", "local_fn_equations.mll"),
         (ghc_oracle_local_guard_fallthrough, "cases", "local_guard_fallthrough.mll"),

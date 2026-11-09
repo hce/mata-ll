@@ -74,6 +74,26 @@ non-determinism into the pure world. These operations therefore return
 their elements sorted by key, which also makes `hmToList m` agree
 element-for-element with `zip (hmKeys m) (hmValues m)`.
 
+**Equality and order.** A HashMap has `Eq` and `Ord`, defined in the
+Prelude as containers defines them for `Data.Map` (and, over the
+elements, for `Data.Set` — a set is a map to `True`):
+
+    instance (Eq k, Eq v) => Eq (HashMap k v) where
+        a == b = hmSize a == hmSize b && hmToList a == hmToList b
+
+    instance (Ord k, Ord v) => Ord (HashMap k v) where
+        compare a b = compare (hmToList a) (hmToList b)
+
+`hmToList` enumerates in ascending key order, so equality is
+independent of how a map was built, and the order between maps is the
+lexicographic order of their ascending entry lists; `<`, `<=`, `>`,
+`>=`, `max` and `min` are the `Ord` class defaults over `compare`. The
+instances are ordinary ones with a context: a use at a key or value
+type without the class is a "No instance" error naming that type, and
+a polymorphic use needs `Eq`/`Ord` of the key and the value in its
+signature. Having `Eq` and `Ord` does not make a map a key type —
+keys are the `Hashable` types above.
+
 We support haskell's algebraic datatypes:
 
     data A = A String | B Int Int
@@ -1847,7 +1867,7 @@ section).
 
 Tuples have no Foldable/Traversable instance: the class variable has
 kind `Type -> Type`, and mata-ll has no partially-applied tuple
-constructor (the same reason tuples have no Ord instance).
+constructor.
 
 Comparison and equality operators are methods of Eq and Ord:
 

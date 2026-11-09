@@ -738,8 +738,7 @@ impl Checker {
         // Prelude.mll — the kind system checks their heads against the class
         // variable's Type -> Type kind like any user instance. Tuples
         // deliberately have no instance: the class variable has kind
-        // Type -> Type and mata-ll has no partially-applied tuple constructor
-        // (consistent with tuples having no Ord instance either).
+        // Type -> Type and mata-ll has no partially-applied tuple constructor.
 
         // Built-in Traversable typeclass (superclasses: Functor, Foldable)
         // traverse :: Applicative f => (a -> f b) -> t a -> f (t b)

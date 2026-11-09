@@ -2126,10 +2126,6 @@ impl Diagnostic {
                       use the Semigroup operator (<>): `\"a\" <> \"b\"`; to join a list of \
                       Strings, fold it with <> or use mconcat (there is no ++/intercalate \
                       for String). See HASKDIFF.md, \"Strings and ByteStrings\"."),
-            DiagnosticKind::NoInstance { class, ty }
-                if class == "Ord" && matches!(ty, Ty::Tuple(_) | Ty::List(_) | Ty::App(_, _)) =>
-                Some("mata-ll has no Ord instance for tuples, lists, or Maybe; compare their \
-                      components individually."),
             DiagnosticKind::NoInstance { class, ty: Ty::Arrow(..) | Ty::IO(_) | Ty::LuaIO(_, _) }
                 if matches!(class.as_str(), "Show" | "Eq" | "Ord") =>
                 Some("functions and IO actions have no Show, Eq or Ord instance — there is no \

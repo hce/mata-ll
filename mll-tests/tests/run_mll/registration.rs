@@ -1065,6 +1065,9 @@ mll_lib_test!(hashmap_dict_form_body, "hashmap_dict_form_body.mll");
 mll_lib_test!(hashset_dict_form, "hashset_dict_form.mll");
 mll_test!(hashmap_dict_form_builtins, "hashmap_dict_form_builtins.mll");
 mll_lib_test!(nan_map_keys, "nan_map_keys.mll");
+// W64 (H8): Eq and Ord of Map and Set are containers' instances, in
+// specialized bodies and through dictionaries.
+mll_lib_test!(map_set_eq_ord, "map_set_eq_ord.mll");
 // C6: type signatures on where/let/do-let bindings.
 mll_test!(local_signatures, "local_signatures.mll");
 // Fixes found by the differential program corpus (tests/programs).

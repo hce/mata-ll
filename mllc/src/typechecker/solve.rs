@@ -94,8 +94,9 @@ impl Checker {
                     .contains_key(&(class.to_string(), InstHead::Unit));
                 if registered { Entailment::Satisfied } else { Entailment::Failed }
             }
-            // Lists/tuples are structural for Show and Eq (mono generates the
-            // instance), but not for Ord — mata-ll has no list/tuple ordering.
+            // Lists/tuples are structural for Show, Eq, Ord and Hashable
+            // (`structural_container_class`): the instance exists exactly
+            // when every element type has one, and mono generates it.
             // A non-structural class can still have a registered list instance
             // (e.g. Monoid [a]); its declared context governs what the element
             // must provide, exactly like the Con-headed path below.
@@ -312,45 +313,55 @@ impl Checker {
         }
     }
 
-    /// When `class ty` has no instance BECAUSE a registered instance's
-    /// declared context is unsatisfied, explain which context constraint
-    /// failed — recursing when the failure is itself context-shaped, so
-    /// `Show (Tree (Tree Blob))` bottoms out at `Blob`. Returns None when the
-    /// failure is not context-shaped (no registered head instance, a function
-    /// type, …); the plain "No instance" message already covers those.
+    /// When `class ty` has no instance BECAUSE of what satisfying it reduces
+    /// to — a registered instance's declared context, or the structural
+    /// rule of a list, tuple or Maybe (the instance exists exactly when
+    /// every component type has one) — say which demand failed, recursing
+    /// while the failure is itself demand-shaped, so `Show (Tree (Tree
+    /// Blob))` and `Ord [(Int, Blob)]` both bottom out at `Blob`. Returns
+    /// None when the failure is not demand-shaped (no registered head
+    /// instance, a function type, …); the plain "No instance" message
+    /// already covers those.
+    ///
+    /// The structural half replaces a fixed hint that `NoInstance` once
+    /// carried for Ord at every list, tuple and applied type — "mata-ll
+    /// has no Ord instance for tuples, lists, or Maybe" — which stopped
+    /// being true when Ord became structural over exactly those shapes and
+    /// was never true of the other types it fired on (a map, an `Either`,
+    /// a user type). What such a failure can truthfully say is the same
+    /// for every class: which component lacks the instance.
     pub(super) fn context_failure_note(&self, class: &str, ty: &Ty) -> Option<String> {
-        // Only types that can carry a CONTEXT instance get this note —
+        // Only types whose instance can reduce to demands get this note —
         // applied heads, lists, tuples (the plain "No instance" message
         // covers everything else); keep the gate so error text stays
         // stable for the rest.
         if !matches!(ty, Ty::App(_, _) | Ty::List(_) | Ty::Tuple(_)) {
             return None;
         }
-        let Entailment::Demands { via: Some(inst), subs } = self.entail_step(class, ty) else {
+        let Entailment::Demands { via, subs } = self.entail_step(class, ty) else {
             return None;
         };
-        let ctx = inst.context.as_ref()?;
         // A compound type in constraint position reads wrong without parens
         // ("Show Tree a" vs "Show (Tree a)").
         let paren = crate::types::paren_ty;
-        for (c_class, bound) in &subs {
-            if self.has_instance(c_class, bound) {
-                continue;
+        let (c_class, bound) = subs.iter().find(|(c, t)| !self.has_instance(c, t))?;
+        let here = match via.and_then(|inst| inst.context.as_ref().map(|ctx| (inst, ctx))) {
+            Some((inst, ctx)) => {
+                let ctx_str = ctx.iter()
+                    .map(|c| format!("{} {}", c.class_name, c.type_var))
+                    .collect::<Vec<_>>().join(", ");
+                format!(
+                    "there is an instance '({}) => {} {}', but using it at '{}' needs '{} {}'",
+                    ctx_str, inst.class_name, paren(&inst.target_type), ty,
+                    c_class, paren(bound))
             }
-            let ctx_str = ctx.iter()
-                .map(|c| format!("{} {}", c.class_name, c.type_var))
-                .collect::<Vec<_>>().join(", ");
-            let here = format!(
-                "there is an instance '({}) => {} {}', but using it at '{}' needs '{} {}'",
-                ctx_str, inst.class_name, paren(&inst.target_type), ty,
-                c_class, paren(bound));
-            return Some(match self.context_failure_note(c_class, bound) {
-                Some(deeper) => format!("{}; {}", here, deeper),
-                None => format!("{}, and there is no instance '{} {}'",
-                    here, c_class, paren(bound)),
-            });
-        }
-        None
+            None => format!("'{} {}' needs '{} {}'", class, paren(ty), c_class, paren(bound)),
+        };
+        Some(match self.context_failure_note(c_class, bound) {
+            Some(deeper) => format!("{}; {}", here, deeper),
+            None => format!("{}, and there is no instance '{} {}'",
+                here, c_class, paren(bound)),
+        })
     }
 
     /// Match a use type against a registered instance's target type,

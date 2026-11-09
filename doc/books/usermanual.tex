@@ -2315,6 +2315,20 @@ main = do
     putStrLn (show (M.keys (M.insert "d" 4 m)))
 \end{lstlisting}
 
+Maps, and the sets of \texttt{Data.Set}, have \texttt{Eq} and
+\texttt{Ord} as in Haskell's containers library: two maps are equal
+when they hold the same entries, however they were built, and
+\texttt{compare} orders maps by their ascending entry lists.  Both
+need the class at the key and the value type
+(\texttt{(Eq k, Eq v) => Eq (Map k v)},
+\texttt{(Ord k, Ord v) => Ord (Map k v)}).
+
+\begin{lstlisting}
+    let a = M.fromList [(1 :: Int, "x"), (2, "y")]
+        b = M.insert 1 "x" (M.insert 2 "y" M.empty)
+    print (a == b, compare a (M.insert 3 "z" b))  -- (True,LT)
+\end{lstlisting}
+
 %======================================================================
 \section{Ranges and Enumerations}
 

@@ -117,6 +117,146 @@ fn hashmap_integer_keys_are_rejected() {
     );
 }
 
+// Eq and Ord of a map (and of a set, a map to True) are containers'
+// instances with containers' contexts — `(Eq k, Eq v) => Eq (Map k v)`,
+// `(Ord k, Ord v) => Ord (Map k v)` (H8; the accepting side is
+// cases/map_set_eq_ord.mll). What stays rejected is what GHC rejects: a
+// key or value type without the class, and a polymorphic key or value the
+// signature does not constrain. Each rejection names the element that
+// lacks the instance.
+#[test]
+fn map_eq_and_ord_need_the_element_instances() {
+    let lib: &[&Path] = &[Path::new("../lib")];
+    let head = "import qualified Data.Map as M\nimport qualified Data.Set as S\n\
+                data E = E Int deriving (Eq)\ndata P = P Int\n";
+    // The value type has Eq but no Ord.
+    expect_compile_error(
+        &format!("{head}main :: IO ()\nmain = print (compare (M.fromList [(1 :: Int, E 1)]) M.empty)\n"),
+        lib,
+        &["No instance for 'Ord (HashMap Int E)'",
+          "there is an instance '(Ord k, Ord v) => Ord (HashMap k v)', but using it at \
+           'HashMap Int E' needs 'Ord E', and there is no instance 'Ord E'"],
+    );
+    // The value type has no Eq at all — `==`, and `<` through the superclass.
+    expect_compile_error(
+        &format!("{head}main :: IO ()\nmain = print (M.fromList [(1 :: Int, P 1)] == M.empty)\n"),
+        lib,
+        &["No instance for 'Eq (HashMap Int P)'",
+          "there is an instance '(Eq k, Eq v) => Eq (HashMap k v)', but using it at \
+           'HashMap Int P' needs 'Eq P', and there is no instance 'Eq P'"],
+    );
+    // A function value: no instance can exist.
+    expect_compile_error(
+        &format!("{head}main :: IO ()\nmain = print (M.fromList [(1 :: Int, \\x -> x + (1 :: Int))] < M.empty)\n"),
+        lib,
+        &["No instance for 'Ord (HashMap Int (Int -> Int))'",
+          "needs 'Ord (Int -> Int)', and there is no instance 'Ord (Int -> Int)'"],
+    );
+    // A set's element type: the same instance, at the element as the key.
+    expect_compile_error(
+        &format!("{head}smaller :: S.Set E -> S.Set E -> Bool\nsmaller a b = a < b\n\
+                  main :: IO ()\nmain = pure ()\n"),
+        lib,
+        &["No instance for 'Ord (HashMap E Bool)'", "needs 'Ord E', and there is no instance 'Ord E'"],
+    );
+    // A map nested in a structural type: the chain bottoms out at the element.
+    expect_compile_error(
+        &format!("{head}main :: IO ()\nmain = print (compare [M.fromList [(1 :: Int, E 1)]] [])\n"),
+        lib,
+        &["No instance for 'Ord [HashMap Int E]'",
+          "'Ord [HashMap Int E]' needs 'Ord (HashMap Int E)'; there is an instance \
+           '(Ord k, Ord v) => Ord (HashMap k v)', but using it at 'HashMap Int E' needs 'Ord E', \
+           and there is no instance 'Ord E'"],
+    );
+    // Polymorphic keys and values need the constraint in the signature, as
+    // under GHC: Eq of the map needs Eq of both, Ord needs Ord of both.
+    for (sig, body, missing) in [
+        ("M.Map Int v -> M.Map Int v -> Bool", "a == b", "Eq v"),
+        ("Eq v => M.Map k v -> M.Map k v -> Bool", "a == b", "Eq k"),
+        ("Eq v => M.Map Int v -> M.Map Int v -> Bool", "a <= b", "Ord v"),
+        ("Ord v => M.Map k v -> M.Map k v -> Ordering", "compare a b", "Ord k"),
+        ("S.Set a -> S.Set a -> Bool", "a /= b", "Eq a"),
+    ] {
+        expect_compile_error(
+            &format!("{head}f :: {sig}\nf a b = {body}\nmain :: IO ()\nmain = pure ()\n"),
+            lib,
+            &[&format!("No instance for '{missing}'"),
+              &format!("the signature does not require '{missing}'")],
+        );
+    }
+}
+
+// A "No instance for Ord" once carried one fixed note at every list, tuple
+// and applied type: "mata-ll has no Ord instance for tuples, lists, or
+// Maybe; compare their components individually." It was false of the
+// three shapes it names — their Ord is structural, GHC's lexicographic
+// order — and beside the point at every other type it fired on (a map, an
+// `Either`, a user type) (H8). The note such a failure carries now is the
+// demand that failed: the component type that lacks the instance, for a
+// structural shape exactly as for an instance with a context, and for
+// every structural class alike.
+#[test]
+fn no_instance_note_names_the_component_that_lacks_it() {
+    let head = "data E = E Int deriving (Eq)\ndata P = P Int\n\
+                data Tree a = Leaf | Node (Tree a) a (Tree a) deriving (Eq)\n";
+    let stale = "no Ord instance for tuples";
+    for (expr, error, note) in [
+        ("compare (1 :: Int, E 1) (2, E 2)", "No instance for 'Ord (Int, E)'",
+         Some("'Ord (Int, E)' needs 'Ord E', and there is no instance 'Ord E'")),
+        ("compare [E 1] [E 2]", "No instance for 'Ord [E]'",
+         Some("'Ord [E]' needs 'Ord E', and there is no instance 'Ord E'")),
+        ("max (Just (E 1)) Nothing == Nothing", "No instance for 'Ord (Maybe E)'",
+         Some("'Ord (Maybe E)' needs 'Ord E', and there is no instance 'Ord E'")),
+        ("[(1 :: Int, Just (E 1))] < []", "No instance for 'Ord [(Int, Maybe E)]'",
+         Some("'Ord [(Int, Maybe E)]' needs 'Ord (Int, Maybe E)'; 'Ord (Int, Maybe E)' needs \
+               'Ord (Maybe E)'; 'Ord (Maybe E)' needs 'Ord E', and there is no instance 'Ord E'")),
+        ("compare (Left (E 1) :: Either E Int) (Right 2)", "No instance for 'Ord (Either E Int)'",
+         Some("there is an instance '(Ord a, Ord b) => Ord (Either a b)', but using it at \
+               'Either E Int' needs 'Ord E', and there is no instance 'Ord E'")),
+        // A type with no Ord instance of its own: the plain message says it all.
+        ("compare (Node Leaf (1 :: Int) Leaf) Leaf", "No instance for 'Ord (Tree Int)'", None),
+        // The other structural classes take the same note.
+        ("[P 1] == []", "No instance for 'Eq [P]'",
+         Some("'Eq [P]' needs 'Eq P', and there is no instance 'Eq P'")),
+        ("(1 :: Int, P 1) == (1, P 1)", "No instance for 'Eq (Int, P)'",
+         Some("'Eq (Int, P)' needs 'Eq P', and there is no instance 'Eq P'")),
+        ("show (Just (P 1))", "No instance for 'Show (Maybe P)'",
+         Some("'Show (Maybe P)' needs 'Show P', and there is no instance 'Show P'")),
+        ("hmSize (hmFromList [([E 1], True)])", "No instance for 'Hashable [E]'",
+         Some("'Hashable [E]' needs 'Hashable E', and there is no instance 'Hashable E'")),
+    ] {
+        let msg = expect_compile_error(
+            &format!("{head}main :: IO ()\nmain = print ({expr})\n"), &[], &[error]);
+        assert!(!msg.contains(stale), "the stale Ord note is gone: {msg}");
+        match note {
+            Some(note) => assert!(msg.contains(note), "expected the note {note:?}, got: {msg}"),
+            None => assert!(!msg.contains("note:"), "no note for a type without the instance: {msg}"),
+        }
+    }
+}
+
+// A map or a set is not a KEY type: keys are the Hashable types (the
+// scalars and tuples, lists and Maybe of them), so a set of sets or a map
+// keyed by maps — which containers accepts, a Map being Ord — stays
+// rejected (HASKDIFF, "HashMap, Data.Map, and Data.Set"). Having Eq and Ord
+// does not make a type a key.
+#[test]
+fn map_and_set_are_not_key_types() {
+    let lib: &[&Path] = &[Path::new("../lib")];
+    expect_compile_error(
+        "import qualified Data.Set as S\nmain :: IO ()\n\
+         main = print (S.size (S.fromList [S.fromList [1 :: Int]]))\n",
+        lib,
+        &["No instance for 'Hashable (HashMap Int Bool)'"],
+    );
+    expect_compile_error(
+        "import qualified Data.Map as M\nmain :: IO ()\n\
+         main = print (M.size (M.fromList [(M.fromList [(1 :: Int, \"a\")], \"b\")]))\n",
+        lib,
+        &["No instance for 'Hashable (HashMap Int String)'"],
+    );
+}
+
 // IORef has Eq (pointer identity) but deliberately NO Show and NO
 // Hashable, matching GHC (a ref has no printable content and no stable
 // hash — its Lua representation is a mutable table compared by identity).

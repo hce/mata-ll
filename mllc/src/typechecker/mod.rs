@@ -3391,8 +3391,10 @@ pub fn builtin_signatures() -> Vec<(String, Ty)> {
 }
 
 /// Classes whose list/tuple/Maybe instances mata-ll synthesizes structurally
-/// (mono generates them from the element instances). Ord is excluded — there is
-/// no list/tuple/Maybe ordering — as are Read and user classes.
+/// (mono generates them from the element instances): GHC's Show, Eq and Ord
+/// instances of those shapes — Ord is the lexicographic order, Nothing below
+/// Just — and mata-ll's own key class. Read and user classes are not among
+/// them.
 fn structural_container_class(class: &str) -> bool {
     matches!(class, "Show" | "Eq" | "Ord" | "Hashable")
 }

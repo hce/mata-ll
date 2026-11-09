@@ -458,6 +458,31 @@ below) reads and writes a map exactly as a specialized one does; a map
 also carries its own key order, so the enumerating operations need no
 constraint, as `Data.Map.keys` needs none.
 
+A map has `Eq` and `Ord`, and they are containers' instances with
+containers' contexts: `(Eq k, Eq v) => Eq (Map k v)` — the same size and
+the same ascending entry list, so insertion order and sharing between
+versions never show — and `(Ord k, Ord v) => Ord (Map k v)` — `compare`
+of the ascending entry lists (a proper prefix is smaller, the empty map
+smallest), with `<`, `<=`, `>`, `>=`, `max` and `min` the class defaults
+over it. `Data.Set`'s `Set` has the same two (it is a map to `True`, whose
+entries compare as its elements do). So maps and sets can be compared,
+sorted, searched for with `elem`, nested in lists, tuples, `Maybe` and
+other maps' values, and be fields of a type that derives `Eq`/`Ord`. Two
+deviations remain, both consequences of the representation rather than
+of the instances: `Map` and `Set` are aliases of the one primitive
+`HashMap` type, not distinct types (error messages name `HashMap k v`,
+and a `Set Int` compares with a `Map Int Bool` where GHC reports a type
+error); and a map or set is not itself a KEY type — `Set (Set Int)` and
+`Map (Map k v) w`, which containers accepts because its keys need only
+`Ord`, are rejected with `No instance for 'Hashable (HashMap …)'` (see
+the key types above). One answer differs at a map holding a NaN, and it
+is not the map instance's: `<` and `>=` are `Ord` class defaults, which
+here read `compare x y` where base 4.22's read `y <= x`, so on an order
+that is not antisymmetric (`compare nan nan` is `GT` both ways) `m < m`
+is `False` and `m >= m` is `True` where GHC answers `True` and `False` —
+as for every instance that defines `compare` alone. `==`, `/=`,
+`compare`, `<=`, `>`, `max` and `min` agree with GHC there too.
+
 A `Number` key reads back as the double it was stored as — `M.keys`,
 `M.toList`, `M.foldrWithKey` and `show` on a `Map Number v` hand out
 doubles on every host (Lua 5.3+ stores an integral float key as an
@@ -820,8 +845,8 @@ class `Hashable` are mata-ll's own.
 | Class | Instances |
 |---|---|
 | `Show` | `Int`, `Integer`, `Number`, `String`, `Bool`, `ByteString`, `()`, `Ordering`, `Maybe a`, `Either a b`, `[a]`, every tuple, and anything that derives it |
-| `Eq` | the same types, plus `IORef a` (reference identity, as GHC) |
-| `Ord` | the same types but `IORef` (see the previous section) |
+| `Eq` | the same types, plus `IORef a` (reference identity, as GHC) and `HashMap k v` — `Data.Map`'s `Map` and `Data.Set`'s `Set` — with containers' context `(Eq k, Eq v)` |
+| `Ord` | the same types but `IORef` (see the previous section); `HashMap k v` (`Map`, `Set`) with containers' context `(Ord k, Ord v)`: `compare` of the ascending entry lists |
 | `Read` | `Int`, `Integer`, `Number`, `Bool`, `String` — GHC's grammar per type (see "`read` is GHC's lexer" below), no `Maybe`/list/tuple readers (there is no `deriving (Read)`) |
 | `Enum` | `Int` (GHC.Enum's instance: `[x ..]` ends at `maxBound`, `[x, y ..]` at the bound in its direction, and a range that reaches a bound stops there — `eftInt` exits on equality before it increments, `efdtInt` against `y - delta`), `Integer`, `Number` (GHC's `Enum Double`: `fromEnum` truncates, the ranges are base's `numericEnumFrom` family), `Bool`, `Ordering`, `()`, and derived enumerations — every stepped range takes GHC.Enum's direction: upward iff the second element is not below the first, so `[x, x .. y]` is infinitely many `x` when `x <= y` and `[]` otherwise |
 | `Bounded` | `Int`, `Bool`, `Ordering`, `()`, tuples up to the 15-tuple, and derived enumerations and single-constructor products |
