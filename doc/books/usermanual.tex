@@ -2134,6 +2134,12 @@ go acc (x:rest) = do
 The \texttt{forall s.} in \texttt{runST}'s type prevents mutable state
 from escaping.
 
+Array accesses are bounds-checked as in GHC: an array of size $n$ has
+the indices $0 \ldots n-1$, and reading, writing or modifying any other
+index raises \texttt{Ix\{Int\}.index: Index (5) out of range ((0,2))},
+which \texttt{catch} and \texttt{try} receive like any \texttt{error}
+message. An array cannot be grown by writing past its end.
+
 \subsection{Mutable IO Cells: Data.IORef}
 
 For mutation intertwined with I/O, \texttt{Data.IORef} provides GHC's

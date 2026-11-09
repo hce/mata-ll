@@ -3121,47 +3121,154 @@ local function ne_ByteString(a, b) return __force(a) ~= __force(b) end
 -- type left the trace on every call for the rest of the run — the
 -- tracker canary sat at 6.6x in a third of runs and 8x in the rest,
 -- decided by hotcount-hash collisions under ASLR (2026-09-07).
-local function __mll_ma_new(size, init)
-    return function()
-        size = __force(size)
-        local t = {}; for i = 1, size do t[i] = init end; return t
+--
+-- BOUNDS are GHC's: an array made with size n has the indices 0 .. n-1
+-- (`newArray (0, n - 1)`), and every read, write and modify of any
+-- other index raises GHC's `Ix` error —
+--     Ix{Int}.index: Index (5) out of range ((0,2))
+-- — through the raise `error` uses (level 0, no position prefix), so
+-- `catch`/`try` deliver exactly that text. A read past the end used to
+-- hand back Lua's nil typed as an Int (unequal to every Int, an
+-- "arithmetic on a nil value" somewhere later) and a write past the end
+-- stored into the table, leaving a hole that made `#t` — the array's
+-- length — a border Lua picks at will.
+--
+-- The check is the TABLE's, not the access site's: every array carries
+-- the metatable below, whose `__index` and `__newindex` raise. Lua
+-- consults those two only for a key the table does not hold, so an
+-- access in range — a slot that is there — runs exactly the code it ran
+-- before on every host (the interpreters go to the metatable only after
+-- the raw lookup came back nil; a LuaJIT trace of a load that found a
+-- number is the bare typed load, and a store guards the old value where
+-- it used to guard the absent metatable), and an access out of range
+-- cannot be spelled around it: the inline read the codegen emits at a
+-- bind site (`local x = arr[i + 1]`, action.rs try_inline_st_read), the
+-- helpers below and any access form added later all index the same
+-- table. A per-site test — the loaded value compared with nil, or its
+-- type with "number" — cost the tracker canary 3 to 14 percent on
+-- LuaJIT; this is within its run-to-run noise.
+--
+-- INVARIANT, which makes "absent key" mean "index out of range": the
+-- slots 1..n of an array table each hold an element or its suspension
+-- — a number or a thunk, never nil, because an element is an Int — and
+-- the table holds no other integer key. The constructors fill 1..n
+-- BEFORE they attach the metatable; afterwards a store to an absent key
+-- raises instead of storing, and nothing stores nil, so the key set
+-- never changes. Negative indices, and an index whose `+ 1` wrapped,
+-- are absent keys like any other. `#t` is therefore exact (no hole
+-- exists) and is the array's length.
+--
+-- Every array also records the size it was made with under the string
+-- key `n` (set before the metatable is attached). It serves twice.
+--
+-- The error names the bounds GHC would: `(0, n - 1)` — also for an
+-- array made with a NEGATIVE size, which is empty but keeps the bounds
+-- it was given (`newArray (0, -4)` reports `((0,-4))` in the error of
+-- every access).
+--
+-- And it tells an array from the suspension of one without asking for
+-- a metatable. An operand of type STArray is an array table or a thunk
+-- that yields one; a thunk table has integer keys only and its
+-- metatable has no `__index`, so `x.n` is nil for exactly the thunk.
+-- The helpers force their array operand through that test (`if arr.n
+-- == nil then arr = __force(arr) end`) instead of the plain
+-- `__force(arr)`: PUC Lua's `getmetatable` looks up the `__metatable`
+-- field of every metatable it finds, so `__force` of an array — which
+-- has a metatable now — cost the tracker 1.4 percent on Lua 5.5 for a
+-- test whose answer is always "not a thunk"; one field read is cheaper
+-- than the call `__force` was before there was a metatable to find.
+-- Any value without the key takes the old path unchanged. (A LuaJIT
+-- trace pays for the test only where it cannot hoist it out of a loop:
+-- there the field read is five IR instructions against the two of the
+-- old "metatable is nil" test, and with the store's typed load of the
+-- old value a loop that does nothing but one store per iteration runs
+-- 15 percent slower, half a nanosecond an iteration. `__force` of a
+-- table that has a metatable is more than the field read there too:
+-- `getmetatable` searches the metatable for `__metatable` on that host
+-- as well.)
+--
+-- The two numbers are printed here rather than through the runtime's
+-- Int `show`: that one shares its entry with the Double printer (the
+-- shortest-digits algorithm, a few hundred lines), which every program
+-- that touches an array would then carry for the sake of this message.
+-- An index and a bound are whole numbers — Lua's integer subtype where
+-- the host has one, a whole double on LuaJIT — and `%.0f` prints the
+-- latter without an exponent at any magnitude.
+local function __mll_st_oob(t, slot)
+    local function int(x)
+        if math.type ~= nil and math.type(x) == "integer" then return tostring(x) end
+        return string.format("%.0f", x)
     end
+    error("Ix{Int}.index: Index (" .. int(slot - 1)
+        .. ") out of range ((0," .. int(rawget(t, "n") - 1) .. "))", 0)
+end
+local __mll_st_mt = { __index = __mll_st_oob, __newindex = __mll_st_oob }
+-- The one constructor body of both sized forms: `n` slots holding
+-- `init` as given (one shared suspension, see the laziness note), the
+-- size, then the metatable.
+local function __mll_st_alloc(n, init)
+    local t = {}; for i = 1, n do t[i] = init end
+    t.n = n
+    return setmetatable(t, __mll_st_mt)
+end
+local function __mll_ma_new(size, init)
+    return function() return __mll_st_alloc(__force(size), init) end
 end
 local function __mll_ma_read(arr, idx)
     return function()
-        local t, i = __force(arr), __force(idx) + 1
+        local t = arr
+        if t.n == nil then t = __force(t) end
+        local i = __force(idx) + 1
         local v = t[i]
         if getmetatable(v) == __thunk_mt then v = __force(v); t[i] = v end
         return v
     end
 end
 local function __mll_ma_write(arr, idx, val)
-    return function() __force(arr)[__force(idx) + 1] = val end
+    return function()
+        local t = arr
+        if t.n == nil then t = __force(t) end
+        t[__force(idx) + 1] = val
+    end
 end
 local function __mll_ma_modify(arr, idx, f)
     -- The action may run more than once (a stored first-class action, a
     -- list of actions traversed twice): every run must read the SAME
     -- captured index. Rebinding the upvalue (`idx = __force(idx) + 1`)
     -- made the second run modify index+1, the third index+2.
+    --
+    -- The slot is read BEFORE f is looked at, the order of GHC's twin
+    -- (`x <- readArray a i`, then `f x`): an index out of range raises
+    -- its own error with f untouched.
     return function()
-        local a, i = __force(arr), __force(idx) + 1
-        a[i] = __force(__force(f)(a[i]))
+        local t = arr
+        if t.n == nil then t = __force(t) end
+        local i = __force(idx) + 1
+        local old = t[i]
+        t[i] = __force(__force(f)(old))
     end
 end
 local function __mll_ma_length(arr)
-    return function() return #__force(arr) end
+    return function()
+        local t = arr
+        if t.n == nil then t = __force(t) end
+        return #t
+    end
 end
 local function __mll_ma_from_list(xs)
     return function()
-        xs = __force(xs); local t = {}; local cur = xs
+        local t = {}; local cur = __force(xs)
         while cur ~= nil do t[#t+1] = __mll_head(cur); cur = __mll_tail(cur) end
-        return t
+        t.n = #t
+        return setmetatable(t, __mll_st_mt)
     end
 end
 local function __mll_ma_to_list(arr)
     return function()
-        arr = __force(arr); local r = nil
-        for i = #arr, 1, -1 do r = __mll_cons(arr[i], r) end
+        local t = arr
+        if t.n == nil then t = __force(t) end
+        local r = nil
+        for i = #t, 1, -1 do r = __mll_cons(t[i], r) end
         return r
     end
 end
@@ -3170,8 +3277,7 @@ end
 -- codegen emits these only in run-once do-block position; first-class ST
 -- actions keep the __mll_ma_* closure form. See st_intrinsic_fused.
 local function __mll_st_new(size, init)
-    size = __force(size)
-    local t = {}; for i = 1, size do t[i] = init end; return t
+    return __mll_st_alloc(__force(size), init)
 end
 local function __mll_st_read(arr, idx)
     -- The slot's thunk check inline (one call level less than an outer
@@ -3181,9 +3287,10 @@ local function __mll_st_read(arr, idx)
     -- is not spelled as this call at all but INLINE at its site (codegen
     -- action.rs try_inline_st_read) with __mll_st_settle as its thunk
     -- arm; this helper serves the remaining shapes.
-    local t, i = __force(arr), __force(idx) + 1
-    local v = t[i]
-    if getmetatable(v) == __thunk_mt then v = __force(v); t[i] = v end
+    if arr.n == nil then arr = __force(arr) end
+    local i = __force(idx) + 1
+    local v = arr[i]
+    if getmetatable(v) == __thunk_mt then v = __force(v); arr[i] = v end
     return v
 end
 -- The thunk arm of an inline read: `x <- readSTArray arr i` is emitted at
@@ -3201,22 +3308,28 @@ local function __mll_st_settle(t, i, v)
     v = __force(v); t[i] = v; return v
 end
 local function __mll_st_write(arr, idx, val)
-    __force(arr)[__force(idx) + 1] = val
+    if arr.n == nil then arr = __force(arr) end
+    arr[__force(idx) + 1] = val
 end
 local function __mll_st_modify(arr, idx, f)
-    arr = __force(arr); idx = __force(idx) + 1
-    arr[idx] = __force(__force(f)(arr[idx]))
+    if arr.n == nil then arr = __force(arr) end
+    local i = __force(idx) + 1
+    local old = arr[i]
+    arr[i] = __force(__force(f)(old))
 end
 local function __mll_st_length(arr)
-    return #__force(arr)
+    if arr.n == nil then arr = __force(arr) end
+    return #arr
 end
 local function __mll_st_from_list(xs)
-    xs = __force(xs); local t = {}; local cur = xs
+    local t = {}; local cur = __force(xs)
     while cur ~= nil do t[#t+1] = __mll_head(cur); cur = __mll_tail(cur) end
-    return t
+    t.n = #t
+    return setmetatable(t, __mll_st_mt)
 end
 local function __mll_st_to_list(arr)
-    arr = __force(arr); local r = nil
+    if arr.n == nil then arr = __force(arr) end
+    local r = nil
     for i = #arr, 1, -1 do r = __mll_cons(arr[i], r) end
     return r
 end

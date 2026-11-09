@@ -775,6 +775,11 @@ mll_test!(st_lazy_store, "st_lazy_store.mll");
 // and index in WHNF itself (a lazy loop index, a lazy handle), beside the
 // writes, modifies and IORef operations whose runtime forces them.
 mll_test!(st_inline_read_lazy_operands, "st_inline_read_lazy_operands.mll");
+// L16: every STArray access is bounds-checked like GHC's — a read, write
+// or modify outside 0 .. n-1 raises `Ix{Int}.index: Index (i) out of range
+// ((0,n-1))` where catch/try see it, in every access form (inline read,
+// helper call, statement-position write/modify, first-class actions).
+mll_test!(st_array_bounds, "st_array_bounds.mll");
 // Guard-established nonzero divisors are evaluated eagerly; a `>=` guard
 // establishes nothing and the modulus stays a suspension.
 mll_test!(guard_nonzero_divisor, "guard_nonzero_divisor.mll");

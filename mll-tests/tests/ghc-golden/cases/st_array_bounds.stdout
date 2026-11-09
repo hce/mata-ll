@@ -1,0 +1,82 @@
+read first = 7
+read last = 30
+read at length raised Ix{Int}.index: Index (3) out of range ((0,2))
+read past length raised Ix{Int}.index: Index (4) out of range ((0,2))
+read negative raised Ix{Int}.index: Index (-1) out of range ((0,2))
+read far raised Ix{Int}.index: Index (1000000) out of range ((0,2))
+read far negative raised Ix{Int}.index: Index (-1000000) out of range ((0,2))
+write last = 13
+write at length raised Ix{Int}.index: Index (3) out of range ((0,2))
+write past length then read and length raised Ix{Int}.index: Index (5) out of range ((0,2))
+write negative raised Ix{Int}.index: Index (-1) out of range ((0,2))
+write bottom out of range raised Ix{Int}.index: Index (9) out of range ((0,2))
+write bottom in range = 14
+modify last = 21
+modify at length raised Ix{Int}.index: Index (3) out of range ((0,2))
+modify negative raised Ix{Int}.index: Index (-2) out of range ((0,2))
+modify out of range leaves the function unapplied raised Ix{Int}.index: Index (7) out of range ((0,2))
+modify out of range with a bottom function raised Ix{Int}.index: Index (9) out of range ((0,2))
+bottom index raised Prelude.undefined
+list length = 3
+list read at length raised Ix{Int}.index: Index (3) out of range ((0,2))
+list write at length raised Ix{Int}.index: Index (3) out of range ((0,2))
+list modify at length raised Ix{Int}.index: Index (3) out of range ((0,2))
+empty list length = 0
+empty list read raised Ix{Int}.index: Index (0) out of range ((0,-1))
+empty length = 0
+empty read raised Ix{Int}.index: Index (0) out of range ((0,-1))
+empty write raised Ix{Int}.index: Index (0) out of range ((0,-1))
+negative size length = 0
+negative size elements = []
+negative size read raised Ix{Int}.index: Index (0) out of range ((0,-4))
+negative size write raised Ix{Int}.index: Index (0) out of range ((0,-4))
+loop sum in range = 10
+loop sum one past raised Ix{Int}.index: Index (4) out of range ((0,3))
+loop fill in range = 14
+loop fill one past raised Ix{Int}.index: Index (4) out of range ((0,3))
+loop modify in range = 24
+loop modify one past raised Ix{Int}.index: Index (4) out of range ((0,3))
+hot loop in range = 20000
+hot loop sum one past raised Ix{Int}.index: Index (20000) out of range ((0,19999))
+hot loop fill one past raised Ix{Int}.index: Index (20000) out of range ((0,19999))
+hot loop modify one past raised Ix{Int}.index: Index (20000) out of range ((0,19999))
+hot loop sum from before the start raised Ix{Int}.index: Index (-1) out of range ((0,19999))
+computed index in range = 31
+computed index at length raised Ix{Int}.index: Index (3) out of range ((0,2))
+computed index negative raised Ix{Int}.index: Index (-1) out of range ((0,2))
+chased index in range = 230
+chased index out of range raised Ix{Int}.index: Index (7) out of range ((0,2))
+chased index negative raised Ix{Int}.index: Index (-4) out of range ((0,2))
+discarded read raised Ix{Int}.index: Index (9) out of range ((0,2))
+sequenced read raised Ix{Int}.index: Index (9) out of range ((0,2))
+final read raised Ix{Int}.index: Index (9) out of range ((0,2))
+stored read action in range = 40
+stored read action out of range raised Ix{Int}.index: Index (3) out of range ((0,2))
+stored write action in range = 5
+stored write action out of range raised Ix{Int}.index: Index (3) out of range ((0,2))
+stored modify action out of range raised Ix{Int}.index: Index (-1) out of range ((0,2))
+stored constructor read at length raised Ix{Int}.index: Index (3) out of range ((0,2))
+stored constructor write in range = 71
+stored list constructor write at length raised Ix{Int}.index: Index (2) out of range ((0,1))
+stored negative size constructor read raised Ix{Int}.index: Index (0) out of range ((0,-3))
+passed read action in range = 40
+passed read action at length raised Ix{Int}.index: Index (3) out of range ((0,2))
+passed read action negative raised Ix{Int}.index: Index (-1) out of range ((0,2))
+passed write action in range = 5
+passed write action at length raised Ix{Int}.index: Index (3) out of range ((0,2))
+passed modify action in range = 11
+passed modify action at length raised Ix{Int}.index: Index (3) out of range ((0,2))
+passed constructor read at length raised Ix{Int}.index: Index (3) out of range ((0,2))
+passed constructor write at length raised Ix{Int}.index: Index (3) out of range ((0,2))
+passed list constructor write at length raised Ix{Int}.index: Index (2) out of range ((0,1))
+passed list constructor elements = [1,3]
+passed negative size constructor read raised Ix{Int}.index: Index (0) out of range ((0,-3))
+forM_ writes in range = 6
+forM_ writes one past raised Ix{Int}.index: Index (3) out of range ((0,2))
+forM_ modifies one past raised Ix{Int}.index: Index (3) out of range ((0,2))
+when write at length raised Ix{Int}.index: Index (3) out of range ((0,2))
+when write skipped = 3
+stored suspension read = 110
+elements after in-range writes = [1,7,8]
+try: Left Ix{Int}.index: Index (2) out of range ((0,1))
+try in range: Right

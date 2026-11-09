@@ -480,6 +480,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_show_shows_prec_instance, "cases", "show_shows_prec_instance.mll"),
         (ghc_oracle_st_lazy_store, "cases", "st_lazy_store.mll"),
         (ghc_oracle_st_inline_read_lazy_operands, "cases", "st_inline_read_lazy_operands.mll"),
+        (ghc_oracle_st_array_bounds, "cases", "st_array_bounds.mll"),
         (ghc_oracle_guard_nonzero_divisor, "cases", "guard_nonzero_divisor.mll"),
         (ghc_oracle_thunklift_settled_captures, "cases", "thunklift_settled_captures.mll"),
         (ghc_oracle_either_monad, "cases", "either_monad.mll"),

@@ -893,6 +893,34 @@ At runtime, `runST` is `__mll_run` (force and call), and the
 array operations are plain Lua table manipulations. The scope safety
 is enforced entirely by the type checker.
 
+Bounds are checked by the table, not by the access. Every array table
+carries one shared metatable whose `__index` and `__newindex` raise
+GHC's index error (`Ix{Int}.index: Index (i) out of range ((0,n-1))`).
+Lua consults those metamethods only for a key the table does not hold,
+and an array's key set is fixed at construction: the constructors fill
+the slots `1..n` before attaching the metatable, an element is an `Int`
+(a number or its suspension, never `nil`), and a store to an absent key
+raises instead of storing. So "key absent" is exactly "index out of
+range" — negative indices included — while an access in range runs the
+same instructions as on a bare table: the interpreters look at the
+metatable only after a raw miss, and a LuaJIT trace of a load that found
+a number is the bare typed load. That matters because the hot read is
+spelled inline at its bind site (`local x = arr[i + 1]`), where a
+per-site test (the loaded value against `nil`, or its type against
+`"number"`) measured 3 to 14 percent on the tracker canary. It also
+means no access form can skip the check: the inline read, the runtime
+helpers and the first-class action closures all index the same table.
+
+Every array also records the size it was made with under the string key
+`n`. The error message takes its bounds from it (`(0, n - 1)`, also for
+a negative size, which makes an empty array that keeps its bounds), and
+the runtime helpers use it to tell an array from the suspension of one:
+a thunk table has integer keys only and no `__index`, so `arr.n == nil`
+holds for exactly the thunk, and the helpers force their array operand
+through that test rather than through `__force` — whose `getmetatable`
+PUC Lua answers by searching the metatable for `__metatable`, a cost
+arrays did not have while they had no metatable.
+
 
 ## HashMap
 

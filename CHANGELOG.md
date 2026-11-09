@@ -44,6 +44,54 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **Every `STArray` access is bounds-checked, as GHC's is: an index
+  outside `0 .. n-1` raises `Ix{Int}.index: Index (i) out of range
+  ((0,n-1))`.** `runST (do arr <- newSTArray 3 7; writeSTArray arr 5 1; x
+  <- readSTArray arr 4; n <- stArrayLength arr; pure (x == 0, n))`
+  printed `(False,3)`: the write at index 5 of a 3-element array stored
+  into the underlying Lua table and left a hole, and the read at index 4
+  returned Lua's `nil` typed as an `Int` — unequal to every `Int`, and an
+  "attempt to perform arithmetic on a nil value" wherever it was first
+  added to. Neither raised. A hole also made the array's length a border
+  Lua picks at will, so `stArrayLength` and `stArrayToList` of an array
+  written past its end could answer for a different array than the one
+  allocated. GHC's `STArray` checks every `readArray`/`writeArray`
+  against the array's bounds and raises an `ErrorCall` naming the index
+  and the bounds; mata-ll's array of size `n` is that array with the
+  bounds `(0, n - 1)` and now raises the same text through the raise
+  `error` uses, so `catch` and `try` receive it: reads, writes and
+  `modifySTArray` (which leaves its function unapplied), negative
+  indices, an empty array (`((0,-1))`), an array from
+  `newSTArrayFromList`, and a negative size (an empty array that keeps
+  the bounds it was given, `newSTArray (-3) x` reporting `((0,-4))`). The
+  check is the array table's own: every array carries one metatable whose
+  `__index` and `__newindex` raise, and Lua consults those only for a key
+  the table does not hold — the constructors fill the slots before
+  attaching it, an element is never `nil` and a store to an absent key
+  raises instead of storing, so "absent key" is exactly "index out of
+  range". An access in range therefore runs the instructions it ran
+  before (the code the compiler emits is unchanged; the change is the
+  runtime's), and no access form can go around the check: the read the
+  codegen spells inline at a bind site (`local x = arr[i + 1]`), the
+  fused helper calls and the first-class action closures all index the
+  same table. Every array also records its size under the key `n`: the
+  error takes the bounds from it, and the runtime helpers tell an array
+  from the suspension of one by it (`arr.n == nil` is the thunk) instead
+  of calling `__force` on a table that now has a metatable, which PUC
+  Lua's `getmetatable` answers slowly. Measured on the tracker canary the
+  change is within run-to-run noise on LuaJIT and on Lua 5.5, where a
+  per-site test of the loaded value cost 3 to 14 percent on LuaJIT. In
+  loops that do nothing but array accesses the cost shows: on LuaJIT a
+  store-only or modify-only loop runs about 15 percent slower (half a
+  nanosecond per iteration) and a read-read-write loop 7 percent; on Lua
+  5.5 the same loops run 6 to 20 percent faster (the cheaper handle
+  test) and a read-only loop 5 percent slower. The GHC oracle's twin of
+  `STArray` was an `STRef` over a `Map`, whose out-of-range write grew
+  the map — the same defect, invisible to the oracle; it is now GHC's
+  own `Data.Array.ST` array, so the goldens pin GHC's bounds behaviour
+  and message text. Review item L16. (GHC-goldened case
+  `st_array_bounds`.)
+
 - **An empty list is the empty array `{}` at every position of the FFI
   boundary, a map value included; `nil` on the host side is `Nothing`,
   `()` and `AnyNull` and nothing else.** `export mkMap :: Int -> HashMap
@@ -2305,6 +2353,18 @@ API of the `mllc` library crate.)
   `module_reexport{,_chain,_alias}.mll`.
 
 ### Changed
+
+- **An `STArray` cannot be grown by writing past its end, and a read
+  past its end raises** (breaking for a program that relied on either).
+  `writeSTArray arr i x` with `i` outside `0 .. n-1` used to store into
+  the underlying Lua table — a program could treat an array as growable,
+  or allocate `newSTArray 0 x` and fill it by index — and `readSTArray`
+  of a slot never written returned `nil`. Both now raise GHC's
+  `Ix{Int}.index: Index (i) out of range ((0,n-1))`, as does
+  `modifySTArray`. Allocate the size the program needs (`newSTArray n
+  x`), or build the larger array with `newSTArrayFromList`. Programs
+  whose every access is in range are unaffected. (Review item L16; see
+  the Fixed entry.)
 
 - **A HashMap entry whose value is the empty list reaches the host as a
   key holding `{}`** (visible to a host that relied on the key being

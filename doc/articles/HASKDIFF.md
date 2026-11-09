@@ -520,6 +520,15 @@ GHC); in exchange a bound read is a value, so its uses need no force.
 `modifySTArray` is mata-ll's own operation (GHC's `MArray` has none):
 it applies `f` when it runs and stores the result evaluated to WHNF.
 
+Bounds checking is GHC's, not a deviation: an `STArray` of size `n` is
+GHC's `STArray s Int Int` with the bounds `(0, n - 1)`, and an access
+outside them raises `Ix{Int}.index: Index (i) out of range ((0,n-1))`
+(see SPEC.md). One corner differs: on LuaJIT an index of magnitude 2^53
+or more is a rounded double like every other `Int` there, so the message
+prints the rounded index (`readSTArray arr maxBound` reports
+`Index (9223372036854775808)`; Lua 5.3+ prints GHC's
+`9223372036854775807`).
+
 ## No lazy I/O
 
 There is no `hGetContents`, `readFile` returning a lazy String, or

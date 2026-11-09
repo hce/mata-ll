@@ -2154,6 +2154,22 @@ forces the slot it returns, so a bound read is a value. `modifySTArray`
 (mata-ll's own operation) applies `f` to the stored value when it runs
 and stores the result evaluated to WHNF.
 
+Bounds are GHC's. `newSTArray n x` makes an array with the indices
+`0 .. n-1` (GHC's `newArray (0, n - 1) x`); `newSTArrayFromList xs` one
+with the indices `0 .. length xs - 1`. The size is fixed for the array's
+life: `stArrayLength` returns it, and `readSTArray`, `writeSTArray` and
+`modifySTArray` at an index outside the bounds raise GHC's index error
+when the action runs —
+
+    Ix{Int}.index: Index (5) out of range ((0,2))
+
+— an `error`-class exception, so `catch` and `try` receive that text.
+A write out of range stores nothing and a modify out of range does not
+apply `f`. An array of size 0 has no valid index (its bounds print as
+`((0,-1))`); a negative size also makes an empty array, which keeps the
+bounds it was given (`newSTArray (-3) x` reports `((0,-4))`), as GHC's
+`newArray` does.
+
 # IORef (mutable IO cells)
 
 `IORef a` is GHC's plain mutable cell, imported as `Data.IORef`:

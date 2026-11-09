@@ -1423,6 +1423,91 @@ main = print (runST (do
     );
 }
 
+/// L16: an STArray's bounds are checked by the array TABLE — runtime.lua's
+/// `__mll_st_mt`, whose `__index` and `__newindex` raise GHC's index
+/// error — and not by the access sites, so that an access in range costs
+/// what it cost on a bare table and no access form can go around the
+/// check. That holds exactly when every constructor attaches the
+/// metatable and nothing in the array runtime reads or stores raw. Both
+/// are pinned here on the emitted runtime of the goldened bounds case,
+/// together with the coverage that case claims: it must reach EVERY
+/// array intrinsic in both of its forms (the first-class action closure
+/// and the fused run-once call) and the read spelled inline at a bind
+/// site, so a form the case stops reaching (an inlining change, a new
+/// fused shape) fails here instead of silently leaving the golden
+/// without it.
+#[test]
+fn st_array_bounds_are_the_tables_for_every_access_form() {
+    let source = std::fs::read_to_string("tests/cases/st_array_bounds.mll")
+        .expect("the bounds case exists");
+    let lua = compile(&source, Path::new("tests/cases"), &[])
+        .expect("compile should succeed")
+        .lua_code;
+    // One top-level runtime definition: from its `local function` line to
+    // the first column-0 `end`.
+    let def = |name: &str| -> &str {
+        let head = format!("\nlocal function {name}(");
+        let start = lua.find(&head).unwrap_or_else(|| {
+            panic!("the bounds case must reach {name} (its definition is not in the emitted runtime)")
+        });
+        let rest = &lua[start + 1..];
+        let end = rest.find("\nend\n").expect("a definition ends in a column-0 `end`");
+        &rest[..end]
+    };
+    let mut array_runtime = String::new();
+    for i in mllc::intrinsics::ST_INTRINSICS.iter().filter(|i| i.source.contains("STArray") || i.source.contains("stArray")) {
+        array_runtime.push_str(def(i.closure));
+        array_runtime.push_str(def(i.fused));
+        // Reached as a USE too, not only pulled in as a dependency.
+        for name in [i.closure, i.fused] {
+            assert!(
+                lua.matches(&format!("{name}(")).count() >= 2,
+                "the bounds case must call {name}"
+            );
+        }
+    }
+    assert!(
+        lua.contains(" = __mll_st_settle("),
+        "the bounds case must contain a read spelled inline at its bind site"
+    );
+    array_runtime.push_str(def("__mll_st_settle"));
+    assert!(
+        lua.contains("\nlocal __mll_st_mt = { __index = __mll_st_oob, __newindex = __mll_st_oob }\n"),
+        "the array metatable must raise for an absent key on a read and on a store"
+    );
+    // Every way an array table comes into being ends by attaching the
+    // metatable: the two list constructors themselves, the two sized ones
+    // through the allocator they share.
+    for ctor in ["__mll_st_alloc", "__mll_ma_from_list", "__mll_st_from_list"] {
+        assert!(
+            def(ctor).contains("return setmetatable(t, __mll_st_mt)"),
+            "{ctor} must return its table with the bounds metatable attached: {}",
+            def(ctor)
+        );
+    }
+    for ctor in ["__mll_ma_new", "__mll_st_new"] {
+        assert!(
+            def(ctor).contains("__mll_st_alloc("),
+            "{ctor} must build its table through __mll_st_alloc: {}",
+            def(ctor)
+        );
+    }
+    // No access of the array runtime goes around the metatable. (The one
+    // raw read of the runtime is the failing arm's lookup of a recorded
+    // upper bound, in __mll_st_oob — not an element access.)
+    for raw in ["rawget", "rawset"] {
+        assert!(
+            !array_runtime.contains(raw),
+            "the array runtime must not index raw ({raw}): the bounds check is the table's metatable"
+        );
+    }
+    assert!(
+        def("__mll_st_oob").contains("error(\"Ix{Int}.index: Index (\"") && def("__mll_st_oob").contains(", 0)"),
+        "an index out of range raises GHC's text at level 0, as `error` does: {}",
+        def("__mll_st_oob")
+    );
+}
+
 /// A binder's concreteness claim is a property of that binding alone, in
 /// both directions: an inner binder whose own source proves a value — a
 /// parameter every call site delivers concrete, a strict `let`/`where`

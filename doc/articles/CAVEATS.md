@@ -16,6 +16,20 @@ messages but degrade performance for all callers, so this is left as-is. When
 you see `attempt to perform arithmetic on … (a nil value)` in compiled output,
 suspect an out-of-bounds access in the source.
 
+`STArray` is the exception: its accesses ARE bounds-checked, as GHC's are. An
+array of size `n` has the indices `0 .. n-1`, and `readSTArray`,
+`writeSTArray` or `modifySTArray` at any other index raises GHC's own error,
+which `catch` and `try` receive like any `error` message:
+
+    Ix{Int}.index: Index (5) out of range ((0,2))
+
+The check lives in the array table's metatable, which Lua consults only for a
+key the table does not hold, so an access in range runs as it did on an
+unchecked table and there is no unchecked variant. An array cannot be grown
+by writing past its end — that used to store into the underlying Lua table
+and leave a hole; allocate the size you need with `newSTArray`, or build the
+new array with `newSTArrayFromList`.
+
 ## Tail calls run in constant stack; non-tail recursion does not
 
 Recursive calls in *tail position* compile to Lua's native proper tail calls,

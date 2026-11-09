@@ -40,8 +40,11 @@
 --                     Text.Read.Lex's grammar).
 --   * ST, runST, STArray and the STArray operations
 --                   — mata-ll's builtin mutable Int array
---                     (newSTArray size init, 0-based indices), lazy in
---                     the stored elements like GHC's boxed STArray.
+--                     (newSTArray size init, 0-based indices): GHC's
+--                     boxed Data.Array.ST STArray with the bounds
+--                     (0, size - 1) — lazy in the stored elements, and
+--                     every access bounds-checked with GHC's own
+--                     `Ix{Int}.index` error.
 module MllShim
   ( Number
   , Hashable
@@ -70,8 +73,8 @@ import Data.List (sort, sortBy)
 import Control.Monad.ST (ST, runST)
 import GHC.Exts (Multiplicity (..))
 import System.Environment (getArgs)
-import Data.STRef (STRef, newSTRef, readSTRef, modifySTRef')
-import qualified Data.Map as Map
+import qualified Data.Array.ST as A
+import Data.Ix (rangeSize)
 
 type Number = Double
 
@@ -163,36 +166,42 @@ read_Bool = read
 read_String :: String -> String
 read_String = read
 
--- mata-ll's STArray: a mutable, 0-indexed Int array scoped to ST s.
--- Backed here by an STRef over a LAZY Map Int Int — the values are
--- stored as given, like GHC's boxed STArray and mata-ll's runtime
--- (`writeSTArray a i undefined` never read is silent on both sides);
--- the corpus only uses small arrays, so the representation cost is
--- irrelevant. modifySTArray is mata-ll's own operation: it applies f
--- when run and stores the result evaluated to WHNF (a strict modify).
-newtype STArray s = STArray (STRef s (Map.Map Int Int))
+-- mata-ll's STArray: a mutable, 0-indexed Int array scoped to ST s —
+-- GHC's own boxed `Data.Array.ST.STArray s Int Int` with the bounds
+-- (0, size - 1). The values are stored as given, like mata-ll's runtime
+-- (`writeSTArray a i undefined` never read is silent on both sides), and
+-- every read, write and modify is bounds-checked by GHC itself: an index
+-- outside the bounds raises `Ix{Int}.index: Index (i) out of range
+-- ((0,size-1))`, which is the text mata-ll's runtime raises. (This twin
+-- was an STRef over a Map Int Int before: its out-of-range WRITE grew the
+-- map, the very defect mata-ll's own arrays had, so the oracle could not
+-- see it.) A negative size is an empty array that keeps the bounds it
+-- was given, as `newArray (0, size - 1)` does. modifySTArray is mata-ll's
+-- own operation: it applies f when run and stores the result evaluated
+-- to WHNF (a strict modify).
+newtype STArray s = STArray (A.STArray s Int Int)
 
 -- newSTArray size init: indices 0 .. size-1, all set to init.
 newSTArray :: Int -> Int -> ST s (STArray s)
-newSTArray n x =
-  STArray <$> newSTRef (Map.fromList [(i, x) | i <- [0 .. n - 1]])
+newSTArray n x = STArray <$> A.newArray (0, n - 1) x
 
 readSTArray :: STArray s -> Int -> ST s Int
-readSTArray (STArray r) i = (Map.! i) <$> readSTRef r
+readSTArray (STArray a) i = A.readArray a i
 
 writeSTArray :: STArray s -> Int -> Int -> ST s ()
-writeSTArray (STArray r) i v = modifySTRef' r (Map.insert i v)
+writeSTArray (STArray a) i v = A.writeArray a i v
 
 modifySTArray :: STArray s -> Int -> (Int -> Int) -> ST s ()
-modifySTArray (STArray r) i f =
-  modifySTRef' r (\m -> let v = f (m Map.! i) in v `seq` Map.insert i v m)
+modifySTArray (STArray a) i f = do
+  x <- A.readArray a i
+  let v = f x
+  v `seq` A.writeArray a i v
 
 stArrayLength :: STArray s -> ST s Int
-stArrayLength (STArray r) = Map.size <$> readSTRef r
+stArrayLength (STArray a) = rangeSize <$> A.getBounds a
 
 newSTArrayFromList :: [Int] -> ST s (STArray s)
-newSTArrayFromList xs =
-  STArray <$> newSTRef (Map.fromList (P.zip [0 ..] xs))
+newSTArrayFromList xs = STArray <$> A.newListArray (0, P.length xs - 1) xs
 
 stArrayToList :: STArray s -> ST s [Int]
-stArrayToList (STArray r) = Map.elems <$> readSTRef r
+stArrayToList (STArray a) = A.getElems a

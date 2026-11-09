@@ -911,6 +911,24 @@ Responsibilities beyond the obvious translation:
   `IORef (Int -> Int)`), the code generator wraps it in a currying
   adapter (`__mll_curry1`/`2`/`_n`) at every place it reaches the
   runtime (`adapt_runtime_args`).
+- **ST arrays:** the array intrinsics (`intrinsics::ST_INTRINSICS`) are
+  emitted in three forms — a first-class action closure
+  (`__mll_ma_read(arr, i)`), a fused direct call in run-once position
+  (`__mll_st_write(arr, i, x)`), and for a bind-chain read the slot load
+  itself (`local x = arr[i + 1]`, action.rs `try_inline_st_read`). None
+  of them tests a bound. The bounds check is the array table's: the
+  runtime's constructors attach one metatable whose `__index` and
+  `__newindex` raise GHC's `Ix{Int}.index` error, Lua consults those
+  only for a key the table does not hold, and an array's key set is
+  fixed at construction (slots `1..n`, each a number or its suspension)
+  — so every form, and any form added later, is checked by indexing the
+  table, and an access in range runs what it ran on a bare table. An
+  emitter that indexes an array must therefore index it plainly: a
+  `rawget`/`rawset` would go around the check (the
+  `st_array_bounds_are_the_tables_for_every_access_form` shape test
+  holds the runtime to that and the goldened `st_array_bounds` case to
+  reaching every form). The runtime notes on `__mll_st_oob` carry the
+  invariant and the measurements behind the design.
 - **Host limits:** Lua caps a function's locals at 200 and its upvalues
   at 60 (LuaJIT) or 255 (PUC). The emitter budgets locals as it
   declares them (`declare_local_parts`, `LOCAL_LIMIT`): past 180 a
