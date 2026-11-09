@@ -152,6 +152,51 @@ impl CodeGen {
             }
         }
     }
+    /// THE nil convention of the FFI boundary, as a predicate on a declared
+    /// type: whether a value of `ty` can be Lua's `nil` on the HOST side.
+    ///
+    /// Inside mata-ll `nil` represents three different values — the empty
+    /// list, `Nothing` and `()` — which only the type tells apart, so the
+    /// boundary decides by type, in both directions, and this is the one
+    /// statement of the answer:
+    ///
+    ///   * `Maybe a` — `Nothing` is `nil` (and so is a `Just` whose payload
+    ///     is itself `nil`-formed: `Just Nothing`, `Just ()`);
+    ///   * `Any` — `AnyNull` is `nil`;
+    ///   * `()` — the unit value is `nil`;
+    ///   * every other type is NEVER `nil`: a list is a Lua array (the empty
+    ///     list the empty array `{}`), a `HashMap` a keyed table (empty:
+    ///     `{}`), a tuple a positional table, a `LuaDict` record a keyed
+    ///     table, a scalar itself. A newtype is `Opaque` to `ffi_shape` and
+    ///     so answers `false` whatever it wraps.
+    ///
+    /// The runtime's two halves follow it: the marshaller
+    /// (`__mll_arg_marshal`) hands every value, a `nil`-represented one
+    /// included, to the descriptor of its position's type, so only these
+    /// types' arms produce a `nil`; the decoder (`__mll_ffi_decode`) reads a
+    /// host `nil` as `Nothing`/`AnyNull`/`()` at these types and refuses it
+    /// at a tuple, a record, a map or a checked scalar (at a list it reads
+    /// the empty list: a host may leave an empty array out). What the
+    /// predicate itself decides in generated code is where an array can
+    /// have HOLES: the marshaller writes every array by explicit index, so
+    /// a `nil` element keeps its place, and the decode descriptor of a list
+    /// whose element type answers `true` carries `h=true`, so the decoder
+    /// takes that array's length from its largest index instead of `#`,
+    /// which is undefined past a hole.
+    ///
+    /// The match is exhaustive over [`FfiShape`] for the reason that enum
+    /// gives: a new container variant must be placed here too.
+    pub(super) fn ffi_nil_form(&self, ty: &Ty) -> bool {
+        match self.ffi_shape(ty) {
+            FfiShape::Maybe(_) | FfiShape::Any => true,
+            FfiShape::List(_)
+            | FfiShape::Tuple(_)
+            | FfiShape::Record { .. }
+            | FfiShape::HashMap { .. } => false,
+            FfiShape::Opaque => matches!(ty, Ty::Unit),
+        }
+    }
+
     /// THE result-shape decision of the FFI boundary: how the host's answer
     /// becomes the one mata-ll value its declared type names. Every form
     /// that receives a host result asks here and nowhere else, so a result
@@ -489,14 +534,16 @@ impl CodeGen {
                 stack.pop();
                 Some(format!("{{k=\"record\",fs={{{}}}}}", fs.join(",")))
             }
-            // A HashMap is a string-keyed Lua table the host reads as a
-            // dict. Keys are scalars already usable as Lua keys — like the
+            // A HashMap is a keyed Lua table the host reads as a dict.
+            // Keys are scalars already usable as Lua keys — like the
             // result decoder (and __mll_to_lua), we never convert keys,
             // only marshal each VALUE by the value type. Always Some, the
             // dual of the decoder, which always descends a HashMap: a
             // `HashMap String [Int]` must reach the host as a dict of
-            // real arrays, `HashMap String (Maybe X)` / `HashMap String
-            // Record` / nested maps marshal recursively.
+            // real arrays — an entry whose list is empty as a key holding
+            // `{}`, like a list anywhere else (`ffi_nil_form`) —
+            // `HashMap String (Maybe X)` / `HashMap String Record` /
+            // nested maps marshal recursively.
             FfiShape::HashMap { value, .. } => {
                 let vdesc = child(self, &value, stack);
                 Some(format!("{{k=\"hashmap\",v={}}}", vdesc))
@@ -633,6 +680,9 @@ impl CodeGen {
             // A list always needs converting: the host hands us a Lua array
             // (1-based, possibly empty) which must become a cons list. An empty
             // array MUST decode to the empty list (nil), never a bogus element.
+            // `h=true` marks an element type whose host form can be nil
+            // (`ffi_nil_form`): such an array may have holes, and the
+            // decoder then takes its length from the largest index.
             FfiShape::List(inner) => {
                 let t = self.shown_ty(ty);
                 let (e, _) = self.ffi_child_desc(
@@ -640,7 +690,8 @@ impl CodeGen {
                     stack,
                     &format!("an element of the list declared {}", t),
                 );
-                Some((format!("{{k=\"list\",t={:?},e={}{}}}", t, e, wlua), true))
+                let holes = if self.ffi_nil_form(&inner) { ",h=true" } else { "" };
+                Some((format!("{{k=\"list\",t={:?},e={}{}{}}}", t, e, holes, wlua), true))
             }
             // Tuples share mata-ll's positional-array layout with Lua, so only
             // rebuild when some element itself needs conversion; when elements

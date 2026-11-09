@@ -847,6 +847,37 @@ Responsibilities beyond the obvious translation:
   method-spelled tuple result emitting `:find(…)` with no receiver, and
   the guarded wrappers keeping one return value were three arms that had
   each re-derived this decision and missed a case.
+  **`nil` has one convention, decided by the declared type** (SPEC "`nil`
+  at the FFI boundary: one convention"). Inside mata-ll `nil` is the
+  empty list, `Nothing` and `()` at once, so nothing at the boundary may
+  decide on `x == nil`; the type's descriptor decides. `ffi_nil_form(ty)`
+  (codegen/ffi.rs, exhaustive over `FfiShape`) is the statement of which
+  types have `nil` as a host form: `Maybe`, `Any`, `()` — and no other:
+  a list is `{}` when empty, a map `{}` when empty. The runtime's two
+  halves follow it:
+  - `__mll_arg_marshal` (outward: import arguments, optional arguments,
+    export results/values/action results, the result of a mata-ll
+    callback, the arguments of a host callback) hands EVERY nested value
+    to the descriptor of its position — list element, tuple slot, record
+    field, `Maybe` payload, map value — whether or not the value is
+    `nil`-represented, so only the `maybe` and `any` arms (and a
+    descriptor-less `()`) ever produce a `nil`. The map arm unboxes the
+    store's `__mll_hm_nilv` sentinel (a nil-represented value stored
+    under a scalar key) and then asks the value descriptor like every
+    other arm; it used to test `x ~= nil` first, which sent an empty-list
+    value out as `t[k] = nil` — no key.
+  - `__mll_ffi_decode` (inward) reads a host `nil` as `Nothing`/`AnyNull`
+    at those types, as `[]` at a list, and refuses it at a map, a tuple,
+    a checkable record and a checked scalar. A list descriptor carries
+    `h=true` when `ffi_nil_form` holds of its element type: such an array
+    can have holes, and the decoder then takes its length from the
+    largest integer key instead of `#`. That flag used to be the
+    runtime's own test for a `maybe` element, which missed `Any`: an
+    interior `AnyNull` truncated the list on the way back in.
+  The untyped walker `__mll_to_lua` serves only descriptor-less types (a
+  scalar, a `()`, an opaque value); it has no type to ask, so a `nil`
+  stays `nil` there. Pinned by `cases/ffi_nil_convention` (both hosts)
+  and `ffi_export_empty_list_is_an_array_in_every_position`.
 - **IO:** an action-typed expression in a value position compiles to an
   action value and performs nothing; a runner (`__mll_run`,
   `__mll_run_tail`) performs it. A single-clause IO function is emitted as

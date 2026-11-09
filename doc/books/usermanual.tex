@@ -1215,11 +1215,13 @@ is structural and recursive, at every depth:
 
 \begin{itemize}
   \item A list \texttt{[a]} becomes a plain 1-based Lua array, each
-    element marshalled by its type.
+    element marshalled by its type.  The empty list is the empty table
+    \texttt{\{\}}, never \texttt{nil}.
   \item A \texttt{LuaDict} record becomes a name-keyed Lua table; a tuple
     becomes a positional table.
-  \item A \texttt{HashMap k v} becomes a string-keyed Lua table (a
-    dictionary), each value marshalled by \texttt{v}.
+  \item A \texttt{HashMap k v} becomes a keyed Lua table (a
+    dictionary), each value marshalled by \texttt{v}; an entry whose
+    value is the empty list keeps its key, holding \texttt{\{\}}.
   \item A \texttt{Maybe} \emph{inside} a record, list, or tuple is
     unwrapped: \texttt{Just x} passes the bare (marshalled) \texttt{x},
     and \texttt{Nothing} passes \texttt{nil} (an absent field).  This is
@@ -1531,12 +1533,20 @@ tables, \texttt{Just x} is unwrapped to the bare \texttt{x} and
 
 \begin{note}
 Lua's \texttt{nil} carries less structure than mata-ll values.  An
-empty list crosses to the host as an empty table at every edge ---
-exported results included --- so a host can \texttt{ipairs} a list
-result without a nil check; the declared type is what distinguishes
-it from \texttt{Nothing}, which crosses as \texttt{nil}.  And because
+empty list crosses to the host as an empty table at every edge and at
+every depth --- an exported result, an element of a list, a record
+field, a tuple slot, a value of a \texttt{HashMap} --- so a host can
+\texttt{ipairs} a list without a nil check; the declared type is what
+distinguishes it from \texttt{Nothing}, which crosses as \texttt{nil}
+(as do \texttt{()} and \texttt{AnyNull}, and nothing else).  Because
 \texttt{nil} cannot nest, \texttt{Just Nothing} flattens to
 \texttt{nil} and \texttt{Just (Just x)} to \texttt{x} at the boundary.
+And because a Lua table holds no \texttt{nil}, such a value is absent
+where the table has no slot for it: a trailing \texttt{Nothing} of a
+list shortens the array (\texttt{[Just 1, Nothing]} is \texttt{\{1\}}),
+and a map entry whose value is \texttt{Nothing} has no key.  Inside a
+tuple, in a record field and between two present list elements its
+place is kept.
 \end{note}
 
 An export need not be a function.  A plain value --- a scalar, tuple,

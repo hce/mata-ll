@@ -402,13 +402,16 @@ local function __mll_ffi_decode(desc, v, root, dir)
                 "a list must arrive from the host as a Lua array", dir)
         end
         local n = #v
-        if desc.e and desc.e.k == "maybe" then
-            -- A [Maybe a] element arrives as nil for Nothing, and `#` is not
-            -- defined past a hole: scan for the maximal integer key so
-            -- interior Nothings keep their positions instead of truncating
-            -- the list at the first hole. (A TRAILING Nothing has no key in
-            -- a Lua table at all and cannot be recovered — the inherent nil
-            -- limitation, same as the argument direction.)
+        if desc.h then
+            -- `h`: the element type is one whose host form can be nil (a
+            -- Maybe's Nothing, an Any's AnyNull, a () — the compiler's
+            -- ffi_nil_form, the same set the marshaller writes as nil), so
+            -- the array may have holes, and `#` is not defined past a hole:
+            -- scan for the maximal integer key so interior nils keep their
+            -- positions instead of truncating the list at the first hole.
+            -- (A TRAILING nil has no key in a Lua table at all and cannot
+            -- be recovered — the inherent nil limitation, same as the
+            -- argument direction.)
             for key in pairs(v) do
                 if type(key) == "number" and key > n and key % 1 == 0 then
                     n = key
@@ -598,6 +601,23 @@ end
 -- by reference into the fresh parent — which is correct: opaque leaves are not
 -- rewritten.)
 --
+-- THE NIL CONVENTION (SPEC "nil at the FFI boundary"; the compiler's half is
+-- `ffi_nil_form` in codegen/ffi.rs). Inside mata-ll Lua's nil represents
+-- three different values — the empty list, Nothing and () — and only the
+-- declared type tells them apart. So every position hands its value to the
+-- descriptor of that position's type, nil or not, and the descriptor
+-- answers; no arm decides on `x == nil` in the descriptor's place (the map
+-- arm once did, and a `[]` value took its key with it). The answers:
+--   host nil      Nothing (the `maybe` arm, `Just Nothing` flattening to
+--                 it), AnyNull (the `any` arm), and () (no descriptor: the
+--                 forced value, which is nil)
+--   never nil     a list (`[]` is a fresh {}), a HashMap (empty is {}), a
+--                 tuple, a record, a String, a number, a Bool
+-- A value whose host form is nil keeps its place where the place exists
+-- without it (an argument, a tuple slot, a record field, an interior list
+-- index) and is lost where the place IS the value: a map key is absent, a
+-- trailing list element shortens the array.
+--
 --   {k="list",e=..}    a cons list becomes a fresh 1-based Lua array; each
 --                      element is forced and (if e is a descriptor, not false)
 --                      recursively marshalled. Empty list (nil) -> {}.
@@ -606,10 +626,12 @@ end
 --   {k="record",fs=..} a fresh name-keyed table; each declared field is forced
 --                      (fs[i].d a nested descriptor, or false to just force) so
 --                      the host reads real values.
---   {k="hashmap",v=..} a fresh string-keyed dict; each value is marshalled by v
---                      (or forced when v is false). Keys are scalars already
---                      usable as Lua keys and are kept as-is, matching the
---                      result decoder and __mll_to_lua.
+--   {k="hashmap",v=..} a fresh keyed dict; each value — a stored nil
+--                      unboxed first — is marshalled by v (or forced when v
+--                      is false), so a `[]` value is a present key holding
+--                      {}. Keys are scalars already usable as Lua keys and
+--                      are kept as-is, matching the result decoder and
+--                      __mll_to_lua. Empty map -> {}.
 --   {k="maybe",e=..}   a STRUCTURAL Maybe (record field, list element, tuple
 --                      field, map value): UNWRAP it for the host — `Just x`
 --                      becomes the bare `x` recursively marshalled by e (or
@@ -659,6 +681,10 @@ local function __mll_arg_marshal(v, d)
         end
         return t
     elseif d.k == "record" then
+        -- No record VALUE is nil. This is a host's own nil coming back: a
+        -- record without a checkable field has no decode descriptor, so a
+        -- nil the host returned for it was let in unseen, and it leaves as
+        -- the nil it is rather than as an index error here.
         if v == nil then return nil end
         local t = {}
         for _, f in ipairs(d.fs) do
@@ -668,6 +694,8 @@ local function __mll_arg_marshal(v, d)
         end
         return t
     elseif d.k == "hashmap" then
+        -- No map VALUE is nil either (the empty map is a handle, and
+        -- crosses as {}); as for a record, a nil is passed back as it is.
         if v == nil then return nil end
         local t = {}
         -- Snapshot the store BEFORE forcing any value: forcing may read
@@ -680,11 +708,15 @@ local function __mll_arg_marshal(v, d)
                 error("a HashMap holding a NaN key cannot cross the FFI boundary: a Lua table cannot be indexed by NaN", 2)
             end
             local x = __force(vs[i])
-            -- Unbox a stored-nil value: the host convention for an absent
-            -- payload is nil (the key stays absent host-side, exactly how
-            -- the decoder above reads it back).
+            -- The store boxes a nil-REPRESENTED value ([], Nothing, ())
+            -- behind __mll_hm_nilv; unbox it to the value it is, and then
+            -- ask the value type's descriptor what that value is to the
+            -- host — as every other position does. nil is not yet the
+            -- answer: an empty list is `{}` (the key stays present), and
+            -- only a value whose host form is nil (see THE NIL CONVENTION
+            -- above) leaves the key absent.
             if rawequal(x, __mll_hm_nilv) then x = nil end
-            if x ~= nil and d.v then x = __mll_arg_marshal(x, d.v) end
+            if d.v then x = __mll_arg_marshal(x, d.v) end
             t[k] = x
         end
         return t
@@ -719,8 +751,18 @@ local function __mll_arg_marshal(v, d)
     return v
 end
 
--- Deep-force an MLL value for export to Lua.
--- Converts lazy cons lists to plain Lua arrays, forces thunks, recurses into tuples.
+-- Deep-force an MLL value for export to Lua: the UNTYPED walker, for a
+-- position whose type has no marshal descriptor — a scalar, a (), an opaque
+-- value (ffi_arg_marshal_desc returns None). Converts lazy cons lists to
+-- plain Lua arrays, forces thunks, recurses into tuples.
+--
+-- It has no type to ask, so it cannot apply the nil convention's first
+-- line: a nil here is the empty list, Nothing and () at once, and stays
+-- nil. That is sound only because every position of a list, Maybe, tuple,
+-- record, HashMap or Any type carries a descriptor and goes through
+-- __mll_arg_marshal instead; what still arrives here structured is a value
+-- the compiler classifies as opaque (a newtype over a list is one), whose
+-- empty list this walker hands over as nil.
 local function __mll_to_lua(x)
     x = __force(x)
     if type(x) ~= "table" then return x end
@@ -730,8 +772,9 @@ local function __mll_to_lua(x)
     -- level `Just v -> v` interop, which is all Lua can faithfully carry.
     if getmetatable(x) == __just_mt then return __mll_to_lua(x[1]) end
     -- HashMap handle: hand Lua the keyed store (rerooted to this
-    -- version), stored-nil sentinels unboxed to absent keys — the same
-    -- convention as the typed hashmap marshalling arm. A structural-key
+    -- version). A stored-nil sentinel stays an absent key: untyped, it
+    -- cannot be told whether the value is a `[]` (which the typed hashmap
+    -- arm hands over as {}) or a Nothing. A structural-key
     -- map has no faithful Lua-side representation (its store is keyed by
     -- an internal encoding), and the typechecker's FFI rules exclude it,
     -- so reaching one here is an internal error.

@@ -81,6 +81,7 @@ cases/ffi_action_values	FFI declarations
 cases/ffi_constructed_values	FFI declarations
 cases/ffi_maybe_args	FFI declarations
 cases/ffi_multi_return	LuaPure FFI declarations (math.modf multi-return)
+cases/ffi_nil_convention	FFI declarations (LuaPure/LuaIO/LuaTry/LuaCatch/LuaIterator over a host chunk built with load): what a value is on the host side has no GHC twin
 cases/ffi_result_forms	FFI declarations of every call form (LuaPure/LuaIO/LuaTry/LuaCatch/LuaIOCatch/LuaIterator, :method, constant reads): host results have no GHC twin
 cases/ffi_strictness	FFI declarations
 cases/ffi_try_catch_values	FFI declarations

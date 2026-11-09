@@ -1260,6 +1260,208 @@ main = pure ()
     assert_eq!(t.raw_len(), 0, "[] value export is an empty table");
 }
 
+// HF2: the nil convention at every position of an EXPORT, observed by a
+// host. A HashMap value that is an empty list left as nil (`t[k] = nil`),
+// so the host saw no such key, and the map it handed back had one entry
+// fewer (`M.sizeOf(M.mkMap(1))` was 1). An empty list is the empty array {}
+// wherever it stands: a function result, a value export, an action's
+// result, an argument handed to a host callback; and what the host hands
+// in (an exported function's argument, a host callback's result) reads {}
+// back as the empty list, so the round trip through the host keeps every
+// entry. `form` renders a host value as {key=value,...} with sorted keys and
+// <tagged> for anything carrying a metatable (a raw cons cell, a `Just`
+// wrapper, a thunk), so each assertion pins the exact host-side shape.
+#[test]
+fn ffi_export_empty_list_is_an_array_in_every_position() {
+    let source = r#"
+data Rec = Rec
+    { rItems as "items" :: [Int]
+    , rJust as "just" :: Maybe [Int]
+    , rNone as "none" :: Maybe [Int]
+    } deriving (Show, LuaDict)
+
+data All = All
+    { aList as "list" :: [Int]
+    , aNested as "nested" :: [[Int]]
+    , aJust as "just" :: Maybe [Int]
+    , aNone as "none" :: Maybe [Int]
+    , aPair as "pair" :: (String, [Int])
+    , aRec as "rec" :: Rec
+    , aMap as "map" :: HashMap String [Int]
+    , aMaps as "maps" :: HashMap String (HashMap String Int)
+    , aRows as "rows" :: [HashMap Int [[Int]]]
+    } deriving (LuaDict)
+
+build :: Int -> All
+build n = All
+    { aList = []
+    , aNested = [[], [n], []]
+    , aJust = Just []
+    , aNone = Nothing
+    , aPair = ("x", [])
+    , aRec = Rec [] (Just []) Nothing
+    , aMap = hmFromList [("empty", []), ("full", [n, n])]
+    , aMaps = hmFromList [("empty", hmFromList []), ("full", hmFromList [("k", n)])]
+    , aRows = [hmFromList [(1, [[]]), (2, [])], hmFromList []]
+    }
+
+render :: All -> String
+render a = mconcat
+    [ show (aList a), "|", show (aNested a), "|", show (aJust a), "|", show (aNone a), "|", show (aPair a)
+    , "|", show (aRec a)
+    , "|", show (hmToList (aMap a))
+    , "|", show (map (\(k, inner) -> (k, hmToList inner)) (hmToList (aMaps a)))
+    , "|", show (map hmToList (aRows a))
+    ]
+
+export mkMap :: Int -> HashMap String [Int]
+mkMap n = hmFromList [("full", [n, n]), ("empty", [])]
+
+export sizeOf :: HashMap String [Int] -> Int
+sizeOf m = hmSize m
+
+export idMap :: HashMap String [Int] -> HashMap String [Int]
+idMap m = m
+
+export showMap :: HashMap String [Int] -> String
+showMap m = show (hmToList m)
+
+export everything :: Int -> All
+everything n = build n
+
+export idAll :: All -> All
+idAll a = a
+
+export showAll :: All -> String
+showAll a = render a
+
+export constMap :: HashMap String [Int]
+constMap = hmFromList [("empty", [])]
+
+export constAll :: All
+constAll = build 1
+
+export actMap :: IO (HashMap String [Int])
+actMap = pure (hmFromList [("empty", [])])
+
+export actAll :: IO All
+actAll = pure (build 1)
+
+export throughHost :: (All -> HashMap String [Int] -> [Int] -> LuaIO s All) -> LuaIO s String
+throughHost f = do
+    back <- f (build 1) (hmFromList [("empty", [])]) []
+    pure (render back)
+
+export mapFromHost :: (Int -> LuaIO s (HashMap String [Int])) -> LuaIO s Int
+mapFromHost f = do
+    m <- f 1
+    pure (hmSize m)
+
+export nilForms :: Int -> ([Maybe Int], [Any], HashMap String (Maybe [Int]), (), Maybe [Int])
+nilForms n = ([Just n, Nothing, Just 3, Nothing], [AnyInt n, AnyNull, AnyString "s", AnyNull], hmFromList [("just", Just []), ("none", Nothing)], (), Nothing)
+
+main :: IO ()
+main = pure ()
+"#;
+    let (lua, module) = compile_ffi_module(source);
+    lua.globals().set("M", module).unwrap();
+    let driver = r#"
+        local function form(x)
+            if type(x) ~= "table" then return tostring(x) end
+            if getmetatable(x) ~= nil then return "<tagged>" end
+            local ks = {}
+            for k in pairs(x) do ks[#ks + 1] = k end
+            table.sort(ks, function(a, b) return tostring(a) < tostring(b) end)
+            local ps = {}
+            for i = 1, #ks do ps[i] = tostring(ks[i]) .. "=" .. form(x[ks[i]]) end
+            return "{" .. table.concat(ps, ",") .. "}"
+        end
+        local function eq(label, got, want)
+            if got ~= want then
+                error(label .. ": expected " .. tostring(want) .. ", got " .. tostring(got), 2)
+            end
+        end
+        local ALL = "{just={},list={}"
+            .. ",map={empty={},full={1=1,2=1}}"
+            .. ",maps={empty={},full={k=1}}"
+            .. ",nested={1={},2={1=1},3={}}"
+            .. ",pair={1=x,2={}}"
+            .. ",rec={items={},just={}}"
+            .. ",rows={1={1={1={}},2={}},2={}}}"
+        local SHOWN = '[]|[[],[1],[]]|Just []|Nothing|("x",[])'
+            .. '|Rec {rItems = [], rJust = Just [], rNone = Nothing}'
+            .. '|[("empty",[]),("full",[1,1])]'
+            .. '|[("empty",[]),("full",[("k",1)])]'
+            .. '|[[(1,[[]]),(2,[])],[]]'
+        local function hostAll()
+            return {
+                just = {}, list = {},
+                map = {empty = {}, full = {1, 1}},
+                maps = {empty = {}, full = {k = 1}},
+                nested = {{}, {1}, {}},
+                pair = {"x", {}},
+                rec = {items = {}, just = {}},
+                rows = {{{{}}, {}}, {}},
+            }
+        end
+
+        -- The reported shape: the key of an empty-list value is present,
+        -- and the map that comes back has both entries.
+        local m = M.mkMap(1)
+        eq("function result: types", type(m.full) .. " " .. type(m.empty), "table table")
+        eq("function result: map value []", form(m), "{empty={},full={1=1,2=1}}")
+        eq("round trip: size", M.sizeOf(m), 2)
+        eq("round trip: identity", form(M.idMap(m)), "{empty={},full={1=1,2=1}}")
+        eq("round trip: entries", M.showMap(M.idMap(m)), '[("empty",[]),("full",[1,1])]')
+
+        -- An exported function's argument, built by the host.
+        eq("argument: map value {}", M.sizeOf({empty = {}}), 1)
+        eq("argument: map value {} decoded", M.showMap({empty = {}, full = {1, 1}}), '[("empty",[]),("full",[1,1])]')
+        eq("argument: empty map", M.sizeOf({}), 0)
+        eq("argument: every arm", M.showAll(hostAll()), SHOWN)
+
+        -- Every arm at once, as a function result, and through the host.
+        eq("function result: every arm", form(M.everything(1)), ALL)
+        eq("round trip: every arm, host form", form(M.idAll(M.everything(1))), ALL)
+        eq("round trip: every arm, value", M.showAll(M.idAll(M.everything(1))), SHOWN)
+
+        -- A value export and an action export follow the function result.
+        eq("value export: map value []", form(M.constMap), "{empty={}}")
+        eq("value export: every arm", form(M.constAll), ALL)
+        eq("action result: map value []", form(M.actMap()), "{empty={}}")
+        eq("action result: every arm", form(M.actAll()), ALL)
+
+        -- A host callback handed to an exported function: its arguments
+        -- leave mata-ll, its result comes back.
+        local seen
+        local shown = M.throughHost(function(all, map, list)
+            seen = form(all) .. " " .. form(map) .. " " .. form(list)
+            return all
+        end)
+        eq("host callback argument: every position", seen, ALL .. " {empty={}} {}")
+        eq("host callback result: what it was handed", shown, SHOWN)
+        eq("host callback result: built by the host",
+            M.throughHost(function() return hostAll() end), SHOWN)
+        eq("host callback result: map value {}",
+            M.mapFromHost(function() return {empty = {}, full = {1}} end), 2)
+
+        -- What IS nil on the host side: Nothing, AnyNull, (). In a slot
+        -- that exists without them (a tuple slot, an interior array
+        -- index) they are a nil there; where the slot is the value (a map
+        -- key, a trailing array index) they are absent.
+        local holes, anys, maybes, unit, nothing = (table.unpack or unpack)(M.nilForms(1), 1, 5)
+        eq("nil form: [Maybe Int]", form(holes), "{1=1,3=3}")
+        eq("nil form: [Any]", form(anys), "{1=1,3=s}")
+        eq("nil form: map of Maybe", form(maybes), "{just={}}")
+        eq("nil form: ()", unit, nil)
+        eq("nil form: Nothing", nothing, nil)
+    "#;
+    lua.load(driver)
+        .set_name("ffi_export_empty_list_is_an_array_in_every_position")
+        .exec()
+        .expect("every empty list an export hands out is {}, and comes back as the empty list");
+}
+
 #[test]
 fn ffi_export_mixed_args() {
     // Functions with both list and non-list arguments

@@ -524,10 +524,18 @@ dual of the result decoder \texttt{\_\_mll\_ffi\_decode}: it descends into lists
 tuples, \texttt{LuaDict} records, \texttt{HashMap} values, and \texttt{Maybe}
 (unwrapping \texttt{Just}/\texttt{Nothing}), rebuilding fresh Lua values --- so
 any type the decoder converts on the way in is converted on the way out --- while
-leaving opaque values (type variables, plain ADTs, functions) raw.  The
-\texttt{export} keyword wraps return values via \texttt{\_\_mll\_to\_lua}
-(deep-forces thunks, converts cons lists to Lua arrays) and incoming callbacks
-via \texttt{\_\_mll\_wrap\_callback}.
+leaving opaque values (type variables, plain ADTs, functions) raw.  Inside
+mata-ll Lua's \texttt{nil} represents the empty list, \texttt{Nothing} and
+\texttt{()} alike, so the marshaller never decides on \texttt{nil} itself: each
+nested value goes to the descriptor of its position's type, which makes an empty
+list the empty table \texttt{\{\}} at every depth (a \texttt{HashMap} value
+included) and leaves \texttt{nil} to \texttt{Nothing}, \texttt{()} and
+\texttt{AnyNull} (\texttt{ffi\_nil\_form} in \texttt{codegen/ffi.rs}).  The
+\texttt{export} keyword marshals a result of a structured type the same way,
+by its descriptor; a result with no descriptor (a scalar, an opaque value) goes
+through \texttt{\_\_mll\_to\_lua} (deep-forces thunks), and a host callback
+handed to an exported function is wrapped by
+\texttt{\_\_mll\_wrap\_callback\_in}.
 
 %----------------------------------------------------------------------
 \section{Standard Library}

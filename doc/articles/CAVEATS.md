@@ -473,6 +473,31 @@ tightening: it turns what used to compile into a silently-wrong
 `__mll_to_lua`/opaque conversion at the boundary — a raw tagged table
 the host cannot interpret — into a clear rejection.
 
+## A `Nothing`, `()` or `AnyNull` has no place of its own in a Lua table
+
+On the host side `nil` is the form of exactly three values: `Nothing`,
+`()` and `AnyNull`. Everything else is never `nil` — an empty list is
+the empty array `{}` and an empty `HashMap` the empty table `{}`, in
+every position, so a map entry whose value is `[]` keeps its key. But a
+Lua table holds no `nil`, so one of those three is absent wherever the
+table has no slot that exists without it:
+
+- as a **trailing list element**: `[Just 1, Nothing]` reaches the host
+  as `{1}` and an echoing host hands back `[Just 1]`; `[(), ()]` is
+  `{}`. A `nil` between two present elements keeps its index, in both
+  directions;
+- as a **map value**: `hmFromList [("k", Nothing)]` reaches the host as
+  `{}`, and comes back empty;
+- as a **`Maybe` payload**: `Just Nothing` (and `Just ()`) is `nil` and
+  comes back `Nothing`.
+
+A tuple slot, a record field and a call's argument or result keep such
+a value's place. Where the entry itself matters, give the value a host
+form that is not `nil`: a list instead of a `Maybe` as a map value, a
+`LuaDict` record with a `Maybe` field instead of a bare `Maybe`
+element. The SPEC's "`nil` at the FFI boundary: one convention" has the
+full table.
+
 ## Type families reduce, but non-injectively and with a termination bound
 
 Closed type families reduce during type checking, including over type

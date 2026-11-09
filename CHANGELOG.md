@@ -44,6 +44,54 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **An empty list is the empty array `{}` at every position of the FFI
+  boundary, a map value included; `nil` on the host side is `Nothing`,
+  `()` and `AnyNull` and nothing else.** `export mkMap :: Int -> HashMap
+  String [Int]` with `mkMap n = hmFromList [("full", [n, n]), ("empty",
+  [])]` handed the host `{full = {1, 1}}`: `type(m.empty)` was `nil`, and
+  `M.sizeOf(m)` of an exported `sizeOf :: HashMap String [Int] -> Int`
+  answered 1, where the map has 2 entries and the same empty list in a
+  record field, a tuple slot, a list or under `Just` crossed as `{}`. The
+  same loss met a map passed as an import's argument, returned by a
+  mata-ll callback or handed to a host callback, and an echoing host
+  returned a smaller map than it was given. Inside mata-ll Lua's `nil`
+  represents three values — the empty list, `Nothing` and `()` — which
+  only the type tells apart, and a HashMap stores such a value under a
+  scalar key behind a sentinel (`t[k] = nil` being Lua's delete). The
+  argument marshaller's map arm unboxed the sentinel and then tested `x
+  ~= nil` before asking the value type's descriptor, so the list
+  descriptor, which answers `{}` for the empty list, was never asked,
+  and `t[k] = nil` dropped the key. Every arm now hands its nested value
+  to the descriptor of that position's type whether or not the value is
+  `nil`-represented; the type decides, and the decision is written down
+  once: `ffi_nil_form` in the compiler (`Maybe`, `Any`, `()` have `nil`
+  as a host form; a list, a map, a tuple, a record and a scalar never
+  do) and a table in the SPEC ("`nil` at the FFI boundary: one
+  convention") naming, per type, the host form outward and what a host
+  `nil` is inward, and, per position, whether a value whose host form is
+  `nil` keeps its place. The decoder follows the same predicate: a list
+  whose element type has a `nil` host form is an array that may have
+  holes and takes its length from its largest index, which it did for a
+  `Maybe` element only — `[AnyInt 1, AnyNull, AnyInt 3]` went out as
+  `{1, nil, 3}` and came back `[AnyInt 1]`; it comes back whole. What a
+  Lua table cannot carry stays lost and is listed there: a trailing
+  `Nothing`/`()`/`AnyNull` of a list, a map entry whose value is one,
+  and `Just Nothing` (which reads back `Nothing`). Found by the 2026-10
+  fresh-eyes review (HF2, the review's F2). (Case `ffi_nil_convention`,
+  self-asserting on both hosts over a host chunk built with the standard
+  `load`: one line per cell of direction/position × arm × shape — the
+  host form of `[]`, `[[]]`, `Just []`, `("x", [])`, a record with empty
+  fields, a map with a `[]` value, a map of maps with an empty one, the
+  empty map and every arm at once, as an argument, an optional argument
+  and a callback's result; the same host values received as a result
+  under `LuaPure`/`LuaIO`/`LuaCatch`/`LuaTry`, a constant, an iterator
+  step and a callback's argument; the echo through the host; the refused
+  `nil`s; and the lost cells. Host-driven test
+  `ffi_export_empty_list_is_an_array_in_every_position`: the same shapes
+  as an export's function result, value, action result and argument, and
+  through a host callback's arguments and result. No GHC twin: FFI
+  declarations.)
+
 - **A host result is received the same way under every FFI call form.**
   `sfind :: String -> String -> LuaPure ":find" (Maybe Int)` printed
   `Nothing` for a miss and died on a hit with `attempt to index a number
@@ -2257,6 +2305,20 @@ API of the `mllc` library crate.)
   `module_reexport{,_chain,_alias}.mll`.
 
 ### Changed
+
+- **A HashMap entry whose value is the empty list reaches the host as a
+  key holding `{}`** (visible to a host that relied on the key being
+  absent). Until now the entry left mata-ll as `nil` and the host saw no
+  such key — as an import's argument, an export's result or value, the
+  result of a mata-ll callback and an argument of a host callback alike.
+  A host that tested `m[k] == nil` to mean "no items" now finds an empty
+  table there (`next(m[k]) == nil`, `#m[k] == 0`), as it already did for
+  an empty list in a record field, a tuple or another list; a host that
+  iterates the values with `ipairs` needs no change. `Nothing`, `()` and
+  `AnyNull` values still leave their key absent. In the other direction
+  a host array declared `[Any]` or `[()]` with a `nil` between two
+  values is now read to its largest index, as `[Maybe a]` was; it used
+  to end wherever `#` put the border.
 
 - **A declared tuple is the host call's return values wherever a host
   function's call result is received** (breaking for a host that relied

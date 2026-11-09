@@ -827,6 +827,17 @@ in `ffi_result`, and the runtime helpers end in `__mll_ffi_ret`.
 parameters: `Nothing` omits the argument, relying on Lua's `nil`
 default.
 
+`nil` has one meaning at the boundary, decided by the declared type
+(SPEC "`nil` at the FFI boundary: one convention"). Inside mata-ll the
+empty list, `Nothing` and `()` are all represented by `nil`; on the host
+side only `Nothing`, `()` and `AnyNull` are, and an empty list is the
+empty array `{}` in every position — a `HashMap` value included, whose
+key therefore stays present. No part of the marshaller decides on
+`x == nil`: each nested value goes to the descriptor of its position's
+type (`ffi_nil_form` in codegen/ffi.rs states which types have a `nil`
+host form, and the list decoder reads holes for exactly those element
+types).
+
 ### LuaIO s (scoped monad)
 
 The parser disambiguates `LuaIO "name" a` (FFI type family, string

@@ -644,15 +644,19 @@ Arguments crossing OUT to the host are marshalled from the mata-ll
 representation by their declared type. **The argument marshaller is a complete
 structural dual of the result decoder: it descends into exactly the container
 types the decoder converts, so encode-then-decode is identity at every nesting
-depth.** Those containers are:
+depth** — for every value but one whose host form is `nil` standing where a
+Lua table has no slot for it (see "`nil` at the FFI boundary: one convention"
+below). Those containers are:
 
 - a **list** becomes a plain 1-based Lua array (its elements recursively
-  marshalled);
+  marshalled); the empty list is the empty array `{}`, never `nil`;
 - a **tuple** becomes a positional table, a **`LuaDict` record** a name-keyed
   table (their lazy fields forced, nested structure converted);
-- a **`HashMap`** becomes a string-keyed dict — each *value* recursively
-  marshalled by the value type; keys are scalars already usable as Lua keys and
-  are kept (the decoder likewise validates but does not convert keys);
+- a **`HashMap`** becomes a keyed dict — each *value* recursively
+  marshalled by the value type, so an entry whose value is `[]` is a key
+  holding `{}`; keys are scalars already usable as Lua keys and
+  are kept (the decoder likewise validates but does not convert keys); the
+  empty map is `{}`;
 - a **`Maybe`** reached through this structural descent is *unwrapped* — `Just x`
   becomes the bare `x` (recursively marshalled, so `Just [1,2,3]` is a real
   array and `Just "s"` a native string), `Nothing` becomes `nil` (an absent
@@ -755,6 +759,77 @@ Three consequences of the rule:
   not fit the declared type (a missing tuple value, a `nil` Number) is
   an integration error and raises, under the guarded forms as under the
   others.
+
+## `nil` at the FFI boundary: one convention
+
+Inside mata-ll three different values are represented by Lua's `nil`:
+the empty list, `Nothing` and `()`. Only the type tells them apart, so
+at the boundary the DECLARED type decides what a value is on the host
+side, and the answer is the same in both directions and in every
+position — an import's argument, an optional argument, the result of a
+mata-ll callback the host calls, an exported function's result, an
+exported value, the result of an exported action, an argument of a host
+callback (outward); an import's result under every call form, a
+constant, an iterator step, an argument of a mata-ll callback, an
+exported function's argument, a host callback's result (inward).
+
+**Which values are `nil` on the host side, and which never are:**
+
+| Declared type | The mata-ll value | On the host side | A host `nil` coming in |
+|---|---|---|---|
+| `Maybe a` | `Nothing` | `nil` | `Nothing` |
+| `Maybe a` | `Just x` | the host form of `x` — which is `nil` when `x`'s is (`Just Nothing`, `Just ()`, `Just AnyNull`) | — |
+| `()` | `()` | `nil` | `()` |
+| `Any` | `AnyNull` | `nil` | `AnyNull` |
+| `[a]` | `[]` | the empty array `{}`; a list is always a table | read as `[]` (a host may leave an empty array out) |
+| `HashMap k v` | the empty map | the empty table `{}`; a map is always a table | refused |
+| a tuple | any | a positional table | refused |
+| a `LuaDict` record | any | a keyed table | refused (a record none of whose fields can be checked is not inspected) |
+| `String`, `ByteString`, `Int`, `Bool` | any, `""`, `0` and `False` included | the string, number or boolean | refused inside a structure; not checked as a bare result |
+| `Number` | any | the number | refused |
+| an opaque type | any | the value as it is | not inspected |
+
+"Refused" is the decoder's error (`FFI result: declared HashMap String
+[Int] but the host returned nil`, with the position and the host
+function). Two host conventions read a `nil` before the type is asked:
+a `nil` first value of a `LuaTry` call is its failure, and a `nil` first
+value of a `LuaIterator` step ends the list (see "FFI results" above).
+And a host array is read by Lua's own rule for a sequence: where the
+element type has no `nil` form, the array's length is `#`, so a `nil`
+the host left between two elements is not a sequence and is either
+refused as that element or ends the list there, as the interpreter's
+`#` has it.
+
+So an empty list is `{}` wherever it stands — on its own, as an element
+(`[[]]` is `{{}}`), under a `Just` (`Just []` is `{}`), in a tuple slot,
+in a record field, and as a map value: `hmFromList [("full", [1, 1]),
+("empty", [])]` is `{full = {1, 1}, empty = {}}` on the host, and comes
+back with both entries.
+
+**Where a value whose host form is `nil` stands.** A Lua table holds no
+`nil`, so such a value survives where its place exists without it and
+is absent where the place IS the value:
+
+| Position | On the host side | Through the host and back |
+|---|---|---|
+| a call's argument | an explicit `nil` (a trailing optional argument is left out) | exact |
+| a result, a constant | `nil` | exact |
+| a tuple slot | no value at its index | exact: slots are read by index |
+| a record field | no such key | exact: a missing key reads as `nil` |
+| a list element before the last non-`nil` one | no value at its index | exact: the array's length is its largest index |
+| a trailing list element | nothing: the array is shorter | LOST — `[Just 1, Nothing]` is `{1}` and comes back `[Just 1]`; `[(), ()]` is `{}` and comes back `[]` |
+| a map value | no such key | LOST — the entry is gone: `hmFromList [("k", Nothing)]` is `{}` |
+| a `Maybe` payload | `nil` | LOST — `Just Nothing` comes back `Nothing` |
+
+The three LOST rows are what a Lua table cannot carry; a type whose
+values must survive there needs a host form that is not `nil` (a list
+`[a]` instead of `Maybe a` as a map value, a `LuaDict` record with a
+`Maybe` field instead of a bare `Maybe` element).
+
+Two kinds of value do not take part: an opaque value crosses as it is,
+and a recursive record or newtype is opaque from its second level on
+(see "Boundaries between standard Lua and MATA-LL"), so a list inside
+it is not converted there.
 
 ## Passing mata-ll callbacks to FFI functions
 
