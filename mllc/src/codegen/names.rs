@@ -591,7 +591,7 @@ pub(super) fn reserved_binder(stmts: &[super::lua::Stmt]) -> Option<String> {
 /// typeclass method inlines to, or None. Single point of truth shared by the
 /// expr_ast App-arm inline and expr_yields_whnf, so the two can never
 /// disagree about which calls become forced native operations.
-pub(super) fn primitive_method_lua_op(name: &str) -> Option<&'static str> {
+pub(crate) fn primitive_method_lua_op(name: &str) -> Option<&'static str> {
     match name {
         "eq_Int" | "eq_Number" | "eq_String" | "eq_Bool" | "eq_ByteString" => Some("=="),
         "ne_Int" | "ne_Number" | "ne_String" | "ne_Bool" | "ne_ByteString" => Some("~="),
@@ -607,10 +607,10 @@ pub(super) fn primitive_method_lua_op(name: &str) -> Option<&'static str> {
 /// Per-operand strictness of a NON-CONTROL infix operator (`>>=`, `>>`,
 /// `$`, `.` carry effect/closure structure and are not asked): whether
 /// the emitted operator forces that operand when it runs. One statement
-/// of what the InfixApp emitter arms do, read by the split pass (which
-/// may pull a deep operand into an eager binding only where the operator
-/// forces it anyway) and asserted by `operator_infix_ast` for the native
-/// path:
+/// of what the InfixApp emitter arms do, asserted by `operator_infix_ast`
+/// for the native path (the split pass once read it to decide which
+/// operands it could name eagerly; it now leaves eagerness to the `let`
+/// emitters' own rule, see split.rs):
 ///
 ///   * the native Lua operators (`operator_infix_ast` over `is_builtin_op`)
 ///     and the integer division helpers (`intdiv_infix_ast`) force both

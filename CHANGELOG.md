@@ -44,6 +44,71 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A long operator chain, `if … else if …` ladder or nested `case` chain
+  emits Lua the host parser loads: the emitted nesting of every function
+  is bounded, whatever the length of the source expression.** The Lua
+  hosts refuse a chunk at load time when one expression nests past their
+  parser's recursion budget (200 levels on both: PUC Lua's `C stack
+  overflow`, LuaJIT's `chunk has too many syntax levels`) or when one
+  function needs more register slots than a frame holds (LuaJIT's
+  `function or expression too complex` at 250), and mata-ll emitted a
+  body as one expression tree wherever the source was one: `[n] ++ … ++
+  [n+64]` (65 operands), `(n < 1) && … && (n < 100)`, `succ . … . succ`
+  (60), `succ $ … $ 0` (160 on LuaJIT), an `if … else if` ladder of 188
+  arms and a `case` nested 250 deep in the fall-through branch each
+  compiled to a module no host would load (GHC: `2080`, `True`, `60`,
+  `160`, …). The expression-splitting pass that already cut arithmetic
+  and `<>` chains could not reach these: it left a "cheap" operand in a
+  lazy position inline (the right side of `&&`/`||`/`++`), never touched
+  the operands of `$` and `.`, never cut a branch of an `if` or `case`
+  (a binding extracted inside a branch stayed inside it, still nested in
+  every outer arm), and measured raw TIR depth against a threshold that
+  did not account for what each construct costs the host. The pass now
+  estimates, per sub-expression, the syntax levels and register slots the
+  emitter will spend (`Cost`, an upper bound per construct — a call
+  argument that may be thunked, a native operator's parenthesized and
+  forced operand, `++`'s and a cons cell's suspended tail, composition's
+  invoked closure, `if`/`case`/`let` in value position as invoked
+  closures, a flat list literal, a bind chain's statement sequence) and
+  cuts any child over `LEVEL_BUDGET` (96 of the hosts' 200) or
+  the slot budget (the frame's 232 less the clause's own binders, never
+  below `TEMP_BUDGET` = 48) into a `let`
+  binding, cheap or not: a binding is emitted eagerly only where that is
+  unobservable (its body cannot bottom and runs no user code, or the
+  body provably forces it first) and as a memoizing thunk otherwise, so
+  the lazy operand of `&&`, `||` and `++`, the argument of a non-strict
+  callee and an `if` branch keep their laziness and their short-circuit
+  order exactly — a chunk of `q && r && …` runs only when the `&&`
+  before it reached it. Bindings cut inside an `if` branch, a guard or a
+  `case` branch float to the enclosing scope when they mention none of
+  the branch's pattern variables (a thunk allocated on a path that never
+  forces it is unobservable), which is what flattens a ladder into
+  sibling bindings; `f $ x` is the application `f x` (its argument is a
+  hoist point); a deep composition is let-bound as the closure it is
+  (building one evaluates nothing); and a `>>` chain nested to the LEFT
+  past the budget — `>>` is `infixl`, and each left operand ran as a
+  nested runner closure — is re-associated to the right, which for the
+  action monads (the only ones an InfixApp `>>` reaches codegen at) is
+  the same sequence of actions. Every budget is derived from per-construct
+  costs measured on Lua 5.5 and LuaJIT, tabulated in
+  `codegen/nesting.rs`, which also measures the finished tree with the
+  hosts' own rules in test builds and fails the compile on a violation,
+  so the test corpus checks the bound on every program; a program whose
+  expressions were within budget is emitted unchanged. Found by the
+  2026-10 fresh-eyes review (O12; M14 is the same defect seen from the
+  modules review). What remains is a chain of nested BINDERS: a do-block
+  in a non-IO monad (`Maybe`, `Either`, a user monad) desugars to one
+  lambda per statement, nested, and loads up to 63 statements (see
+  CAVEATS). (GHC-goldened cases `deep_append_chain` — 130 operands with
+  an `undefined` tail under `take` and an `error` operand past the ones
+  consumed —, `deep_bool_chain` — 200 operands of `&&` and `||` with a
+  raising operand after the deciding one and operands that are calls —,
+  `deep_compose_chain` — 120, with `const 7 . …` applied to `undefined`
+  —, `deep_dollar_chain` — 320 —, `deep_if_ladder` — 400 arms, total and
+  called conditions, then-nested —, `deep_case_ladder` — 500 —,
+  `deep_then_chain` — 300 —, `deep_mixed_chains`; shape test
+  `chain_shapes_stay_under_the_host_nesting_budgets` at 1000 operands of
+  twelve shapes.)
 - **A derived `Ord` (and `Eq`) is linear in the constructor count, so a
   type with many constructors loads on LuaJIT; an enumeration's derived
   methods are each one constructor-index comparison.** `compare` of a

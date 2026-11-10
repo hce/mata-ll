@@ -26,7 +26,7 @@ Everything is orchestrated by `mllc/src/lib.rs:compile`. The stages, in order:
 | 7 | Monomorphize | `mono::Monomorphizer::run` | TIR → TIR (specialized) |
 | 8 | Verify | `mono::Monomorphizer::verify` (→ `verify::check`) | TIR → TIR (unchanged; errors if an invariant is violated) |
 | 9 | Constant fold | `fold::fold_module` | TIR → TIR |
-| 10 | Split deep expressions | `split::split_module` | TIR → TIR (deep nesting hoisted into `let`s so the emitted Lua stays within Lua's own parser limits) |
+| 10 | Split deep expressions | `split::split_module` | TIR → TIR (sub-expressions past the host parser's nesting and register budgets hoisted into `let`s; see §7a) |
 | 11 | Dead-code elimination | `dce::eliminate` | TIR → TIR (unreachable functions dropped) |
 | 12 | Codegen (+ demand analysis) | `codegen::generate` | TIR → Lua source `String` |
 
@@ -794,6 +794,118 @@ integer literal is a deferred overloaded literal whose instance is not
 known, and an overflowing fold declines (an `Integer` promotes). `div`
 and `mod` decline on a zero divisor and on `minBound div -1`, where the
 runtime raises.
+
+---
+
+## 7a. Expression splitting (`split.rs`)
+
+Post-fold, pre-DCE TIR→TIR pass. A Lua host refuses a chunk at LOAD time
+when one expression nests past its parser's recursion budget
+(`LUAI_MAXCCALLS` = 200 on PUC, reported as `C stack overflow`;
+`LJ_MAX_XLEVEL` = 200 on LuaJIT, `chunk has too many syntax levels`) or
+when one function needs more register slots than a frame holds
+(`LJ_MAX_SLOTS` = 250, `function or expression too complex`; `MAXREGS` =
+255 on PUC). Codegen emits a function body as one expression tree
+wherever the source is one, so this pass bounds the tree first.
+
+**Cost model.** `cost(e)` estimates, per TIR node, the syntax levels and
+the register slots the emitter will spend on `e` — an upper bound over the
+emission shapes, in the units `codegen/nesting.rs` measures (the per-
+construct costs were measured on Lua 5.5 and LuaJIT; the table is in that
+file's header). The rules worth knowing: a call argument costs
+`ARG_LEVELS` (4: the argument, plus the three levels of a `__thunk(
+function() return … end)` suspension it may get) and a pending call holds
+two slots (callee and frame link) plus one per argument already built; a
+native operator's right operand costs `OPERAND_LEVELS` (3: operand, its
+grouping paren, a `__force`) and one slot, its left operand one level —
+the same for a resolved primitive method applied to two operands
+(`semigroup_String s t`, `ord_lt__Int a b`), which `try_primitive_method_app`
+inlines to the operator; a
+`++` or cons tail is a suspended closure (three levels, slots reset); `.`
+nests its inner side as an invoked closure (4); `if`/`case`/`let` in value
+position are invoked closures around statements (6 to a branch); a bind
+chain's right spine is a statement sequence (free) and its left operand a
+runner closure (4); a list literal of eight or more elements is flat
+(`codegen::flat_list_literal`, the emitter's own judgment); a lambda, a
+thunk or an invoked closure starts a fresh slot frame (`Cost::framed`).
+
+**Budgets.** `LEVEL_BUDGET` = 96 levels for one extracted sub-expression;
+96 leaves the hosts' 200 room for the fixed wrapping codegen adds around
+a body (up to ~30 levels: chunk statement, function body, thunk or action
+closure, pattern-match dispatch closure and condition nesting) and, on
+PUC, for the host's own call depth at load time (one level per frame);
+the corpus's deepest emitted function reaches 104. The slot budget is per
+clause (`Cx::for_clause`): the frame's 232 slots less the clause's own
+binders (parameters, where-bindings, every `let` and pattern binder of
+the body — an upper bound on the locals codegen declares in that Lua
+function), capped at the spill limit (190) and never below `TEMP_BUDGET`
+= 48 — so a CAF or a small function keeps nearly the whole frame for its
+expressions, and one at the emitter's local limit (180 plain locals plus
+the spill table and parameters) keeps the 48 that fit under 250. Both sit
+above anything hand-written — an ordinary corpus program emits at most
+~50 levels and ~45 expression slots — so a program within budget is
+emitted byte-identically.
+
+**Mechanism.** `flatten_expr` rebuilds a body bottom-up; at every hoist
+point (`hoist`: call and operator arguments, `if` conditions, `case`
+scrutinees, tuple fields, record-update values) a child over budget that
+`is_extractable` is replaced by a `Var` and pushed as a `__splitN` binding
+of the nearest scope. The scope's bindings wrap its body in one `Let`,
+which codegen lowers to sibling `local` statements (or an IIFE whose
+bindings are siblings), so a chain of any length becomes a sequence of
+bindings each within budget, every one referring to the previous by name.
+Extractable: pure first-order values (never IO/LuaIO/ST — effect structure
+codegen pattern-matches), plus compositions whose final result is one (a
+closure; building it evaluates nothing).
+
+**Laziness and order, per construct.** The pass never decides eagerness
+itself: codegen's `let` emitters do (`strict_binding_ok`,
+`exact_demanded_bindings`), and they emit a binding eagerly only where
+that is unobservable — its body cannot bottom and runs no user code
+(`is_cheap_to_force`: concrete operands, non-trapping native operators,
+constructors) or the body provably forces it first — and as a memoizing
+thunk otherwise, forced exactly where its single reference is. Hence:
+- `&&`/`||`: a cut chunk of the right operand is a thunk the Lua `and`/
+  `or` reaches only when the left side did not decide, or an eager
+  conjunction of provably total comparisons over WHNF values, which
+  computes the same booleans and observes nothing; an operand that can
+  raise or that is a call makes its chunk a thunk (pinned by
+  `deep_bool_chain`'s raising operand past the deciding one).
+- `++`: the right operand is a thunk the runtime append reaches when the
+  left list is exhausted; a chunk of a chain ending in `undefined` is
+  never forced under `take` (`deep_append_chain`).
+- `$`: `f $ x` is `f x`; a cut argument is a thunk unless `f`'s row is
+  strict there, exactly as `arg_ast` treats a plain application.
+- `.`: a cut sub-composition is a let-bound closure, called like any
+  local function value; composition is lazy in both sides, so nothing
+  runs at the let (`const 7 . … ` applied to `undefined` returns 7).
+- `if`/`case` ladders: a branch is a conditional position that binds
+  nothing (an `if` arm, a guard) or binds pattern variables (a `case`
+  branch); `hoist_branch` floats the bindings cut inside it to the
+  enclosing scope unless they `mention` a bound name (a thunk allocated
+  on a path that never forces it is unobservable; an eager one is total)
+  and then extracts the branch itself when it is still over budget. A
+  binding kept inside a branch would be parsed inside every outer arm,
+  so floating is what flattens a ladder.
+- `>>` (action monads only, the only InfixApp `>>` to reach codegen — see
+  `mono::is_action_monad`): a left spine past the budget is rotated to
+  the right (`rotate_then_chain`), which the bind-chain emitter writes as
+  a statement sequence; both associations run the same actions in the
+  same order.
+- Binder boundaries: lambda bodies, `let` bindings and bodies and
+  where-bindings start fresh scopes — a thunk floated out of a lambda
+  would be shared across its calls (full laziness, which GHC applies only
+  under `-O`).
+
+**The check.** `codegen/nesting.rs` measures the finished Lua tree with
+the hosts' rules (statements, right operands, call arguments, parens,
+negations, table items and index keys open a level; a function literal
+opens a new slot frame holding its parameters and locals) and
+`stamp_violations` — the test harness's compile of every corpus program —
+fails on a tree over `MAX_LEVELS` (150) or `MAX_SLOTS` (240). What the
+pass cannot flatten is a chain of nested binders (a non-IO do-block of 64
+statements, a 191-deep `case` chain on the previous pattern's variable);
+CAVEATS lists the measured limits.
 
 ---
 

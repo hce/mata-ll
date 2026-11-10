@@ -91,6 +91,49 @@ A type with more constructors than that needs a hand-written instance
 limit is the host's per-function bytecode span; splitting one function
 across several is not something the compiler does for a derived method.
 
+### Expression nesting is bounded by the compiler; binder nesting is not
+
+Both hosts also refuse a chunk whose syntax nests past their parser's
+recursion budget — 200 levels, PUC Lua's `C stack overflow` and LuaJIT's
+`chunk has too many syntax levels` — and a function whose expressions
+need more register slots than a frame holds (250 on LuaJIT, `function or
+expression too complex`). The compiler keeps every emitted function under
+both (`mllc/src/split.rs`): a sub-expression that would cost the host
+more than 96 levels, or more register slots than the function's own
+locals leave free (never fewer than 48), is cut into a `let` binding, whatever
+construct it is — a `++`, `&&`, `||`, `<>` or arithmetic chain, a `.` or
+`$` chain, an `if … else if …` ladder, a `case` nested in a fall-through
+branch, a `>>` chain, nested calls — and the cut keeps the laziness and
+the short-circuit order of the original (the binding is a thunk unless
+evaluating it early is unobservable). Chains of a thousand operands of
+each shape load and run on both hosts. The per-construct costs behind
+the budget were measured on Lua 5.5 and LuaJIT and are tabulated in
+`mllc/src/codegen/nesting.rs`; the emitted module nests at most ~150
+levels, which leaves a host that `require`s it from inside its own call
+stack about 45 nested frames on PUC Lua (where each frame costs one of
+the 200) — a module loaded from a handler a few frames deep is fine.
+
+What the compiler cannot flatten is a chain of nested BINDERS, because
+each binder's scope is a Lua function literal around everything after
+it, and a function literal is parsed inside the expression that holds it:
+
+- A `do` block in a monad other than `IO`/`ST` — `Maybe`, `Either`, a
+  user monad — desugars to one lambda per `<-` statement, each nested in
+  the previous one's body (`m >>= \x -> (m' >>= \y -> …)`), three
+  parser levels per statement. Measured on this build: 63 statements
+  load on both hosts; 64 is refused by Lua 5.5 (LuaJIT a few later).
+  `IO` and `ST` do-blocks are emitted as a flat statement sequence and
+  have no such limit (the corpus runs one of 200 statements). Split a
+  long non-IO do-block into helper functions.
+- A `case` whose fall-through branch is another `case` on a variable the
+  first one bound (`case xs of (y:ys) -> case ys of (z:zs) -> …`) nests
+  one `if` per level; 190 levels load, 191 are refused by Lua 5.5. (A
+  `case` chain whose inner scrutinees do not use the outer pattern
+  variables is cut like any ladder.)
+- A function or lambda with more than 200 parameters is refused by both
+  hosts (`too many local variables`): parameters are not spilled into
+  the `_v` table the way locals past 180 are.
+
 ## Non-exhaustive patterns are rejected at compile time (mostly)
 
 When a case expression or function definition doesn't cover all constructors,

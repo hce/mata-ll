@@ -57,6 +57,9 @@
 //!   JIT-killer backstop)
 //! - upvalues.rs — opt pass 8: the upvalue budget (a function literal
 //!   never captures more enclosing locals than LuaJIT's parser allows)
+//! - nesting.rs — the host parser's syntax-level and register budgets,
+//!   measured over the finished tree (the test-build check behind the
+//!   split pass's TIR-level bound)
 //! - util.rs — type- and TIR-shape helpers shared across the module
 //! - runtime.rs — the runtime prelude and its on-demand chunk selection
 
@@ -78,6 +81,7 @@ mod ioloop;
 mod lua;
 mod module;
 mod names;
+mod nesting;
 mod opt;
 mod pattern;
 mod runtime;
@@ -96,10 +100,22 @@ pub(crate) use names::runtime_spellings;
 // for (`SpecKind::Dict`).
 #[cfg(test)]
 pub(crate) use runtime::bound_names as runtime_bound_names;
-#[cfg(test)]
+// The split pass's cost model reads the operator set codegen lowers to a
+// Lua operator (every other operator is a call), and the resolved
+// primitive methods (`ord_lt__Int`, `semigroup_String`, …) whose
+// two-argument application inlines to one (`try_primitive_method_app`).
 pub(crate) use names::is_builtin_op;
+pub(crate) use names::primitive_method_lua_op;
+
+/// The elements of a list literal codegen emits FLAT (`try_cons_app`: a
+/// `local _l` built by one `__mll_cons` statement per element inside an
+/// invoked closure) — the same judgment the emitter makes, for the split
+/// pass's cost model: such a spine nests nothing per element, where a
+/// cons chain of any other shape nests a suspended tail per cell.
+pub(crate) fn flat_list_literal(e: &crate::tir::TExpr) -> Option<Vec<&crate::tir::TExpr>> {
+    CodeGen::collect_list_literal(e)
+}
 pub(crate) use names::first_class_op_lowered;
-pub(crate) use names::infix_operand_strictness;
 
 /// Public for the strictness-contract check in mll-tests (G5): the harness
 /// probes runtime functions in emitted Lua by the names codegen actually
@@ -107,15 +123,6 @@ pub(crate) use names::infix_operand_strictness;
 /// from the compiler's own mapping instead of a hand-kept copy. Not API.
 #[doc(hidden)]
 pub use names::sanitize_name;
-
-/// Would the emitter build this expression eagerly (bare + concrete) rather
-/// than as a memoizing thunk? The single home of that predicate
-/// (`CodeGen::is_cheap`), exposed for the split pass, which must agree with
-/// the emitter about which non-strict positions stay lazy — a hand-kept
-/// mirror there once drifted (it counted `^` as a Lua-native operator).
-pub(crate) fn is_cheap(e: &crate::tir::TExpr) -> bool {
-    CodeGen::is_cheap(e)
-}
 
 /// The CONTEXT-FREE floor of `is_cheap_to_force`: cheap-to-force with no
 /// variable counted as provably WHNF. This is exactly the set of argument
@@ -894,7 +901,12 @@ pub(crate) fn stamp_violations(module: &TModule) -> Vec<String> {
         // `generate` reports this as its own diagnostic; nothing to refute.
         return Vec::new();
     }
-    opt::run_refuted(&mut stmts)
+    let mut violations = opt::run_refuted(&mut stmts);
+    // The host parser's nesting budgets over the final tree (nesting.rs):
+    // the split pass bounds them at the TIR level, and this is the check
+    // that the emitted shapes stayed within what it assumed.
+    violations.extend(nesting::violations(&stmts));
+    violations
 }
 
 /// G5 mirror-contract tests: the pieces of the demand/codegen agreement
