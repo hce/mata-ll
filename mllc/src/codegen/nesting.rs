@@ -1,8 +1,9 @@
-//! The host parser's two nesting budgets, measured over the finished Lua
-//! tree exactly as the hosts charge them.
+//! The host parser's nesting budgets, measured over the finished Lua tree
+//! exactly as the hosts charge them.
 //!
 //! A Lua chunk is refused at LOAD time, before anything runs, when its
-//! syntax nests too deeply or one function needs too many registers:
+//! syntax nests too deeply, one function needs too many registers, or one
+//! function has too many locals active at once:
 //!
 //!   * SYNTAX LEVELS. PUC Lua's parser calls `enterlevel` in `statement`
 //!     and in `subexpr`, and the count shares `LUAI_MAXCCALLS` (200) with
@@ -22,6 +23,14 @@
 //!     what fails first for nested calls: every pending call holds its
 //!     callee, its frame link (two slots on a GC64 LuaJIT) and the
 //!     arguments already evaluated.
+//!   * ACTIVE LOCALS. A function's parameters and the `local`s in scope
+//!     at a point share one count of at most 200 (`MAXVARS` in lparser.c,
+//!     "too many local variables"; `LJ_MAX_LOCVAR` in lj_def.h, "function
+//!     at line N has more than 200 local variables"); measured, the 200th
+//!     is refused on both hosts, so 199 may be active. A block's locals
+//!     end with the block; a parameter list counts in full, which is why
+//!     the emitter's frame budget (frame.rs) routes a long one through a
+//!     vararg table.
 //!
 //! Measured per construct on both hosts (2026-11, Lua 5.5 and LuaJIT
 //! 2.1, a chunk loaded directly by the interpreter; the deepest loadable
@@ -74,6 +83,13 @@ pub(super) const MAX_LEVELS: usize = 150;
 /// the varargs base.
 pub(super) const MAX_SLOTS: usize = 240;
 
+/// Locals one function may have active at once, parameters included: the
+/// hosts' own bound (the 200th local is refused). The emitter stays well
+/// under it (`LOCAL_LIMIT`, 180 counted locals plus the spill table and
+/// the passes' few additions); this is the host's refusal line, checked
+/// over the finished tree.
+pub(super) const MAX_LOCALS: usize = 199;
+
 /// The two maxima over a tree, each with the index of the top-level
 /// statement it was found in.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +98,10 @@ pub(super) struct Nesting {
     pub levels_at: usize,
     pub slots: usize,
     pub slots_at: usize,
+    /// The most locals active at once in one function, parameters
+    /// included, and the top-level statement holding that function.
+    pub locals: usize,
+    pub locals_at: usize,
     /// The most slots one statement's expressions needed above the locals
     /// active at that statement — the part of a frame that expression
     /// shape alone decides, which is what the split pass bounds.
@@ -95,9 +115,12 @@ pub(super) fn measure(stmts: &[Stmt]) -> Nesting {
     // active for every later statement.
     let mut active = 0usize;
     for (i, s) in stmts.iter().enumerate() {
-        let mut m = Measure { levels: 0, slots: 0, temps: 0, base: 0 };
+        let mut m = Measure { levels: 0, slots: 0, locals: 0, temps: 0, base: 0 };
         // A top-level statement sits at level 1 (the chunk's `statement`).
         m.stmt(s, 1, &mut active);
+        // The chunk's own locals are active for every statement after
+        // their declaration.
+        m.note_locals(active);
         if m.levels > n.levels {
             n.levels = m.levels;
             n.levels_at = i;
@@ -106,12 +129,16 @@ pub(super) fn measure(stmts: &[Stmt]) -> Nesting {
             n.slots = m.slots;
             n.slots_at = i;
         }
+        if m.locals > n.locals {
+            n.locals = m.locals;
+            n.locals_at = i;
+        }
         n.temps = n.temps.max(m.temps);
     }
     n
 }
 
-/// The violations of the two budgets in a finished tree, as diagnostics
+/// The violations of the three budgets in a finished tree, as diagnostics
 /// naming the statement — empty when the tree is within budget.
 pub(super) fn violations(stmts: &[Stmt]) -> Vec<String> {
     let n = measure(stmts);
@@ -126,6 +153,12 @@ pub(super) fn violations(stmts: &[Stmt]) -> Vec<String> {
         out.push(format!(
             "emitted Lua needs {} register slots in one function (budget {}) in top-level statement {} — the host parser would refuse the chunk",
             n.slots, MAX_SLOTS, describe(stmts, n.slots_at)
+        ));
+    }
+    if n.locals > MAX_LOCALS {
+        out.push(format!(
+            "emitted Lua has {} locals active at once in one function (budget {}) in top-level statement {} — the host parser would refuse the chunk",
+            n.locals, MAX_LOCALS, describe(stmts, n.locals_at)
         ));
     }
     out
@@ -143,6 +176,7 @@ fn describe(stmts: &[Stmt], i: usize) -> String {
 struct Measure {
     levels: usize,
     slots: usize,
+    locals: usize,
     temps: usize,
     /// The locals active at the statement being measured.
     base: usize,
@@ -152,6 +186,12 @@ impl Measure {
     fn note_level(&mut self, lvl: usize) {
         if lvl > self.levels {
             self.levels = lvl;
+        }
+    }
+
+    fn note_locals(&mut self, active: usize) {
+        if active > self.locals {
+            self.locals = active;
         }
     }
 
@@ -231,6 +271,7 @@ impl Measure {
         let mut active = active;
         for s in stmts {
             self.stmt(s, lvl + 1, &mut active);
+            self.note_locals(active);
         }
     }
 
@@ -240,6 +281,7 @@ impl Measure {
         let saved = self.base;
         self.base = nparams;
         self.note_slots(nparams);
+        self.note_locals(nparams);
         self.block(body, lvl, nparams);
         self.base = saved;
     }
@@ -341,7 +383,7 @@ fn raw_local_count(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::lua::{Block, FnTarget};
+    use super::super::lua::{Block, FnTarget, FuncBody};
 
     fn call(f: &str, args: Vec<Expr>) -> Expr {
         Expr::call(Expr::name(f), args)
@@ -443,5 +485,35 @@ mod tests {
         assert_eq!(n.slots, 4 + 3);
         // The expression part alone: the call's three slots.
         assert_eq!(n.temps, 3);
+        // The most locals active at once: x, a, b and the `do` block's c.
+        assert_eq!(n.locals, 4);
+    }
+
+    /// Parameters are locals of their function: a 205-parameter literal
+    /// is over the locals budget by itself, while a vararg literal that
+    /// stores them in one table has two locals, and a chunk's own locals
+    /// count for the statements after them.
+    #[test]
+    fn parameters_count_as_active_locals() {
+        let wide = vec![Stmt::Return(Expr::Func(
+            (0..205).map(|i| format!("_p{i}")).collect(),
+            FuncBody::Inline(vec![Stmt::Return(Expr::name("_p0"))]),
+        ))];
+        let n = measure(&wide);
+        assert_eq!(n.locals, 205);
+        assert_eq!(violations(&wide).len(), 1, "{:?}", violations(&wide));
+        let routed = vec![Stmt::Return(Expr::Func(
+            vec!["...".into()],
+            FuncBody::Inline(vec![
+                Stmt::Local(vec!["_va1".into()], Some(Expr::Table(vec![Item::Pos(Expr::name("..."))]))),
+                Stmt::Return(Expr::index(Expr::name("_va1"), "[1]")),
+            ]),
+        ))];
+        assert_eq!(measure(&routed).locals, 2);
+        assert!(violations(&routed).is_empty());
+        let chunk: Vec<Stmt> = (0..3)
+            .map(|i| Stmt::Local(vec![format!("c{i}")], Some(Expr::lit("1"))))
+            .collect();
+        assert_eq!(measure(&chunk).locals, 3);
     }
 }

@@ -57,15 +57,28 @@ chain that overflows when finally forced — pass the accumulator directly
 ## Lua's structural limits bound the size of one generated function
 
 The emitted module is one Lua chunk, and Lua hosts cap what one function
-may contain: Lua 5.x allows 200 local variables per function and LuaJIT
-caps the distance a control-structure jump may span (a function whose
-`if … elseif … end` chain compiles to more than 65 535 bytecode
-instructions fails to load with `control structure too long`). The
-compiler stays under the first by packing top-level names into a table
-instead of module-level locals, so a program may define any number of
-functions and constructors. The second is met only by a single generated
-function with a very long clause chain, and the largest such functions
-are the derived instance methods of a type with many constructors:
+may contain: Lua 5.x allows 200 local variables per function — its
+parameters included — and LuaJIT caps the distance a control-structure
+jump may span (a function whose `if … elseif … end` chain compiles to
+more than 65 535 bytecode instructions fails to load with `control
+structure too long`). The compiler stays under the first everywhere: it
+packs top-level names into a table instead of module-level locals, so a
+program may define any number of functions and constructors; it counts a
+function's parameters with its locals and spills the bindings past 180
+into a per-function table (`_v`); a function, lambda, constructor or
+partial application of more than 180 parameters takes them as varargs and
+reads each from a table by position (`function(...) local _va1 = {...}`;
+a constructor of that many fields is `function(...) return {tag, ...}
+end`); and a call of more than 57 arguments — about what a frame at the
+local limit has registers for — passes them through `table.unpack` of a
+table, with the argument count stated so nil arguments keep their
+positions. A record of 300 fields — constructed, projected, updated,
+compared and shown, matched by a clause or a `case` arm binding every
+field, partially applied, and a 300-parameter function and lambda — loads
+and runs on both hosts (the test corpus pins 210 and 300). The second
+limit is met only by a single generated function with a very long clause
+chain, and the largest such functions are the derived instance methods
+of a type with many constructors:
 
 - A derived `Ord`/`Eq` is linear in the constructor count: `compare` of a
   type with fields is one clause per constructor plus one
@@ -130,9 +143,13 @@ it, and a function literal is parsed inside the expression that holds it:
   one `if` per level; 190 levels load, 191 are refused by Lua 5.5. (A
   `case` chain whose inner scrutinees do not use the outer pattern
   variables is cut like any ladder.)
-- A function or lambda with more than 200 parameters is refused by both
-  hosts (`too many local variables`): parameters are not spilled into
-  the `_v` table the way locals past 180 are.
+
+A parameter list of any length is not one of these: past 180 parameters
+the function takes varargs (see above). The one shape the compiler
+refuses rather than rewrites is a parameter of such a function that a
+host-level fragment the compiler cannot rewrite mentions — an exported
+(FFI) function of more than 180 parameters one of which is a callback;
+the error names the function and the parameter.
 
 ## Non-exhaustive patterns are rejected at compile time (mostly)
 

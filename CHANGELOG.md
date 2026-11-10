@@ -44,6 +44,60 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A constructor, function, lambda or partial application of any number
+  of parameters, and a call of any number of arguments, emit Lua the
+  host loads: a parameter list and an argument list are bounded like the
+  locals and the nesting already were.** A Lua function may hold at most
+  200 locals — its parameters among them — and a frame at most 250
+  registers, and both counts followed the source shape: a record of 205
+  fields compiled to a constructor `function(_p0, …, _p204)` that both
+  hosts refused at load time (`too many local variables` / `function at
+  line N has more than 200 local variables`; GHC prints `(204,0)` for
+  `(f204 r, f0 r)`), as did a function or lambda of that many parameters
+  and the closure a partial application of either built over its
+  remaining positions; a function of 30 parameters and 175 `let`
+  bindings failed the same way, because the emitter's local budget (180
+  plain locals, then the `_v` spill table) counted the bindings but not
+  the parameters, and a value-position `case` arm binding every field of
+  such a record declared 206 plain locals, which a closure over them then
+  captured as 206 upvalues with no room left to route. Now a function's
+  parameters are its first budgeted locals (`bind_params`), so its body
+  spills correspondingly earlier; a `case` closure budgets each arm's
+  binders the same way (the count returns to the closure's entry state
+  after every arm, and an arm that spills declares its own table); the
+  IIFE-flattening pass counts the enclosing function's parameters in its
+  budget; and a new Lua-level pass, the frame budget (`codegen/frame.rs`,
+  before the upvalue budget), rewrites any function of more than 180
+  parameters to take them as varargs and read each from a table by
+  position (`function(...) local _va1 = {...}`; every mention of
+  parameter k in the body becomes `_va1[k]` under Lua's scoping) and any
+  call of more than 57 arguments to pass them through `__unpack({a1, …,
+  aN}, 1, N)` — the items evaluate in the call's order and flush every
+  fifty, the stated bounds keep nil arguments in place, and every emitted
+  argument is single-valued, so the callee sees the same N values. A
+  positional constructor past the budget is emitted directly as the
+  vararg builder `function(...) return {tag, ...} end`. The thresholds
+  are derived from the host limits and the existing budgets: 180 is the
+  local budget itself, 57 is what a frame at that budget has registers
+  for (`MAX_SLOTS` 240 less the 181 locals, the callee and its link); the
+  packed call costs about 55 registers whatever its width. The test
+  harness's tree measurement (`codegen/nesting.rs`) now checks the
+  host's locals bound as well (199 active, parameters counted). A
+  program within the budgets is emitted unchanged, except that a
+  function at the spill limit now spills one binding per parameter
+  earlier (four deliberate spill stress cases in the corpus). Found by
+  the 2026-10 fresh-eyes review (O13). (GHC-goldened case `wide_record`
+  — a 210-field record constructed, projected, partially applied, shown,
+  compared, updated, matched by a clause and by a `case` arm binding
+  every field, a 210-parameter function and lambda, and a 210-argument
+  call from a function holding 180 locals; shape test
+  `wide_parameter_lists_and_calls_stay_within_the_host_frame` at 300
+  fields — past the register limit a direct call could meet — asserting
+  every header names at most 180 parameters, every call passes at most 57
+  arguments in registers, the constructor is the vararg builder, the
+  module runs, and a five-field record keeps its positional constructor
+  byte for byte.)
+
 - **A long operator chain, `if … else if …` ladder or nested `case` chain
   emits Lua the host parser loads: the emitted nesting of every function
   is bounded, whatever the length of the source expression.** The Lua

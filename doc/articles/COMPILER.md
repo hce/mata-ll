@@ -902,10 +902,13 @@ the hosts' rules (statements, right operands, call arguments, parens,
 negations, table items and index keys open a level; a function literal
 opens a new slot frame holding its parameters and locals) and
 `stamp_violations` — the test harness's compile of every corpus program —
-fails on a tree over `MAX_LEVELS` (150) or `MAX_SLOTS` (240). What the
-pass cannot flatten is a chain of nested binders (a non-IO do-block of 64
-statements, a 191-deep `case` chain on the previous pattern's variable);
-CAVEATS lists the measured limits.
+fails on a tree over `MAX_LEVELS` (150), `MAX_SLOTS` (240) or
+`MAX_LOCALS` (199). What the pass cannot flatten is a chain of nested
+binders (a non-IO do-block of 64 statements, a 191-deep `case` chain on
+the previous pattern's variable); CAVEATS lists the measured limits. A
+parameter list or an argument list of any width is bounded by the frame
+budget pass instead (`codegen/frame.rs`, see "Host limits" under
+Codegen).
 
 ---
 
@@ -1102,11 +1105,43 @@ Responsibilities beyond the obvious translation:
   holds the runtime to that and the goldened `st_array_bounds` case to
   reaching every form). The runtime notes on `__mll_st_oob` carry the
   invariant and the measurements behind the design.
-- **Host limits:** Lua caps a function's locals at 200 and its upvalues
-  at 60 (LuaJIT) or 255 (PUC). The emitter budgets locals as it
-  declares them (`declare_local_parts`, `LOCAL_LIMIT`): past 180 a
-  binding becomes a slot of a per-function `_v` spill table. Upvalues
-  are budgeted by the last Lua-level pass (`upvalues.rs`,
+- **Host limits:** Lua caps a function's locals at 200 (parameters
+  included), a frame's registers at 250 (LuaJIT) or 255 (PUC), and a
+  function's upvalues at 60 (LuaJIT) or 255 (PUC). The emitter budgets
+  locals as it declares them (`declare_local_parts`, `LOCAL_LIMIT`): a
+  function's parameters are its first locals (`bind_params`, counted at
+  every parameter-binding site — top-level and where-group functions,
+  lambdas, the guarded-case dispatch closure), and past 180 a binding
+  becomes a slot of a per-function `_v` spill table; a value-position
+  `case` closure budgets each arm's pattern binders the same way, the
+  count returning to the closure's entry state after every arm (an arm's
+  binders end with its block, and an arm that spills declares its own
+  table inside the arm). A parameter list cannot spill, so the frame
+  budget pass (`frame.rs`, pass 8, after the loop conversions that
+  rewrite parameters by name and before the upvalue budget) rewrites any
+  function of more than `PARAM_BUDGET` (= `LOCAL_LIMIT`) parameters to
+  take them as varargs — `function(...) local _va1 = {...}`, every
+  mention of parameter k in the body replaced by `_va1[k]` under Lua's
+  scoping (an inner binder of the same name shadows it) — and any call
+  of more than `ARG_BUDGET` (57 = `MAX_SLOTS` − the local limit's frame
+  − callee and link) arguments to pass them through
+  `__unpack({a1, …, aN}, 1, N)`: the table constructor evaluates the
+  arguments in the call's order and flushes every fifty, the explicit
+  bounds keep nil arguments in place, and every emitted argument is
+  single-valued (the paren pass keeps the truncating paren around an
+  unknown callee in last position), so the callee sees the same N
+  values. `module.rs` emits a positional constructor past the budget
+  directly as the vararg builder `function(...) return {tag, ...} end`
+  (`{...}` for a single-constructor type); callers are unchanged under
+  the N-ary convention, and a partial application's closure over the
+  remaining positions is routed like any function. A parameter the pass
+  must route but that opaque text mentions (a `Raw` fragment, a rendered
+  index suffix) is a compile error naming the function, not an
+  unloadable chunk. `nesting.rs` measures the finished tree against all
+  three host budgets — `MAX_LEVELS` (150), `MAX_SLOTS` (240) and
+  `MAX_LOCALS` (199, the host's refusal line, parameters counted) — in
+  the test harness's compile of every corpus program. Upvalues are
+  budgeted by the last Lua-level pass (`upvalues.rs`, pass 9,
   `UPVALUE_BUDGET` = 50) over the finished tree, where every earlier
   pass has fixed the capture sets: it counts per function the distinct
   enclosing locals it captures — chunk locals and runtime helpers

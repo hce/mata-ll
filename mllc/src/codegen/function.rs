@@ -646,10 +646,11 @@ impl CodeGen {
             // The function name is concrete (it's a function value) — allow
             // self-recursive calls to skip __force
             self.concrete_vars.insert(lua_name.clone());
-            // The Lua parameters are binders (bind_local_name): a dictionary
+            // The Lua parameters are binders (bind_params: bound, and
+            // counted as the function's first locals): a dictionary
             // parameter is a table value and is claimed at once; `_argN` is
             // claimed per its convention row below.
-            for p in &all_params { self.bind_local_name(p); }
+            self.bind_params(&all_params);
             for dp in &dict_param_names { self.concrete_vars.insert(dp.clone()); }
 
             let all_simple = Self::emission_all_simple(clause);
@@ -812,9 +813,10 @@ impl CodeGen {
         let target = self.fn_target(&lua_name);
         let mut body = Vec::new();
         self.concrete_vars.insert(lua_name.clone());
-        // The Lua parameters are binders (bind_local_name); the dictionary
-        // parameters are table values, claimed at once.
-        for p in &all_params { self.bind_local_name(p); }
+        // The Lua parameters are binders (bind_params: bound, and counted
+        // as the function's first locals); the dictionary parameters are
+        // table values, claimed at once.
+        self.bind_params(&all_params);
         for dp in &dict_param_names { self.concrete_vars.insert(dp.clone()); }
         // Bind each parameter per its convention row (see
         // analyze_param_conventions, which folds the first-clause rule
@@ -1394,7 +1396,7 @@ impl CodeGen {
         // enclosing function's (a recursive call would clobber its
         // caller's slots — see FnSpillScope).
         let spill = FnSpillScope::enter(self);
-        for p in &params { self.bind_local_name(p); }
+        self.bind_params(&params);
 
         if clauses.len() == 1 {
             let clause = &clauses[0];

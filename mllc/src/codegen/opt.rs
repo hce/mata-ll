@@ -93,7 +93,18 @@
 //! per iteration, and no FNEW on LuaJIT's trace. It runs after both loop
 //! passes because it hoists out of exactly the loops they build.
 //!
-//! Pass 8 — the upvalue budget (upvalues.rs), the LAST pass: a function
+//! Pass 8 — the frame budget (frame.rs): a function with more parameters
+//! than a Lua function may hold as locals (the pass budgets 180 of the
+//! host's 200) takes them as varargs and reads each from a table by
+//! position; a call with more arguments than a frame at the local limit
+//! has registers for (57) passes them through `__unpack` of a table. It
+//! runs after the loop conversions, which update parameters by name and
+//! decline a vararg header, and before the upvalue budget, so a closure
+//! over a routed parameter list captures one table where it would have
+//! captured every parameter. When it rewrites, the sequence runs again
+//! (see `run_with`); within budget it changes nothing.
+//!
+//! Pass 9 — the upvalue budget (upvalues.rs), the LAST pass: a function
 //! literal that would need more upvalues than LuaJIT's parser allows (60;
 //! the pass budgets 50) has enough of its captured variables replaced by
 //! slots of a table in the declaring scope — the variable's declaration,
@@ -116,7 +127,8 @@
 //!
 //! Per-pass toggles: `MLL_OPT_DISABLE` (read per `run` call) is a
 //! comma-separated list of pass names to skip — `parens`, `dead`, `iife`,
-//! `force`, `tailloop`, `ioloop`, `hoist`, `thunklift`, `upvalues`. A
+//! `force`, `tailloop`, `ioloop`, `hoist`, `thunklift`, `frame`,
+//! `upvalues`. A
 //! debugging aid for
 //! isolating a pass's effect; unset (the default) runs everything, and an
 //! unrecognized name warns on stderr so a typo cannot silently disable
@@ -125,6 +137,7 @@
 //! can pin unoptimized emission without mutating process-global state.
 
 use super::annot;
+use super::frame;
 use super::hoist;
 use super::ioloop;
 use super::lua::{Block, Expr, FnTarget, FuncBody, Item, Stmt, render_stmts};
@@ -143,6 +156,7 @@ struct Disable {
     ioloop: bool,
     hoist: bool,
     thunklift: bool,
+    frame: bool,
     upvalues: bool,
 }
 
@@ -174,10 +188,11 @@ impl Disable {
                 "hoist" => d.hoist = true,
                 "ioloop" => d.ioloop = true,
                 "thunklift" => d.thunklift = true,
+                "frame" => d.frame = true,
                 "upvalues" => d.upvalues = true,
                 other => eprintln!(
                     "warning: MLL_OPT_DISABLE: unknown pass name '{}' \
-                     (known: parens, dead, iife, force, tailloop, ioloop, hoist, thunklift, upvalues)",
+                     (known: parens, dead, iife, force, tailloop, ioloop, hoist, thunklift, frame, upvalues)",
                     other
                 ),
             }
@@ -187,8 +202,8 @@ impl Disable {
 }
 
 /// Run all passes over the module body. `opt_disable`: see
-/// `Disable::from_spec`. `Err` is the upvalue budget's diagnostic (the
-/// only pass that can refuse a tree).
+/// `Disable::from_spec`. `Err` is the frame budget's or the upvalue
+/// budget's diagnostic (the two passes that can refuse a tree).
 pub(super) fn run(stmts: &mut Vec<Stmt>, opt_disable: Option<&str>) -> Result<(), String> {
     run_with(stmts, &Disable::from_spec(opt_disable), None).map(|_| ())
 }
@@ -252,7 +267,7 @@ fn run_with(
                 dead_branch_block(stmts);
             }
             if !d.iife {
-                flatten_iife_block(stmts);
+                flatten_iife_block(stmts, 0);
             }
             let after = render_stmts(stmts);
             if after == before {
@@ -300,8 +315,17 @@ fn run_with(
             engine = Some(fresh);
         }
     }
+    if !d.frame && frame::run(stmts)? {
+        // Pass 8, the frame budget (see the module comment): a parameter
+        // list routed through a vararg table or a call packed through
+        // `__unpack` is a structured rewrite — every stamp carried so far
+        // is stale, and the upvalue census must see the routed headers —
+        // so the sequence runs again over the rewritten tree; the second
+        // time the pass finds nothing (one parameter, one argument).
+        continue;
+    }
     if !d.upvalues && upvalues::run(stmts)? {
-        // Pass 8, the upvalue budget (see the module comment): last, over
+        // Pass 9, the upvalue budget (see the module comment): last, over
         // the capture sets every earlier pass left. It rewrote the tree:
         // every pass runs again over the routed tree, and the engine of
         // the round that ends with nothing to route mirrors the final tree.
@@ -338,8 +362,8 @@ pub(super) fn run_refuted(stmts: &mut Vec<Stmt>) -> Vec<String> {
         // and no collapse obligation; a fresh analysis refuting itself
         // checks nothing.
         Ok((None, _)) => Vec::new(),
-        // A tree the upvalue budget refuses is `generate`'s diagnostic, not
-        // a stamp finding; nothing further to refute.
+        // A tree the frame or upvalue budget refuses is `generate`'s
+        // diagnostic, not a stamp finding; nothing further to refute.
         Err(_) => return Vec::new(),
     };
     findings.extend(expression_pass_idempotence(stmts, &d));
@@ -383,7 +407,7 @@ fn expression_pass_idempotence(stmts: &[Stmt], d: &Disable) -> Vec<String> {
         dead_branch_block(&mut again);
     }
     if !d.iife {
-        flatten_iife_block(&mut again);
+        flatten_iife_block(&mut again, 0);
     }
     let after = render_stmts(&again);
     if before == after {
@@ -845,9 +869,11 @@ pub(super) fn count_locals(stmts: &[Stmt]) -> usize {
 
 /// Entry per function scope: budget the splices against Lua's local limit
 /// (the emitter's `_v` spill was decided before this pass ran, so the pass
-/// must never push a function past the limit on its own).
-fn flatten_iife_block(stmts: &mut Vec<Stmt>) {
-    let mut budget = super::CodeGen::LOCAL_LIMIT.saturating_sub(count_locals(stmts));
+/// must never push a function past the limit on its own). The scope's
+/// `param_count` parameters are locals of it too, and take their share of
+/// the budget first.
+fn flatten_iife_block(stmts: &mut Vec<Stmt>, param_count: usize) {
+    let mut budget = super::CodeGen::LOCAL_LIMIT.saturating_sub(count_locals(stmts) + param_count);
     flatten_scope(stmts, &mut budget);
 }
 
@@ -873,7 +899,7 @@ fn flatten_scope(stmts: &mut Vec<Stmt>, budget: &mut usize) {
                 }
             }
             Stmt::Do(b) | Stmt::WhileTrue(b) => flatten_scope(&mut b.0, budget),
-            Stmt::Function { body, .. } => flatten_iife_block(&mut body.0),
+            Stmt::Function { params, body, .. } => flatten_iife_block(&mut body.0, params.len()),
             _ => {}
         }
         // Function literals in this statement's expressions are their own
@@ -888,8 +914,8 @@ fn flatten_scope(stmts: &mut Vec<Stmt>, budget: &mut usize) {
 /// every function-literal body as a fresh scope.
 fn stmt_expr_funcs(stmt: &mut Stmt) {
     fn expr(e: &mut Expr) {
-        if let Expr::Func(_, body) = e {
-            flatten_iife_block(body.stmts_mut());
+        if let Expr::Func(params, body) = e {
+            flatten_iife_block(body.stmts_mut(), params.len());
             return;
         }
         e.for_each_subexpr_mut(&mut expr);

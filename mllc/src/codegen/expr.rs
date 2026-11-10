@@ -268,9 +268,10 @@ impl CodeGen {
                     .is_none_or(|b| b.pattern.forces_scrutinee());
                 // The dispatch closure's parameter is a binder like any
                 // other: bound first (an enclosing guarded case's forced
-                // `_cg` must not lend this one its claim), claimed below
-                // only when forced here.
-                self.bind_local_name("_cg");
+                // `_cg` must not lend this one its claim) and counted as
+                // the closure's first local, claimed below only when
+                // forced here.
+                self.bind_params(&["_cg".to_string()]);
                 if first_forces {
                     if !self.expr_yields_whnf(scrutinee) {
                         stmts.push(Stmt::Assign("_cg".into(), Expr::force(Expr::name("_cg"))));
@@ -335,6 +336,24 @@ impl CodeGen {
                     self.arg_ast(scrutinee, false)
                 };
                 let scrut_stmt = Stmt::Local(vec!["_s".into()], Some(scrut));
+                // The invoked closure below is its own Lua function scope
+                // with its own local budget: `_s` is its first local, and
+                // each arm's pattern binders are declared through the spill
+                // machinery (declare_local_parts), so an arm binding more
+                // names than the budget — every field of a wide record —
+                // spills into the closure's own `_vN` table instead of
+                // declaring them all (a 205-binder arm was 206 plain locals,
+                // more than the host allows one function, and a closure
+                // over them captured 206 upvalues with no room to route).
+                // An arm's binders are locals of ITS block: the count, the
+                // slot numbering and the table flag return to the closure's
+                // entry state after each arm, so the next arm budgets
+                // from `_s` alone and, if it spills, declares its own table
+                // inside its own block (the previous arm's is out of scope
+                // there), and `var_slots` forgets the arm's names.
+                let spill = FnSpillScope::enter(self);
+                self.local_count += 1;
+                let arm_entry = (self.local_count, self.var_slots_next, self.var_table_emitted);
                 // Assemble the branch loop's if/elseif chain structurally:
                 // the first conditioned branch opens the `if`, later ones are
                 // `elseif`s, an unconditioned branch past the first becomes the
@@ -355,14 +374,17 @@ impl CodeGen {
                     // never a value, whatever a same-named enclosing binder
                     // (a site-forced parameter `x` over `(x : _)`) claimed.
                     let scope = VarsSnapshot::capture(self);
+                    let arm_slots = self.var_slots.clone();
+                    (self.local_count, self.var_slots_next, self.var_table_emitted) = arm_entry;
                     // An irrefutable branch ends the chain; its forces (a
                     // wildcard-only tuple under a forced `_s`) run first.
                     let cond = match Self::clause_condition(conditions) {
                         ClauseCond::Always(forces) => {
                             let mut bs = forces;
                             for (var, val) in &bindings {
-                                bs.push(Stmt::Local(vec![var.clone()], Some(val.clone())));
-                                self.bind_local_name(var);
+                                let (pre, decl) = self.declare_local_parts(var);
+                                if let Some(s) = pre { bs.push(s); }
+                                bs.push(decl.stmt(val.clone()));
                             }
                             bs.push(Stmt::Return(self.tail_ast(branch.plain_body(), false)));
                             if i > 0 {
@@ -370,6 +392,7 @@ impl CodeGen {
                             } else {
                                 direct = bs;
                             }
+                            self.var_slots = arm_slots;
                             scope.restore(self);
                             break;
                         }
@@ -377,8 +400,9 @@ impl CodeGen {
                     };
                     let mut bs = Vec::new();
                     for (var, val) in &bindings {
-                        bs.push(Stmt::Local(vec![var.clone()], Some(val.clone())));
-                        self.bind_local_name(var);
+                        let (pre, decl) = self.declare_local_parts(var);
+                        if let Some(s) = pre { bs.push(s); }
+                        bs.push(decl.stmt(val.clone()));
                     }
                     bs.push(Stmt::Return(self.tail_ast(branch.plain_body(), false)));
                     if chain.is_none() {
@@ -386,8 +410,10 @@ impl CodeGen {
                     } else {
                         elseifs.push((cond, Block(bs)));
                     }
+                    self.var_slots = arm_slots;
                     scope.restore(self);
                 }
+                spill.exit(self);
                 let mut stmts = vec![scrut_stmt];
                 match chain {
                     Some((cond, then_b)) => {
@@ -546,12 +572,12 @@ impl CodeGen {
                 // A lambda parameter is NOT guaranteed forced: when the lambda
                 // is invoked through a higher-order position the caller cannot
                 // see its strictness and may pass a thunk. Bound without a
-                // claim (bind_local_name), so uses in the body are forced.
-                for p in &ps {
-                    self.bind_local_name(p);
-                }
+                // claim (bind_params: bound, and counted as the literal's
+                // first locals, eta padding included), so uses in the body
+                // are forced.
                 let mut all_params = ps.clone();
                 all_params.extend(eta_params.iter().cloned());
+                self.bind_params(&all_params);
                 let ret = if eta_count > 0 {
                     // The body still has function type (e.g. `\x -> f x` at
                     // type a -> b -> c): apply the eta params to its value,

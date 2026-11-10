@@ -840,6 +840,36 @@ impl CodeGen {
                         Expr::Table(vec![Item::Pos(Expr::lit(tag.to_string()))]),
                     ));
                 }
+            } else if field_count > super::frame::PARAM_BUDGET
+                && !self.luadict_con_fields.contains_key(&con.name)
+            {
+                // A positional layout stores the arguments in order, so a
+                // constructor of more fields than a Lua function may name
+                // as parameters (the frame budget, frame.rs) is the vararg
+                // builder `function(...) return {tag, ...} end` — the
+                // table constructor's trailing `...` places argument k at
+                // slot k past the tag, nil arguments included, exactly
+                // where `{_p0, …}` would have put them, and the host flushes
+                // a long constructor fifty items at a time. The N-ary
+                // calling convention is unchanged: a saturated call still
+                // passes every field as an argument (packed through
+                // `__unpack` by the frame budget when it is wider than a
+                // frame holds), and a partial application's closure, built
+                // with the remaining positions as its own parameters, is
+                // routed by the same pass. The named (LuaDict) layout keys
+                // its table by field name and has no positional spelling;
+                // the frame budget routes its parameters through a table
+                // like any other function's.
+                let mut items = Vec::new();
+                if !single {
+                    items.push(Item::Pos(Expr::lit(tag.to_string())));
+                }
+                items.push(Item::Pos(Expr::name("...")));
+                let ctor = Expr::Func(
+                    vec!["...".to_string()],
+                    FuncBody::Inline(vec![Stmt::Return(Expr::Table(items))]),
+                );
+                stmts.push(self.var_decl_stmt(&sname, ctor));
             } else {
                 let params: Vec<String> = (0..field_count).map(|i| format!("_p{}", i)).collect();
                 let table = if let Some(field_names) = self.luadict_con_fields.get(&con.name).cloned() {

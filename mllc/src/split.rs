@@ -99,14 +99,17 @@ pub const LEVEL_BUDGET: usize = 96;
 /// hold above a function's locals, as `Cost::temps` estimates them. The
 /// budget itself is per clause (`Cx::for_clause`): the frame's slots less
 /// the clause's own binders. A function at the emitter's local limit
-/// (`LOCAL_LIMIT`, 180 plain locals plus the spill table and its
-/// parameters) has about 50 of LuaJIT's 250 slots left for expression
+/// (`LOCAL_LIMIT`, 180 plain locals — parameters counted — plus the spill
+/// table) has about 50 of LuaJIT's 250 slots left for expression
 /// temporaries; a nested call holds two slots per pending callee plus one
 /// per argument already built, so 48 admits a dozen pending
 /// three-argument calls or two dozen one-argument ones there, while a
 /// function with few locals keeps most of the frame. A table constructor
 /// is bounded by the host itself (fifty pending items are flushed) and is
-/// not counted against this.
+/// not counted against this. A single call wider than the frame can hold
+/// is not this pass's to narrow: the frame budget (`codegen/frame.rs`)
+/// packs a call of more than 57 arguments through `__unpack` of a table,
+/// which costs the frame a flush's worth of slots whatever the width.
 pub const TEMP_BUDGET: usize = 48;
 
 /// Rewrite every function/CAF body so no emitted Lua expression exceeds
@@ -182,9 +185,9 @@ impl Cx {
 const FRAME_SLOTS: usize = 232;
 
 /// The most plain locals one emitted function holds: the emitter's
-/// `LOCAL_LIMIT` (180) plus the spill table, parameters and a few
-/// temporaries; past the limit a binding is a slot of the `_v` table and
-/// costs no register.
+/// `LOCAL_LIMIT` (180, parameters counted) plus the spill table and the
+/// few locals the later passes add; past the limit a binding is a slot of
+/// the `_v` table and costs no register.
 const SPILLED_LOCALS: usize = 190;
 
 /// Every name a clause binds in its own Lua function (an upper bound: a

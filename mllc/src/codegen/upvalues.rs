@@ -1,4 +1,4 @@
-//! Pass 8 — the upvalue budget, the last pass over the finished tree (see
+//! Pass 9 — the upvalue budget, the last pass over the finished tree (see
 //! opt.rs's pipeline comment).
 //!
 //! A Lua function literal captures every enclosing local it mentions as an

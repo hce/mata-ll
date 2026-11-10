@@ -55,7 +55,11 @@
 //!   two-level dispatch/closure shape into one driver
 //! - hoist.rs — opt pass 7: loop-invariant closure hoisting (the FNEW
 //!   JIT-killer backstop)
-//! - upvalues.rs — opt pass 8: the upvalue budget (a function literal
+//! - frame.rs — opt pass 8: the frame budget (a function never names more
+//!   parameters than the host holds as locals — the rest arrive as
+//!   varargs in a table — and a call never passes more arguments in
+//!   registers than a frame at the local limit has)
+//! - upvalues.rs — opt pass 9: the upvalue budget (a function literal
 //!   never captures more enclosing locals than LuaJIT's parser allows)
 //! - nesting.rs — the host parser's syntax-level and register budgets,
 //!   measured over the finished tree (the test-build check behind the
@@ -73,6 +77,7 @@ mod analysis;
 mod annot;
 mod expr;
 mod ffi;
+mod frame;
 mod function;
 mod fuse;
 mod hoist;
@@ -623,7 +628,17 @@ impl CodeGen {
         }
     }
 
-    /// Lua's per-function local variable limit.
+    /// The plain locals one emitted Lua function declares before further
+    /// bindings spill into its `_v` table — PARAMETERS INCLUDED, since a
+    /// parameter is a local of its function and the host's limit (200
+    /// active locals, `MAXVARS` / `LJ_MAX_LOCVAR`) counts it as one. The
+    /// twenty below the host's limit are the later passes' room: the spill
+    /// table itself, a routing table of the upvalue budget, a hoisted
+    /// closure's local, the loop conversions' copies. A parameter list is
+    /// not spilled here — it cannot be, the list IS the parameters — but
+    /// counted, so a function of many parameters spills its body locals
+    /// correspondingly earlier; a list longer than this budget is taken as
+    /// varargs by the frame budget (frame.rs, `PARAM_BUDGET`).
     const LOCAL_LIMIT: usize = 180;
 
     /// Introduce a binder named `name` in the current scope: the ONE place a
@@ -648,18 +663,32 @@ impl CodeGen {
     /// on a table value" (2026-10 review, L5).
     ///
     /// Every declaration path goes through here: `declare_local_parts` for a
-    /// counted `local`/spill slot, and the sites whose binder is not a counted
-    /// local call it directly — the Lua function parameter lists (`_argN`,
-    /// `_wargN`, `_etaN`, dictionary parameters, lambda parameters, the
-    /// guarded-case closure's `_cg`), the value-position `case` branch
-    /// binders (that arm's branch-block locals are not budget-counted), the
-    /// `__mll_fu_*` fused-loop locals, the fused IORef-modify lambda's
-    /// parameter, the fused HashMap lookup's `Just` binder, and a
-    /// module-level value binding's forward declaration (a slot, not a
-    /// counted local).
+    /// counted `local`/spill slot (a value-position `case` arm's pattern
+    /// binders among them), `bind_params` for a Lua function's parameter
+    /// list (`_argN`, `_wargN`, `_etaN`, dictionary parameters, lambda
+    /// parameters, the guarded-case closure's `_cg` — counted as the
+    /// function's first locals), and the sites whose binder is not a
+    /// counted local call it directly — the `__mll_fu_*` fused-loop locals,
+    /// the fused IORef-modify lambda's parameter, the fused HashMap lookup's
+    /// `Just` binder, and a module-level value binding's forward declaration
+    /// (a slot, not a counted local).
     fn bind_local_name(&mut self, name: &str) {
         self.local_vars.insert(name.to_string());
         self.concrete_vars.remove(name);
+    }
+
+    /// Bind the parameters of the Lua function whose body is about to be
+    /// emitted (its scope freshly entered: `local_count` reset). Each is a
+    /// binder like any other (`bind_local_name`), and together they occupy
+    /// the first `params.len()` of the function's locals, so the body's
+    /// `local` declarations are budgeted against what remains of
+    /// `LOCAL_LIMIT` — a function of 30 parameters and 175 bindings used to
+    /// declare 205 plain locals and fail to load.
+    fn bind_params(&mut self, params: &[String]) {
+        for p in params {
+            self.bind_local_name(p);
+        }
+        self.local_count += params.len();
     }
 
     /// Declare a local variable for a block-building emission path. Returns
