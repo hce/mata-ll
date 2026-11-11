@@ -1418,6 +1418,15 @@ non-monadic one requires exhaustive pattern matching. The monadic one
 requires a single path, and will raise an exception if that path
 doesn't match.
 
+Inside a do block, `let decls` alone is the let statement: its names are
+in scope for the statements after it, and it has no `in`. `let decls in
+e` is an expression statement — the let-expression — in any position of
+the block, with the `in` on the bindings' line or indented past the
+block's statements (Haskell 2010 §3.14); its names are not in scope
+after it. An `in` at the statements' column after a let statement is a
+parse error, as under GHC (the layout rule begins a new statement
+there).
+
 Note: as stated under Pattern matching, `let`/`where` pattern BINDINGS
 today accept only variable and tuple patterns, so the refutable-binding
 semantics above apply to those forms; constructor-pattern bindings are
@@ -1947,6 +1956,13 @@ GHC's exact consequences:
 
 `(-x)` is negation, never a right section of subtraction; `(-)` is the
 subtraction function, as in GHC.
+
+There is no negative literal: `-` is always the prefix operator above,
+so `f -1` is the subtraction `f - 1`, `x -3` is `x - 3`, and a
+continuation line starting with `- 3` continues the expression above it.
+A negative argument is written `f (-1)`; a negative literal pattern is
+`-1` in a `case` alternative or `(-1)` as a function argument, as in
+Haskell 2010.
 
 # Deriving
 

@@ -808,6 +808,59 @@ fn do_block_bad_endings_are_rejected() {
     );
 }
 
+// Haskell 2010 §3.14: a do-block `let` STATEMENT has no `in`. When the
+// next line starts with `in` at the block's statement column, the layout
+// rule has put a `;` before it, and GHC reports `parse error on input
+// 'in'`. The parser used to read the `let` statement, then see `in` as
+// the block's closer and report the block as ending in a `let` — the
+// wrong diagnosis when more statements follow (F8). The same token on the
+// bindings' line or indented past the statements is the let-EXPRESSION
+// statement (accept side: do_let_in_statement.mll). An `in` that closes
+// the block for an ENCLOSING let-expression keeps the last-statement
+// error, which is what GHC reports there too.
+#[test]
+fn do_let_followed_by_in_at_statement_column_is_a_parse_error() {
+    expect_compile_error(
+        "main :: IO ()\nmain = do\n  let x = 1 :: Int\n  in print x\n  print (2 :: Int)\n",
+        &[],
+        &["parse error on input 'in'", "has no 'in'", "at 4:3", "note:"],
+    );
+    expect_compile_error(
+        "main :: IO ()\nmain = do\n  let x = 1 :: Int\n  in print x\n",
+        &[],
+        &["parse error on input 'in'", "at 4:3"],
+    );
+    expect_compile_error(
+        "main :: IO ()\nmain = let\n  act = do\n    print (1 :: Int)\n    let y = 1 :: Int\n    in act\n",
+        &[],
+        &["must be an expression, not 'let'"],
+    );
+}
+
+// Haskell has no negative literal: `-` is the prefix negation operator of
+// the infix grammar, so `f -1` is the subtraction `f - 1`, and applied to
+// a function it is GHC's `No instance for Num (Int -> Int)` / `Show (Int
+// -> Int)` — not a call of `f` with `-1` (F7; accept side:
+// prefix_minus_not_atom.mll, including `x -3` as `x - 3` and a
+// continuation line starting with `- 3`).
+#[test]
+fn minus_literal_after_function_is_subtraction() {
+    let msg = expect_compile_error(
+        "f :: Int -> Int\nf x = x\nmain :: IO ()\nmain = print (f -1)\n",
+        &[],
+        &["No instance for 'Show (Int -> Int)'"],
+    );
+    assert!(
+        msg.contains("No instance for 'Num (Int -> Int)'"),
+        "expected the subtraction's Num constraint on the function type: {msg}"
+    );
+    expect_compile_error(
+        "main :: IO ()\nmain = print (negate -1 :: Int)\n",
+        &[],
+        &["Cannot unify 'a -> a' with 'Int'"],
+    );
+}
+
 // Repeated imports of one module merge their visibility (pinned on the
 // accept side by import_merge.mll); a LONE Specific list must still hide
 // everything it doesn't request — the merge rule is "hidden iff every

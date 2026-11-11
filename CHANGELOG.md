@@ -44,6 +44,42 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A continuation line that starts with `- N` continues the expression
+  above it, and `let … in e` is an expression statement in a `do` block**
+  (silent wrong output / wrong rejection). `let b = a` followed by a
+  deeper line `- 3` was read as the application `a (-3)` and rejected with
+  "Cannot unify 'Int' with 'a -> b'" where GHC computes `7`: the parser
+  had a "negative literal" atom, `-N` taken as an argument whenever the
+  token before the `-` was not an expression's last token, and on a
+  continuation line that token is the line's layout marker, so the arm
+  fired exactly in the one place it is wrong (on one line an argument
+  position always follows an expression's last token, so `f -1` was
+  already `f - 1`). Haskell has no negative literal — `-` is the prefix
+  negation operator of the infix grammar (Haskell 2010 §3.4) — so the atom
+  is gone and every `-` is read at the chain level: `x -3` is `x - 3`,
+  `f -1` is `f - 1` (and `f (-1)` passes the number), `(- 3)` is negation,
+  a continuation line starting with `-`, `+`, `*`, `.`, `$`, `>>=` or a
+  backtick operator continues the infix expression, and `-1` stays a
+  literal pattern in `case` alternatives and parenthesised arguments. In
+  a `do` block, `let x = 1 :: Int in print x` as a statement was rejected
+  with "The last statement in a 'do' block must be an expression, not
+  'let'" (GHC prints `1`, then runs the next statement): the block parser
+  committed to the let STATEMENT on the keyword and took the `in` for the
+  block's end. Haskell 2010 §3.14 has both forms, and the token after the
+  bindings decides: an `in` on the bindings' line or indented past the
+  block's statements makes the let-expression statement (first, middle or
+  last in the block, in `where`-bound and nested blocks and in non-IO
+  monads alike; its names are not in scope after it), while an `in` at
+  the statements' column is the parse error GHC reports (`parse error on
+  input 'in'`, with a note that a do-`let` has no `in` and how to write
+  either form), unless an enclosing let-expression is waiting for it —
+  then it closes the block, which then ends in a `let` statement, the
+  error GHC gives there too. GHC-goldened cases `prefix_minus_not_atom`
+  (the negation table above) and `do_let_in_statement` (every position
+  and nesting); compile-error tests for the `in` at the statement column
+  and for `f -1` applied to a function (GHC's `No instance for Show (Int
+  -> Int)` / `Num (Int -> Int)`). Found by the 2026-10 fresh-eyes review
+  (F7, F8).
 - **A constructor, function, lambda or partial application of any number
   of parameters, and a call of any number of arguments, emit Lua the
   host loads: a parameter list and an argument list are bounded like the

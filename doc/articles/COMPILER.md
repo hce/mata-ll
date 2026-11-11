@@ -1247,6 +1247,11 @@ apart is done entirely in `modules.rs`, before the merge
   `parser.rs` returns every infix expression as a flat chain
   (`Expr::OpChain`: operands, operators and prefix minuses in source
   order; `Expr::Section`; `Type::OpChain` for `:`-operators in types).
+  A `-` is read only there, as a chain operand's prefix minus
+  (`parse_chain_operand`): Haskell has no negative literal, so `-N` is
+  never an argument atom — `f -1` is `f - 1`, `x -3` is `x - 3`, and a
+  continuation line that starts with `- 3` continues the chain above
+  it rather than passing `(-3)` as one more argument.
   `ModuleLoader::fixities` maps canonical names to fixities: seeded with
   the Prelude's declarations (`fixity::prelude`, read from the Prelude
   source — there is no operator table in Rust), then extended by each

@@ -585,6 +585,8 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_stress_long_do_200, "cases", "stress_long_do_200.mll"),
         (ghc_oracle_stress_many_args, "cases", "stress_many_args.mll"),
         (ghc_oracle_wide_record, "cases", "wide_record.mll"),
+        (ghc_oracle_do_let_in_statement, "cases", "do_let_in_statement.mll"),
+        (ghc_oracle_prefix_minus_not_atom, "cases", "prefix_minus_not_atom.mll"),
         (ghc_oracle_stress_many_functions, "cases", "stress_many_functions.mll"),
         (ghc_oracle_stress_many_instances, "cases", "stress_many_instances.mll"),
         (ghc_oracle_stress_nested_expr, "cases", "stress_nested_expr.mll"),

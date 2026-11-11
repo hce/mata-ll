@@ -198,6 +198,14 @@ struct Parser {
     /// points and parameters). One counter for the whole parse keeps every
     /// synthesized name unique across nested desugars.
     pg_fresh: usize,
+    /// How many let-EXPRESSIONS have parsed their bindings and now await
+    /// their `in`. Decides what an `in` at a do block's statement column
+    /// means after a `let` statement: with none pending it is the parse
+    /// error GHC reports on the token (a do-`let` has no `in`); with one
+    /// pending it is that let's `in`, which closes the do block (Haskell's
+    /// parse-error(t) layout rule) — and GHC then reports the block
+    /// ending in a `let` statement, as `parse_do_block` does.
+    let_in_pending: usize,
     /// Token indices of the pattern variables read so far in the current
     /// top-level declaration, in source order — the raw material of the
     /// linearity check (`check_linear`). Every pattern variable is recorded
@@ -242,6 +250,7 @@ impl Parser {
             block_indent: 0,
             depth: 0,
             pg_fresh: 0,
+            let_in_pending: 0,
             pattern_binders: Vec::new(),
             declared: Vec::new(),
         }
@@ -3340,6 +3349,20 @@ impl Parser {
         self.close_local_group(entries, sigs)
     }
 
+    /// The body of a let-expression, the `in` already consumed: `let binds
+    /// in body`. The body is a full expression (ascription included), so
+    /// it runs to the end of the statement or operand the let stands in.
+    /// Shared by the let-expression atom and the do-block, whose
+    /// `let … in e` statement is the same expression.
+    fn let_expr_body(&mut self, binds: Vec<LocalDef>) -> PResult<Expr> {
+        self.skip_newlines_and_indent();
+        let body = self.parse_expr()?;
+        Ok(Expr::Let {
+            binds,
+            body: Box::new(body),
+        })
+    }
+
     /// Parse list comprehension qualifiers: `x <- xs, pred, y <- ys, …`.
     /// Supports pattern-matching generators (`Ok x <- rs`, `(a, b) <- pairs`)
     /// and `let` qualifiers.
@@ -3607,8 +3630,20 @@ impl Parser {
         true
     }
 
+    /// Can the next token begin an argument atom (Haskell 2010 `aexp`)?
+    /// A `-` never can: Haskell has no negative literal, `-` is the
+    /// prefix negation operator of the infix grammar (`exp → - exp`,
+    /// §3.4), so `f -1` is `f - 1` and `x -3` is `x - 3`, and the only
+    /// way to pass a negative number is `f (-1)`. The negation is read
+    /// by `parse_chain_operand`. An earlier "negative literal" arm here
+    /// accepted `-N` as an atom when the token before it was not an
+    /// expression's last token; on one line that is unreachable (an
+    /// argument position always follows an expression's last token),
+    /// and on a continuation line the preceding token is the line's
+    /// `Indent`, so `let b = a` / `  - 3` became `a (-3)` instead of the
+    /// subtraction GHC reads (F7).
     fn is_expr_atom_start(&self) -> bool {
-        if matches!(
+        matches!(
             self.peek(),
             Token::Ident(_)
                 | Token::UpperIdent(_)
@@ -3618,30 +3653,7 @@ impl Parser {
                 | Token::StrLit(_)
                 | Token::LeftParen
                 | Token::LeftBracket
-        ) {
-            return true;
-        }
-        // Negative literal: -N where - is not preceded by an expression-ending token
-        if let Token::Operator(op) = self.peek()
-            && op == "-" && self.pos + 1 < self.tokens.len() && self.is_neg_literal_context() {
-                return matches!(self.tokens[self.pos + 1].token,
-                    Token::IntLit(_) | Token::BigIntLit(_) | Token::NumLit(_));
-            }
-        false
-    }
-
-    /// Check if a `-` at the current position should be treated as a negative literal prefix.
-    /// Returns true when `-` is NOT preceded by an expression-ending token
-    /// (number, ident, `)`, `]`, `}` — a record construction/update ends in
-    /// a brace, so `R { rx = 3 } - 1` is subtraction, not the record
-    /// applied to `-1`, F8).
-    fn is_neg_literal_context(&self) -> bool {
-        if self.pos == 0 { return true; }
-        let prev = &self.tokens[self.pos - 1].token;
-        !matches!(prev,
-            Token::IntLit(_) | Token::BigIntLit(_) | Token::NumLit(_) | Token::StrLit(_)
-            | Token::Ident(_) | Token::UpperIdent(_)
-            | Token::RightParen | Token::RightBracket | Token::RightBrace)
+        )
     }
 
     // Depth-guard wrapper: the grammar rule itself is in `parse_expr_atom_inner`.
@@ -4120,7 +4132,17 @@ impl Parser {
             // `let` statement: one binding group — simple, function and
             // tuple-pattern bindings, all in one mutually recursive scope —
             // parsed by the same layout rules as a let-expression's group.
+            // Haskell 2010 §3.14 has two statements that start with `let`:
+            // `let decls` alone is the let STATEMENT, and `let decls in e`
+            // is an expression statement — the let-expression — so the
+            // keyword alone does not decide which; the `in` after the
+            // bindings does (F8). Where that `in` stands matters: on the
+            // bindings' line or indented past the block's statement column
+            // it continues the statement; at the statement column the
+            // layout rule has put a `;` before it, and a statement cannot
+            // begin with `in`.
             if self.at(&Token::Let) {
+                let let_kw = self.peek_loc().clone();
                 self.advance();
                 let let_loc = self.peek_loc().clone();
                 let binds = self.parse_let_binds()?;
@@ -4131,6 +4153,42 @@ impl Parser {
                             .to_string(),
                         Span::new(let_loc.line, let_loc.col),
                     )));
+                }
+                if self.at(&Token::In) {
+                    let in_loc = self.peek_loc().clone();
+                    let starts_line = in_loc.col == self.current_indent + 1;
+                    if !starts_line || self.current_indent > do_indent {
+                        self.advance();
+                        let expr = self.let_expr_body(binds)?;
+                        stmts.push(DoStmt::Expr(Expr::Spanned(
+                            Span::new(let_kw.line, let_kw.col),
+                            Box::new(expr),
+                        )));
+                        continue;
+                    }
+                    if self.current_indent == do_indent && self.let_in_pending == 0 {
+                        let mut diag = Diagnostic::parse_at(
+                            "parse error on input 'in': a 'let' statement in a \
+                             'do' block has no 'in' — its bindings are in scope \
+                             for the statements after it, and this 'in' starts \
+                             a new statement of the block"
+                                .to_string(),
+                            Span::new(in_loc.line, in_loc.col),
+                        );
+                        diag.notes.push(
+                            "to bind names for the rest of the block, drop the \
+                             'in'; to write the let-expression 'let … in e' as \
+                             one statement, put 'in' on the bindings' line or \
+                             indent it past the block's statements"
+                                .to_string(),
+                        );
+                        return Err(Box::new(diag));
+                    }
+                    // The `in` closes this block: it belongs to an enclosing
+                    // let-expression (at the statement column, by the
+                    // parse-error(t) rule; further left, by indentation). The
+                    // let statement is then the block's last, which the check
+                    // below reports as GHC does.
                 }
                 stmts.push(DoStmt::DoLet { binds });
                 continue;
@@ -4605,26 +4663,9 @@ impl Parser {
             }
     }
 
+    /// Haskell 2010 `aexp`. A `-` is not an atom (see `is_expr_atom_start`):
+    /// negation belongs to the infix level, `parse_chain_operand`.
     fn parse_expr_atom_inner(&mut self) -> PResult<Expr> {
-        // Negative literal: -N where - is not preceded by an expression-ending token
-        if let Token::Operator(op) = self.peek()
-            && op == "-" && self.pos + 1 < self.tokens.len() && self.is_neg_literal_context() {
-                match self.tokens[self.pos + 1].token.clone() {
-                    Token::IntLit(n) => {
-                        self.advance(); self.advance();
-                        return Ok(Expr::Lit(Literal::Integer(-n)));
-                    }
-                    Token::BigIntLit(s) => {
-                        self.advance(); self.advance();
-                        return Ok(Expr::Lit(Literal::BigInteger(format!("-{s}"))));
-                    }
-                    Token::NumLit(n) => {
-                        self.advance(); self.advance();
-                        return Ok(Expr::Lit(Literal::Number(-n)));
-                    }
-                    _ => {}
-                }
-            }
         match self.peek().clone() {
             Token::IntLit(n) => {
                 self.advance();
@@ -4672,15 +4713,16 @@ impl Parser {
             Token::Case => self.parse_case_expr(),
             Token::Let => {
                 self.advance();
-                let binds = self.parse_let_binds()?;
+                // Pending while the bindings are read: a do block inside
+                // them may meet this let's `in`. Restored on the error
+                // path too, since a speculative parse (a record update's
+                // field value) may abandon this let and rewind.
+                self.let_in_pending += 1;
+                let binds = self.parse_let_binds();
+                self.let_in_pending -= 1;
+                let binds = binds?;
                 self.expect(&Token::In)?;
-                self.skip_newlines_and_indent();
-                let body = self.parse_expr()?;
-
-                Ok(Expr::Let {
-                    binds,
-                    body: Box::new(body),
-                })
+                self.let_expr_body(binds)
             }
             Token::Do => self.parse_do_block(),
             Token::Backslash => self.parse_lambda(),
