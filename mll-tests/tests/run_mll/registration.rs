@@ -564,6 +564,9 @@ mll_test!(do_eval_order, "do_eval_order.mll");
 mll_test!(do_let_scoping, "do_let_scoping.mll");
 mll_test!(do_let_in_statement, "do_let_in_statement.mll");
 mll_test!(prefix_minus_not_atom, "prefix_minus_not_atom.mll");
+// F11: every multi-line construct shape continues across lines indented
+// past the enclosing block's column — one layout rule in the token stream.
+mll_test!(layout_continuation_lines, "layout_continuation_lines.mll");
 mll_test!(let_recursive_groups, "let_recursive_groups.mll");
 mll_test!(let_pattern_recursive, "let_pattern_recursive.mll");
 mll_test!(exceptions, "exceptions.mll");

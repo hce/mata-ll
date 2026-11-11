@@ -44,6 +44,72 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A line indented past the enclosing block's column continues the
+  construct above it, whatever that construct is** (wrong rejection). A
+  guard's `=` on its own line (`| n < 0` / `  = -1`), a `newtype`'s or
+  `data`'s `=` on the next line, constructor fields continued onto
+  following lines (`data P = P` / `  Int` / `  Int`), `deriving` on its
+  own line with the class list on the next, a signature's `::` or `->`
+  starting a line, a case alternative's `->` on the next line, a class or
+  instance head's `=>` on the next line, and more, were rejected at the
+  first token of the continued line ("Expected '=', found start of a new
+  line", "Unexpected token 'Int' at top level") where GHC accepts every
+  one of them. The parser had no layout algorithm: the lexer marks each
+  line start with its indentation, and every parse site that could be
+  continued skipped the mark by hand — nine such sites in five thousand
+  lines decided layout, and every site never taught to skip rejected a
+  legal continuation. Now Haskell 2010 §10.3 is one property of the
+  parser's token stream: a `Layout` context names the innermost implicit
+  block's column (the module's declarations, a class or instance body, a
+  GADT's constructors, a type family's equations, a `where` or `let`
+  group, a `do` block's statements, a `case`'s alternatives), and the
+  token access (`peek`, `advance`, `at`, `expect`) reads a line start
+  indented PAST that column as whitespace, so no parse site knows that a
+  construct may span lines; a line start AT the column is the block's
+  `;` and one LEFT of it the block's `}`, both read only by the block
+  loops — and the `}` stays in the stream for the enclosing context to
+  read as its own continuation, separator or closer, exactly as the
+  report's `L` function re-reads `<n>`. The per-site skips, the
+  checkpoint-and-skip probes, the second rule keyed to the expression's
+  starting line (`expr_min_indent`) and the `current_indent` bookkeeping
+  are gone. Consequences GHC shares: a token no item of a block begins
+  with closes the block (the parse-error(t) rule) — so a clause guard
+  aligned with the alternatives of the `case` it follows continues the
+  clause, `in` aligned with its `let`'s bindings closes the group, and
+  `+ 2` at a `do` block's statement column makes the whole `do` the left
+  operand (GHC's type error `Num (IO ())`, not a parse error); `then` and
+  `else` may stand at the statement column (§3.6's optional semicolons);
+  every `{` suspends layout until its matching `}` (§10.3 pushes the
+  context 0 on any brace, record or layout — the lexer cannot tell them
+  apart), so a record construction, update or declaration body may put
+  its `{`, `,` and `}` at or left of the enclosing block's column
+  (`let r = R {` / `a = 1` / `, b = 2` / `}` with the commas under the
+  `r`), while parentheses and brackets suspend nothing, so an operand
+  continued at the enclosing block's column inside them is GHC's parse
+  error; the module header stands outside every block; and the module's
+  block opens at the first declaration's column. The sibling boundary
+  did not move: `x = 1` then `+ 2` at x's column, a `where` binding's
+  continuation at the binding column, a `where` or `deriving` or `=` at
+  column 1 after a declaration are GHC's `parse error on input 't'` —
+  now reported in that shape, with a note stating the rule and the
+  column the line would have to clear. Two shapes the old per-site skips
+  accepted are now rejected, as GHC rejects them: a `case` whose
+  alternatives stand at the column of the `let` binding holding it
+  (`let res = case x of` with `Just n -> n` under the `res`: the line is
+  the next binding, so the case has no alternatives — GHC's `parse error
+  on input '->'`, here `parse error on input 'Just'` with the rule in a
+  note; indent the alternatives past the binding), and an operand
+  continued at the enclosing block's column inside parentheses (`print
+  (1 +` / `2)` with the `2` under the `print`). GHC-goldened case
+  `layout_continuation_lines` (every multi-line shape above, in
+  clauses, where groups, case alternatives, do blocks, data, newtype,
+  GADT, class and instance declarations, list, tuple, section and record
+  literals, record bodies at the block column); compile-error tests for
+  the sibling boundary at the declaration, binding and statement
+  columns, inside parentheses, for the smaller indent that closes a
+  block, for the case at the binding column, and for an unclosed `{` at
+  the end of the file (a parse error, never a block closed by
+  indentation). Found by the 2026-10 fresh-eyes review (F11).
 - **A continuation line that starts with `- N` continues the expression
   above it, and `let … in e` is an expression statement in a `do` block**
   (silent wrong output / wrong rejection). `let b = a` followed by a

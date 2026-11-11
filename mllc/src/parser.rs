@@ -176,19 +176,49 @@ struct Declared {
     span: Span,
 }
 
+/// The innermost layout context (Haskell 2010 §10.3). The lexer marks
+/// every line start with an `Indent(n)` token, `n` the line's indentation;
+/// what such a mark means is decided here, against this context, by the
+/// three cases of the layout algorithm: a line indented PAST an implicit
+/// block's column continues the block's current item (the mark is
+/// whitespace), a line AT the column starts the block's next item (the
+/// mark is the `;` between items), and a line indented LESS closes the
+/// block (the mark is its `}`, and is then re-read against the enclosing
+/// context). The parser's token access (`peek`, `advance`, `at`, …) treats
+/// a continuation mark as whitespace, so no parse site has to know that a
+/// construct may span lines; only the block loops see the other two.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Layout {
+    /// An implicit block whose items start at this 0-based column: the
+    /// module's declarations, the members of a class or instance body,
+    /// the constructors of a GADT, the equations of a type family, the
+    /// bindings of a `where` or `let`, the statements of a `do`, the
+    /// alternatives of a `case`.
+    Block(usize),
+    /// No implicit block is open: the module header before its `where`,
+    /// and the inside of any `{ … }` pair — a record construction, update
+    /// or declaration body as much as an explicit `case … of { … }` —
+    /// where line starts mean nothing at all. Haskell 2010 §10.3 pushes
+    /// the context 0 on every `{` (`L ({ : ts) ms = { : L ts (0 : ms)`),
+    /// since the lexer cannot tell a record brace from a layout brace, and
+    /// inserts no `;` or `}` until the matching `}` pops it; that is what
+    /// lets a record body stand at, or left of, the enclosing block's
+    /// column. Parentheses and brackets get no such context.
+    Explicit,
+}
+
 struct Parser {
     tokens: Vec<Located>,
     pos: usize,
-    /// Current line's indentation
-    current_indent: usize,
-    /// Minimum indentation for current expression context
-    expr_min_indent: usize,
-    /// Column of the current layout block's items (0 at top level; the item
-    /// column inside where/let/do/case). A cross-line application-argument
-    /// continuation is only consumed when indented strictly past this, which
-    /// is exactly the Haskell rule: deeper than the block = continuation,
-    /// at the block column = a new item.
-    block_indent: usize,
+    /// The innermost layout context; see [`Layout`]. Every construct that
+    /// opens an implicit block sets it for the block's extent and restores
+    /// the enclosing context afterwards (`in_layout`); a `{` consumed by
+    /// `advance` makes it `Explicit` until the matching `}`.
+    layout: Layout,
+    /// The contexts suspended by the `{` tokens currently open, innermost
+    /// last: `advance` pushes the context in force at each `{` and
+    /// restores it at the matching `}` (Haskell 2010 §10.3's `0 : ms`).
+    brace_stack: Vec<Layout>,
     /// Current recursion depth of the nesting productions (expressions,
     /// types, patterns). Bounded by `crate::MAX_NESTING_DEPTH` via
     /// `enter_nested`, so absurdly nested input yields a clean diagnostic
@@ -229,15 +259,15 @@ struct Parser {
 }
 
 /// A parser position to rewind to when a speculative parse fails. Captures
-/// BOTH the token cursor and the layout state: restoring `pos` alone leaves
-/// `current_indent` describing a line the parser is no longer on, and the
-/// backtrack sites used to apply that two-field discipline inconsistently
-/// by hand. (`block_indent` is scoped by its own save/restore at the block
-/// constructs and is never part of speculative backtracking.)
-#[derive(Clone, Copy)]
+/// BOTH the token cursor and the layout context: a speculative parse that
+/// fails inside a block it opened (a record-update field value holding a
+/// `do`, say) leaves the block's context set, and restoring `pos` alone
+/// would read the following lines against the wrong column.
+#[derive(Clone)]
 struct Checkpoint {
     pos: usize,
-    current_indent: usize,
+    layout: Layout,
+    brace_stack: Vec<Layout>,
 }
 
 impl Parser {
@@ -245,9 +275,8 @@ impl Parser {
         Parser {
             tokens,
             pos: 0,
-            current_indent: 0,
-            expr_min_indent: 0,
-            block_indent: 0,
+            layout: Layout::Explicit,
+            brace_stack: Vec::new(),
             depth: 0,
             pg_fresh: 0,
             let_in_pending: 0,
@@ -261,13 +290,15 @@ impl Parser {
     fn checkpoint(&self) -> Checkpoint {
         Checkpoint {
             pos: self.pos,
-            current_indent: self.current_indent,
+            layout: self.layout,
+            brace_stack: self.brace_stack.clone(),
         }
     }
 
     fn rewind(&mut self, cp: Checkpoint) {
         self.pos = cp.pos;
-        self.current_indent = cp.current_indent;
+        self.layout = cp.layout;
+        self.brace_stack = cp.brace_stack;
         // Pattern variables read past the checkpoint belong to the parse
         // being abandoned; the tokens will be read again, possibly as a
         // pattern, and must not be logged twice.
@@ -446,18 +477,102 @@ impl Parser {
         errors
     }
 
+    /// Is the token at index `i` a line-start mark that the current layout
+    /// context reads as whitespace — a line indented past the innermost
+    /// implicit block's column (a continuation of the block's current
+    /// item), or any line start where no implicit block is open?
+    fn is_continuation_mark(&self, i: usize) -> bool {
+        match (&self.tokens[i].token, self.layout) {
+            (Token::Indent(n), Layout::Block(col)) => *n > col,
+            (Token::Indent(_), Layout::Explicit) => true,
+            _ => false,
+        }
+    }
+
+    /// The index of the first token at or after `i` that the layout
+    /// context does not read as whitespace. The lexer never emits two
+    /// line-start marks in a row, so this moves at most one step.
+    fn visible_from(&self, mut i: usize) -> usize {
+        while self.is_continuation_mark(i) {
+            i += 1;
+        }
+        i
+    }
+
+    /// The index of the current token — the one `peek` returns. Every
+    /// place that remembers "the token here" for a later span or a
+    /// pattern-binder record takes this, not `pos`, which may rest on a
+    /// continuation mark.
+    fn cur(&self) -> usize {
+        self.visible_from(self.pos)
+    }
+
     fn peek(&self) -> &Token {
-        &self.tokens[self.pos].token
+        &self.tokens[self.cur()].token
     }
 
     fn peek_loc(&self) -> &Located {
-        &self.tokens[self.pos]
+        &self.tokens[self.cur()]
     }
 
+    /// The token `k` visible tokens past the current one (`nth(0)` is the
+    /// current token); past the end of the stream it is the EOF token.
+    fn nth(&self, k: usize) -> &Located {
+        let mut i = self.cur();
+        for _ in 0..k {
+            if matches!(self.tokens[i].token, Token::EOF) {
+                break;
+            }
+            i = self.visible_from(i + 1);
+        }
+        &self.tokens[i]
+    }
+
+    /// Consume the current token. A `{` suspends the layout context until
+    /// the matching `}` (see [`Layout::Explicit`]); every brace the parser
+    /// reads — record construction, update and declaration bodies, an
+    /// explicit `case` block — passes through here, so no parse site has
+    /// to know. An unmatched `}` (an error the caller reports) leaves the
+    /// context as it is.
     fn advance(&mut self) -> &Token {
-        let tok = &self.tokens[self.pos].token;
-        self.pos += 1;
-        tok
+        let i = self.cur();
+        self.pos = i + 1;
+        match &self.tokens[i].token {
+            Token::LeftBrace => {
+                self.brace_stack.push(self.layout);
+                self.layout = Layout::Explicit;
+            }
+            Token::RightBrace => {
+                if let Some(outer) = self.brace_stack.pop() {
+                    self.layout = outer;
+                }
+            }
+            _ => {}
+        }
+        &self.tokens[i].token
+    }
+
+    /// Does the current token start its source line? (The raw token before
+    /// it is the line's start mark.)
+    fn starts_line(&self) -> bool {
+        let i = self.cur();
+        i > 0 && matches!(self.tokens[i - 1].token, Token::Indent(_))
+    }
+
+    /// Run `f` under the layout context `layout`, restoring the enclosing
+    /// context afterwards whether `f` succeeds or fails — the block
+    /// constructs all go through here, so an error inside a block never
+    /// leaves its column in force for what follows.
+    fn in_layout<T>(
+        &mut self,
+        layout: Layout,
+        f: impl FnOnce(&mut Self) -> PResult<T>,
+    ) -> PResult<T> {
+        let saved = self.layout;
+        self.layout = layout;
+        let r = f(self);
+        self.layout = saved;
+        r
     }
 
     /// Decode a string-literal token used in a SYMBOL position (an FFI Lua
@@ -489,7 +604,7 @@ impl Parser {
     /// through `guarded`, which pairs the check with the exit decrement.
     fn enter_nested(&mut self, what: &str) -> PResult<()> {
         if self.depth >= crate::MAX_NESTING_DEPTH {
-            return Err(nesting_error(what, self.span_of(self.pos)));
+            return Err(nesting_error(what, self.span_of(self.cur())));
         }
         self.depth += 1;
         Ok(())
@@ -516,11 +631,70 @@ impl Parser {
             self.advance();
             Ok(())
         } else {
-            Err(self.err_here(format!(
-                "Expected {}, found {}",
-                expected, self.peek()
-            )))
+            Err(self.err_expected(&expected.to_string()))
         }
+    }
+
+    /// "Expected X, found Y" at the current token — unless the current
+    /// token is a line-start mark, i.e. the construct being parsed is
+    /// incomplete and the next line does NOT continue it because it is
+    /// not indented past the enclosing block's column. That is GHC's
+    /// `parse error on input 't'` at the next line's first token, and the
+    /// note says which column the line would have to clear.
+    fn err_expected(&self, what: &str) -> Box<Diagnostic> {
+        match (self.peek(), self.layout) {
+            (Token::Indent(n), Layout::Block(col)) => {
+                let next = self.nth(1);
+                let mut diag = Box::new(Diagnostic::parse_at(
+                    format!("parse error on input {}", next.token),
+                    Span::new(next.line, next.col),
+                ));
+                diag.notes.push(format!(
+                    "the construct on the line above is incomplete ({what} expected), \
+                     but this line does not continue it: it starts at column {}, \
+                     which is not past column {} (the column of the enclosing block's \
+                     items — its declarations, bindings, statements or alternatives). \
+                     The layout rule reads a line at that column as the block's next \
+                     item, and a line left of it as the end of the block; only a line \
+                     indented past column {} continues the item above it.",
+                    n + 1,
+                    col + 1,
+                    col + 1,
+                ));
+                diag
+            }
+            (found, _) => self.err_here(format!("Expected {what}, found {found}")),
+        }
+    }
+
+    /// GHC's `parse error on input 't'` for a token that nothing open can
+    /// take: no construct continues with it and no block's item begins
+    /// with it. When the token starts its line, the layout rule is the
+    /// likely reason (an operator meant to continue the line above, placed
+    /// at the enclosing block's column) and the note spells it out.
+    fn parse_error_on_input(&self) -> Box<Diagnostic> {
+        // At a line-start mark (a line indented less than the enclosing
+        // block's items, with no outer context left to take it) the
+        // offending token is that line's first.
+        let at_mark = matches!(self.peek(), Token::Indent(_));
+        let loc = if at_mark { self.nth(1) } else { self.peek_loc() };
+        let mut diag = Box::new(Diagnostic::parse_at(
+            format!("parse error on input {}", loc.token),
+            Span::new(loc.line, loc.col),
+        ));
+        if at_mark || self.starts_line() {
+            diag.notes.push(format!(
+                "this line starts at column {}. The layout rule reads a line at the \
+                 column of an enclosing block's items (its declarations, bindings, \
+                 statements or alternatives) as that block's next item, and a line \
+                 indented less as the end of the block; only a line indented past \
+                 the item column continues the item above it. Nothing that can \
+                 begin or continue here starts with {}.",
+                loc.col,
+                loc.token,
+            ));
+        }
+        diag
     }
 
     fn at(&self, tok: &Token) -> bool {
@@ -561,41 +735,58 @@ impl Parser {
         matches!(self.peek(), Token::EOF)
     }
 
-    fn skip_indent(&mut self) {
-        while let Token::Indent(n) = self.peek() {
-            self.current_indent = *n;
+    /// Is the current token the layout `;` of the innermost implicit block
+    /// — the start of a line at exactly the block's column?
+    fn at_separator(&self) -> bool {
+        matches!((self.peek(), self.layout), (Token::Indent(n), Layout::Block(col)) if *n == col)
+    }
+
+    /// Consume the layout `;` before the block's next item, if the current
+    /// token is one. Only the block loops call this; everything else sees
+    /// the mark as the token it is and stops in front of it.
+    fn skip_separators(&mut self) {
+        while self.at_separator() {
             self.advance();
         }
     }
 
-    fn skip_newlines_and_indent(&mut self) {
-        loop {
-            match self.peek() {
-                Token::Indent(n) => {
-                    self.current_indent = *n;
-                    self.advance();
-                }
-                _ => break,
-            }
-        }
+    /// Does the innermost implicit block end here? At the end of the
+    /// file, or at a line-start mark the context does not read as
+    /// whitespace — after `skip_separators` that is a line indented LESS
+    /// than the block's column, the block's layout `}`. The mark is left
+    /// in place: the enclosing context reads it next, as its own
+    /// continuation, separator or closer (Haskell 2010 §10.3, the `n < m`
+    /// case re-reads `<n>` against the outer context).
+    fn at_block_end(&self) -> bool {
+        matches!(self.peek(), Token::EOF | Token::Indent(_))
     }
 
-    /// Open an implicit layout block whose items start at the NEXT token
-    /// (do statements, case alternatives, let bindings): skips newlines
-    /// and makes that token's column the block column — as
-    /// `current_indent`, so a following line at a smaller indent closes
-    /// the block also when the first item shares the keyword's line
-    /// (`main = do putStrLn "a"` followed by a column-0 declaration; the
-    /// line's own indent would have let the declaration in as a
-    /// statement) — and as `block_indent`, so a same-column sibling is the
-    /// next item rather than a continuation argument of the previous one.
-    /// Returns the column; the caller restores `block_indent` at the end.
-    fn open_item_block(&mut self) -> usize {
-        self.skip_newlines_and_indent();
-        let col = self.peek_loc().col.saturating_sub(1);
-        self.current_indent = col;
-        self.block_indent = col;
-        col
+    /// The token at the start of the block's next item, if the current
+    /// token is a layout `;` — what the next line begins with, without
+    /// consuming the separator.
+    fn after_separator(&self) -> Option<&Token> {
+        self.at_separator().then(|| &self.nth(1).token)
+    }
+
+    /// Open the implicit block that follows a layout keyword (`where`,
+    /// `let`, `do`, `of`), the keyword already consumed. Haskell 2010
+    /// §10.3: the block's column is the column of the next token, provided
+    /// that token is indented past the enclosing block's column — on the
+    /// keyword's own line it always is; on a later line the layout context
+    /// has already decided: a continuation mark (read as whitespace) means
+    /// the token is indented past the enclosing block, while a visible
+    /// mark means it is not, and the block is EMPTY (`{}`), the line
+    /// belonging to the enclosing context. So an empty `class C a where`
+    /// does not swallow the following declarations as methods, and a
+    /// `where` alone on its line does not swallow the next definition as a
+    /// binding. Returns the block's column — the caller parses the block's
+    /// items under `in_layout(Layout::Block(col), …)` — or `None` for an
+    /// empty block.
+    fn open_block(&self) -> Option<usize> {
+        if self.at_block_end() {
+            return None;
+        }
+        Some(self.peek_loc().col.saturating_sub(1))
     }
 
     /// Is the next token one that ends an implicit layout block from
@@ -603,9 +794,11 @@ impl Parser {
     /// record, the separator of an enclosing tuple/list, or the keyword of
     /// an enclosing construct? Haskell's layout algorithm closes the block
     /// on the parse error such a token would cause (the `parse-error(t)`
-    /// rule); the do-block and case-alternative loops test for these
-    /// explicitly, so `(do a; b, 2)`, `[do …, …]`, `if c then do … else …`
-    /// and `let x = do … in …` end the block where GHC does.
+    /// rule); the block loops test for these explicitly, so `(do a; b, 2)`,
+    /// `[do …, …]`, `if c then do … else …` and `let x = do … in …` end
+    /// the block where GHC does — also when the token stands at the
+    /// block's own column, where the layout `;` precedes it (`let x = 1`
+    /// with `in x` under the `x`).
     fn at_block_closer(&self) -> bool {
         matches!(
             self.peek(),
@@ -614,52 +807,23 @@ impl Parser {
         )
     }
 
-    /// Open the layout block that follows a `where` (class body, instance
-    /// body, clause bindings). Skips to the block's first token and returns
-    /// the column (0-based) every item of the block starts at — a later
-    /// line at that indent is the next item, a smaller indent closes the
-    /// block — or `None` for an EMPTY block.
-    ///
-    /// Haskell's layout rule: the block's context column is the column of
-    /// the token after the keyword; when that token sits on a later line
-    /// and is not indented past the ENCLOSING context (`enclosing_indent`),
-    /// the block is `{}` and the token belongs to the enclosing context.
-    /// Without this an empty `class C a where` / `instance C T where`
-    /// swallowed the following top-level declarations as methods (the
-    /// item indent was read from the next line, i.e. 0), and a `where`
-    /// alone on its line swallowed the next definition as a binding.
-    ///
-    /// When the first item shares the keyword's line, `current_indent` is
-    /// moved to its column: that column is the layout context from here
-    /// on (a following line at a smaller indent closes the block, as in
-    /// GHC), and the block loops compare against `current_indent`.
-    fn open_layout_block(&mut self, keyword_line: usize, enclosing_indent: usize) -> Option<usize> {
-        self.skip_newlines_and_indent();
-        if self.at_eof() {
-            return None;
-        }
-        let loc = self.peek_loc();
-        if loc.line > keyword_line {
-            (self.current_indent > enclosing_indent).then_some(self.current_indent)
-        } else {
-            let col = loc.col.saturating_sub(1);
-            self.current_indent = col;
-            Some(col)
-        }
-    }
-
     /// Parse a whole module: the optional `module … where` header, then
-    /// top-level declarations at column 0 (import decls, signatures, bindings,
-    /// data/newtype/class/instance/type-family/fixity decls). Adjacent
+    /// top-level declarations at the module block's column (import decls,
+    /// signatures, bindings, data/newtype/class/instance/type-family/fixity
+    /// decls). Adjacent
     /// equations of one function are merged into one FunDef (`push_decl`);
     /// a declaration that fails to parse is recorded and parsing resumes at
-    /// the next column-0 declaration, so every declaration's error is
+    /// the next declaration at that column, so every declaration's error is
     /// reported at once. A source free of syntax errors is then checked for
     /// names it declares twice (`check_declarations`).
     fn parse_module(&mut self) -> Result<Module, Vec<Diagnostic>> {
         let mut decls = Vec::new();
-        self.skip_indent();
 
+        // The header stands outside any layout block (Haskell 2010 §10.3
+        // opens the module's block at the token after `where`), so its
+        // lines may be indented any way at all: `layout` starts out
+        // `Explicit`, every line start is whitespace.
+        //
         // Parse optional `module Name (exports) where` header
         let mut module_name: Option<String> = None;
         let mut module_exports: Option<ModuleExports> = None;
@@ -678,14 +842,12 @@ impl Parser {
                 module_name = Some(name_parts.join("."));
             }
             // Parse optional export list
-            self.skip_newlines_and_indent();
             if self.at(&Token::LeftParen) {
                 self.advance();
                 let mut exports = Vec::new();
                 let mut reexports = Vec::new();
                 let mut subs = std::collections::HashMap::new();
                 loop {
-                    self.skip_newlines_and_indent();
                     if self.at(&Token::RightParen) { break; }
                     match self.peek().clone() {
                         Token::Ident(n) => { exports.push(n); self.advance(); }
@@ -744,28 +906,48 @@ impl Parser {
                             return Err(vec![*diag]);
                         }
                     }
-                    self.skip_newlines_and_indent();
                     if self.at(&Token::Comma) { self.advance(); } else { break; }
                 }
-                self.skip_newlines_and_indent();
                 if self.at(&Token::RightParen) { self.advance(); }
                 module_exports = Some(ModuleExports { names: exports, reexports, subs });
             }
             if self.at(&Token::Where) {
                 self.advance();
             }
-            self.skip_newlines_and_indent();
         }
+
+        // The module's block opens at the first declaration's column
+        // (Haskell 2010 §10.3: the token after `where`, or the module's
+        // first token when it has no header) — column 0 in practice.
+        let top = if self.at_eof() { 0 } else { self.peek_loc().col.saturating_sub(1) };
+        self.layout = Layout::Block(top);
 
         // Parse declarations, recovering at declaration boundaries: a failed
         // declaration records its diagnostic and parsing resumes at the next
-        // unindented line that can start a declaration, so one run reports
-        // every independent syntax error instead of only the first.
+        // line at the declaration column that can start a declaration, so
+        // one run reports every independent syntax error instead of only
+        // the first.
         let mut errors: Vec<Diagnostic> = Vec::new();
-        while !self.at_eof() {
-            let started_at = self.pos;
+        loop {
+            self.skip_separators();
+            if self.at_eof() {
+                break;
+            }
+            let started_at = self.cur();
             self.pattern_binders.clear();
-            match self.parse_decl() {
+            let result = self.parse_decl().and_then(|parsed| {
+                // The declaration is complete. The next token must begin a
+                // new line at the declaration column (the block's `;`) or
+                // end the file; anything else stands on a continuation
+                // line that the declaration has no grammar left for —
+                // GHC's parse error on that token.
+                if self.at_eof() || self.at_separator() {
+                    Ok(parsed)
+                } else {
+                    Err(self.parse_error_on_input())
+                }
+            });
+            match result {
                 Ok(parsed) => {
                     for decl in parsed {
                         self.push_decl(&mut decls, decl, started_at);
@@ -773,10 +955,15 @@ impl Parser {
                 }
                 Err(e) => {
                     errors.push(*e);
-                    self.recover_to_next_decl(started_at);
+                    // The context is the module's again: every block parses
+                    // its items under `in_layout`, which restores the
+                    // enclosing context on the error path too; a brace the
+                    // failed declaration left open is forgotten with it.
+                    self.layout = Layout::Block(top);
+                    self.brace_stack.clear();
+                    self.recover_to_next_decl(started_at, top);
                 }
             }
-            self.skip_newlines_and_indent();
         }
         if !errors.is_empty() {
             return Err(errors);
@@ -857,16 +1044,18 @@ impl Parser {
     }
 
     /// After a declaration fails to parse, skip forward to the next plausible
-    /// declaration start: an unindented line (`Indent(0)`) whose first token
-    /// can begin a declaration. `started_at` is where the failed declaration
-    /// began; recovery always moves past it, so a failure on a declaration's
-    /// very first token cannot loop.
-    fn recover_to_next_decl(&mut self, started_at: usize) {
+    /// declaration start: a line at the declaration column `top` whose first
+    /// token can begin a declaration. `started_at` is where the failed
+    /// declaration began; recovery always moves past it, so a failure on a
+    /// declaration's very first token cannot loop. Scans the raw stream:
+    /// the layout context is the module's again, under which that line's
+    /// mark is the separator the declaration loop consumes.
+    fn recover_to_next_decl(&mut self, started_at: usize, top: usize) {
         if self.pos <= started_at {
             self.pos = started_at + 1;
         }
-        while !self.at_eof() {
-            if matches!(self.peek(), Token::Indent(0))
+        while self.pos < self.tokens.len() && !matches!(self.tokens[self.pos].token, Token::EOF) {
+            if matches!(self.tokens[self.pos].token, Token::Indent(n) if n == top)
                 && self.tokens.get(self.pos + 1).is_some_and(|next| Self::starts_decl(&next.token))
             {
                 return;
@@ -876,8 +1065,6 @@ impl Parser {
     }
 
     fn parse_decl(&mut self) -> PResult<Vec<Decl>> {
-        self.skip_newlines_and_indent();
-
         match self.peek().clone() {
             Token::Data => self.parse_data_decl().map(|d| vec![d]),
             Token::Newtype => self.parse_newtype_decl().map(|d| vec![d]),
@@ -890,12 +1077,10 @@ impl Parser {
             Token::Infixl | Token::Infixr | Token::Infix => self.parse_fixity_decl(),
             Token::Ident(_) => self.parse_value_decl(),
             Token::LeftParen => self.parse_operator_decl(),
-            _ => {
-                Err(self.err_here(format!(
-                    "Unexpected token {} at top level",
-                    self.peek()
-                )))
-            }
+            // A token no declaration begins with — or a line indented LESS
+            // than the module's declarations, the block's `}` with nothing
+            // outside it to take the line.
+            _ => Err(self.parse_error_on_input()),
         }
     }
 
@@ -905,7 +1090,7 @@ impl Parser {
         // declared in prefix parenthesised form — `data (:+:) a b = …` — just
         // like an operator value binding (`(<>) a b = …`). Both spellings then
         // take the same type-variable list.
-        let name_tok = self.pos;
+        let name_tok = self.cur();
         let name = self.parse_type_con_name()?;
         self.declare(&name, DeclaredAs::Data, name_tok);
 
@@ -915,41 +1100,41 @@ impl Parser {
             self.advance();
         }
 
-        // The `= …` / `where` may start on a continuation line
-        // (`data T\n    = A\n    | B`), as any Haskell layout allows and
-        // a function clause's `finish_clause` already accepts; a data
-        // declaration always has one of the two (there is no empty data
-        // declaration), so skipping the newlines here cannot swallow a
-        // following declaration.
-        self.skip_newlines_and_indent();
-
         // Check for GADT syntax
         if self.at(&Token::Where) {
             self.advance();
             // GADT constructors: each is `Con :: type`, with the full
             // signature kept in `gadt_type` (the typechecker derives the
-            // fields, result-type indices and existentials from it).
+            // fields, result-type indices and existentials from it). They
+            // form an implicit layout block like a class body's members.
             let mut constructors = Vec::new();
-            self.skip_newlines_and_indent();
-            let gadt_indent = self.current_indent;
-
-            while !self.at_eof() && self.current_indent >= gadt_indent {
-                if let Token::UpperIdent(_) = self.peek() {
-                    let con_name = self.expect_upper_ident()?;
-                    self.expect(&Token::DblColon)?;
-                    let ty = self.parse_type()?;
-                    constructors.push(Constructor {
-                        name: con_name,
-                        external_name: None,
-                        fields: ConstructorFields::Positional(vec![]),
-                        gadt_type: Some(ty),
-                        existential_vars: vec![],
-                        existential_constraints: vec![],
-                    });
-                    self.skip_newlines_and_indent();
-                } else {
-                    break;
-                }
+            if let Some(col) = self.open_block() {
+                self.in_layout(Layout::Block(col), |p| {
+                    loop {
+                        p.skip_separators();
+                        if p.at_block_end() || p.at_block_closer() {
+                            break;
+                        }
+                        // A line at the constructors' column that is not a
+                        // constructor signature closes the block (GHC's
+                        // parse-error(t) rule) — a `deriving` clause, say.
+                        if !matches!(p.peek(), Token::UpperIdent(_)) {
+                            break;
+                        }
+                        let con_name = p.expect_upper_ident()?;
+                        p.expect(&Token::DblColon)?;
+                        let ty = p.parse_type()?;
+                        constructors.push(Constructor {
+                            name: con_name,
+                            external_name: None,
+                            fields: ConstructorFields::Positional(vec![]),
+                            gadt_type: Some(ty),
+                            existential_vars: vec![],
+                            existential_constraints: vec![],
+                        });
+                    }
+                    Ok(())
+                })?;
             }
 
             let deriving = self.parse_deriving()?;
@@ -965,9 +1150,7 @@ impl Parser {
 
         let mut constructors = Vec::new();
         constructors.push(self.parse_constructor(&name)?);
-        loop {
-            self.skip_newlines_and_indent();
-            if !self.at(&Token::Pipe) { break; }
+        while self.at(&Token::Pipe) {
             self.advance();
             constructors.push(self.parse_constructor(&name)?);
         }
@@ -1030,20 +1213,17 @@ impl Parser {
 
         let name = self.expect_upper_ident()?;
 
-        // Check for record syntax (may be on next line)
-        let save_pos = self.checkpoint();
-        self.skip_newlines_and_indent();
+        // Record syntax; the brace may open on a continuation line.
         if self.at(&Token::LeftBrace) {
             self.advance();
             let mut fields: Vec<crate::ast::RecordField> = Vec::new();
             // The name token of each field, parallel to `fields`.
             let mut field_toks: Vec<usize> = Vec::new();
             loop {
-                self.skip_newlines_and_indent();
                 if self.at(&Token::RightBrace) {
                     break;
                 }
-                let field_tok = self.pos;
+                let field_tok = self.cur();
                 let field_name = self.expect_ident()?;
                 // One constructor names each of its fields once: a second
                 // `x ::` would be a second component under the same label,
@@ -1088,14 +1268,12 @@ impl Parser {
                 self.expect(&Token::DblColon)?;
                 let field_type = self.parse_type()?;
                 fields.push(crate::ast::RecordField { name: field_name, external_key, ty: field_type });
-                self.skip_newlines_and_indent();
                 if self.at(&Token::Comma) {
                     self.advance();
                 } else {
                     break;
                 }
             }
-            self.skip_newlines_and_indent();
             self.expect(&Token::RightBrace)?;
             let external_name = self.parse_constructor_external_name(&name)?;
             return Ok(Constructor {
@@ -1106,9 +1284,6 @@ impl Parser {
                 existential_vars,
                 existential_constraints,
             });
-        } else {
-            // Not record syntax — backtrack
-            self.rewind(save_pos);
         }
 
         // Positional fields. A bare `as` after the constructor name or a
@@ -1156,13 +1331,11 @@ impl Parser {
         }
     }
 
-    /// Parse optional `deriving (Show, Eq)` clause after a data declaration.
+    /// Parse optional `deriving (Show, Eq)` clause after a data declaration
+    /// (on the declaration's line, or on a continuation line — the layout
+    /// context makes the difference, as everywhere).
     fn parse_deriving(&mut self) -> PResult<Vec<String>> {
-        // Look ahead past newlines/indents for 'deriving'
-        let save = self.checkpoint();
-        self.skip_newlines_and_indent();
         if !self.at(&Token::Deriving) {
-            self.rewind(save);
             return Ok(vec![]);
         }
         self.advance(); // consume 'deriving'
@@ -1171,13 +1344,11 @@ impl Parser {
         if self.at(&Token::LeftParen) {
             self.advance();
             loop {
-                self.skip_newlines_and_indent();
                 if self.at(&Token::RightParen) {
                     self.advance();
                     break;
                 }
                 classes.push(self.expect_upper_ident()?);
-                self.skip_newlines_and_indent();
                 if self.at(&Token::Comma) {
                     self.advance();
                 } else {
@@ -1195,7 +1366,7 @@ impl Parser {
 
     fn parse_newtype_decl(&mut self) -> PResult<Decl> {
         self.expect(&Token::Newtype)?;
-        let name_tok = self.pos;
+        let name_tok = self.cur();
         let name = self.expect_upper_ident()?;
         self.declare(&name, DeclaredAs::Newtype, name_tok);
 
@@ -1218,35 +1389,20 @@ impl Parser {
         let mut con_name = None;
         let mut field = None;
         let inner;
-        // The record brace may sit on the NEXT line (the data-declaration
-        // path accepts that layout via checkpoint+skip; this detection used
-        // to test tokens[pos+1] == LeftBrace directly, so an intervening
-        // layout token broke the record form). Scan past layout tokens for
-        // the detection, and skip them again after the constructor name.
-        let braced_con = matches!(self.peek(), Token::UpperIdent(_)) && {
-            let mut j = self.pos + 1;
-            while j < self.tokens.len()
-                && matches!(self.tokens[j].token, Token::Indent(_))
-            {
-                j += 1;
-            }
-            j < self.tokens.len() && self.tokens[j].token == Token::LeftBrace
-        };
+        // The record brace may sit on a continuation line; `nth` reads
+        // past the line start like every other lookahead.
+        let braced_con = matches!(self.peek(), Token::UpperIdent(_))
+            && self.nth(1).token == Token::LeftBrace;
         if let Token::UpperIdent(con) = self.peek().clone()
             && (con == name || braced_con)
         {
             self.advance();
             con_name = Some(con);
-            let save_brace = self.checkpoint();
-            self.skip_newlines_and_indent();
-            if !self.at(&Token::LeftBrace) {
-                self.rewind(save_brace);
-            }
             if self.at(&Token::LeftBrace) {
                 // Record form: exactly one selector (a newtype has exactly
                 // one field).
                 self.advance();
-                let sel_tok = self.pos;
+                let sel_tok = self.cur();
                 let sel = self.expect_ident()?;
                 self.declare(&sel, DeclaredAs::Field(name.clone()), sel_tok);
                 self.expect(&Token::DblColon)?;
@@ -1331,12 +1487,9 @@ impl Parser {
             self.advance();
             let mut items = Vec::new();
             loop {
-                // A multi-line import list: layout tokens between items are
-                // as meaningless as in an export list (the same
-                // skip_newlines_and_indent discipline — the import loop
-                // used to reject the shape with "Expected identifier,
-                // found start of a new line", F5).
-                self.skip_newlines_and_indent();
+                // A multi-line import list: its continuation lines are
+                // indented past the declaration column, so their line
+                // starts are whitespace here (F5).
                 if self.at(&Token::RightParen) {
                     break;
                 }
@@ -1374,14 +1527,12 @@ impl Parser {
                     let name = self.expect_ident()?;
                     items.push(ImportItem::Value(name));
                 }
-                self.skip_newlines_and_indent();
                 if self.at(&Token::Comma) {
                     self.advance();
                 } else {
                     break;
                 }
             }
-            self.skip_newlines_and_indent();
             self.expect(&Token::RightParen)?;
             return Ok(Decl::Import {
                 module_path,
@@ -1445,8 +1596,6 @@ impl Parser {
     ) -> PResult<(String, Clause)> {
         let loc = self.peek_loc();
         let span = Span::new(loc.line, loc.col);
-        let saved_block = self.block_indent;
-        self.block_indent = self.current_indent;
         let op = match self.peek().clone() {
             Token::Operator(op) => {
                 self.advance();
@@ -1461,14 +1610,11 @@ impl Parser {
             _ => unreachable!("caller checked for Operator/Backtick"),
         };
         let right = self.parse_pattern_atom()?;
-        let clause = self.finish_clause(&op, vec![left, right], span, saved_block, binders_from)?;
+        let clause = self.finish_clause(&op, vec![left, right], span, binders_from)?;
         Ok((op, clause))
     }
 
     fn parse_class_decl(&mut self) -> PResult<Vec<Decl>> {
-        // The declaration's own indent is the enclosing layout context of
-        // its `where` block (see `open_layout_block`).
-        let decl_indent = self.current_indent;
         self.expect(&Token::Class)?;
 
         // Parse optional superclass constraints: `Eq a =>` needs no parens,
@@ -1545,15 +1691,14 @@ impl Parser {
             }
         }
 
-        let class_tok = self.pos;
+        let class_tok = self.cur();
         let class_name = self.expect_upper_ident()?;
         self.declare(&class_name, DeclaredAs::Class, class_tok);
         let type_var = self.expect_ident()?;
-        let where_line = self.peek_loc().line;
         self.expect(&Token::Where)?;
 
         let mut methods = Vec::new();
-        let Some(method_indent) = self.open_layout_block(where_line, decl_indent) else {
+        let Some(method_col) = self.open_block() else {
             return Ok(vec![Decl::ClassDecl { name: class_name, type_var, superclasses, methods }]);
         };
 
@@ -1563,79 +1708,93 @@ impl Parser {
         // method group like a top-level function's (`push_decl`).
         let mut default_toks: HashMap<String, usize> = HashMap::new();
         let mut open_default: Option<String> = None;
-        loop {
-            self.skip_newlines_and_indent();
-            if self.at_eof() || self.current_indent < method_indent {
-                break;
-            }
+        // Fixity declarations a class body carries for its operator
+        // methods (Haskell 2010 §4.3.1 `cdecl`); they govern the module
+        // like top-level ones.
+        let mut fixities: Vec<Decl> = Vec::new();
+        self.in_layout(Layout::Block(method_col), |p| {
+            loop {
+                p.skip_separators();
+                if p.at_block_end() || p.at_block_closer() {
+                    break;
+                }
+                if matches!(p.peek(), Token::Infixl | Token::Infixr | Token::Infix) {
+                    fixities.extend(p.parse_fixity_decl()?);
+                    continue;
+                }
 
-            // Parse method name: a `name :: type` signature line or a
-            // default method clause. Could be an operator like (+) :: ...
-            let head_tok = self.pos;
-            let Some(head) = self.parse_method_name("class method")? else { break };
+                // Parse method name: a `name :: type` signature line or a
+                // default method clause. Could be an operator like (+) :: ...
+                let head_tok = p.cur();
+                // A token no member begins with closes the body (the
+                // parse-error(t) rule); the declaration loop reports it.
+                let Some(head) = p.parse_method_name("class method")? else { break };
 
-            // A `::` after a plain name makes it a type signature; an
-            // operator (or backtick) makes it the INFIX definition form
-            // (`x <> y = …` — the identifier was the left operand; a
-            // parenthesised pattern head, `(K a) <> (K b) = …`, is always
-            // this form); anything else is a prefix default method clause —
-            // `parse_clause` picks up right after the already-consumed name,
-            // exactly like a top-level function clause.
-            let (name, clause) = match head {
-                MethodHead::Infix(left) => self.parse_infix_method_clause(left, head_tok)?,
-                MethodHead::Name(name) => {
-                    if self.at(&Token::DblColon) {
-                        self.advance();
-                        let ty = self.parse_type()?;
-                        self.declare(&name, DeclaredAs::Method(class_name.clone()), head_tok);
-                        methods.push(ClassMethod { name, ty, default_clauses: None });
-                        open_default = None;
-                        continue;
+                // A `::` after a plain name makes it a type signature; an
+                // operator (or backtick) makes it the INFIX definition form
+                // (`x <> y = …` — the identifier was the left operand; a
+                // parenthesised pattern head, `(K a) <> (K b) = …`, is always
+                // this form); anything else is a prefix default method clause —
+                // `parse_clause` picks up right after the already-consumed name,
+                // exactly like a top-level function clause.
+                let (name, clause) = match head {
+                    MethodHead::Infix(left) => p.parse_infix_method_clause(left, head_tok)?,
+                    MethodHead::Name(name) => {
+                        if p.at(&Token::DblColon) {
+                            p.advance();
+                            let ty = p.parse_type()?;
+                            p.declare(&name, DeclaredAs::Method(class_name.clone()), head_tok);
+                            methods.push(ClassMethod { name, ty, default_clauses: None });
+                            open_default = None;
+                            continue;
+                        }
+                        if matches!(p.peek(), Token::Operator(_) | Token::Backtick) {
+                            p.bind_pattern_var(head_tok);
+                            p.parse_infix_method_clause(Pattern::Var(name), head_tok)?
+                        } else {
+                            (name.clone(), p.parse_clause(&name)?)
+                        }
                     }
-                    if matches!(self.peek(), Token::Operator(_) | Token::Backtick) {
-                        self.bind_pattern_var(head_tok);
-                        self.parse_infix_method_clause(Pattern::Var(name), head_tok)?
-                    } else {
-                        (name.clone(), self.parse_clause(&name)?)
+                };
+
+                // Attach to the matching method signature
+                let Some(m) = methods.iter_mut().find(|m| m.name == name) else {
+                    return Err(Box::new(Diagnostic::parse_at(format!(
+                        "Default implementation for '{}' has no preceding type signature in class '{}'",
+                        name, class_name
+                    ), clause.span)));
+                };
+                match &mut m.default_clauses {
+                    Some(clauses)
+                        if open_default.as_deref() == Some(name.as_str())
+                            && clauses.first().is_some_and(|c| !c.patterns.is_empty()) =>
+                    {
+                        clauses.push(clause)
+                    }
+                    Some(_) => {
+                        return Err(p.conflicting_method_err(
+                            &name,
+                            default_toks[&name],
+                            head_tok,
+                            &format!("class '{}'", class_name),
+                        ));
+                    }
+                    None => {
+                        m.default_clauses = Some(vec![clause]);
+                        default_toks.insert(name.clone(), head_tok);
                     }
                 }
-            };
-
-            // Attach to the matching method signature
-            let Some(m) = methods.iter_mut().find(|m| m.name == name) else {
-                return Err(Box::new(Diagnostic::parse_at(format!(
-                    "Default implementation for '{}' has no preceding type signature in class '{}'",
-                    name, class_name
-                ), clause.span)));
-            };
-            match &mut m.default_clauses {
-                Some(clauses)
-                    if open_default.as_deref() == Some(name.as_str())
-                        && clauses.first().is_some_and(|c| !c.patterns.is_empty()) =>
-                {
-                    clauses.push(clause)
-                }
-                Some(_) => {
-                    return Err(self.conflicting_method_err(
-                        &name,
-                        default_toks[&name],
-                        head_tok,
-                        &format!("class '{}'", class_name),
-                    ));
-                }
-                None => {
-                    m.default_clauses = Some(vec![clause]);
-                    default_toks.insert(name.clone(), head_tok);
-                }
+                open_default = Some(name);
             }
-            open_default = Some(name);
-        }
+            Ok(())
+        })?;
 
-        Ok(vec![Decl::ClassDecl { name: class_name, type_var, superclasses, methods }])
+        let mut decls = vec![Decl::ClassDecl { name: class_name, type_var, superclasses, methods }];
+        decls.extend(fixities);
+        Ok(decls)
     }
 
     fn parse_instance_decl(&mut self) -> PResult<Vec<Decl>> {
-        let decl_indent = self.current_indent;
         self.expect(&Token::Instance)?;
 
         // Parse an optional context, then `ClassName TargetType where`.
@@ -1660,69 +1819,73 @@ impl Parser {
         let class_name = self.expect_upper_ident()?;
         let target_type = self.parse_type_atom()?;
 
-        let where_line = self.peek_loc().line;
         self.expect(&Token::Where)?;
 
         // An empty body (`instance C T where` with every method defaulted)
         // is legal; the following declarations are NOT its methods.
         let mut methods = Vec::new();
-        let Some(method_indent) = self.open_layout_block(where_line, decl_indent) else {
+        let Some(method_col) = self.open_block() else {
             return Ok(vec![Decl::InstanceDecl { class_name, target_type, context, methods }]);
         };
 
         // The head token of each method's first equation, parallel to
         // `methods`.
         let mut method_toks: Vec<usize> = Vec::new();
-        loop {
-            self.skip_newlines_and_indent();
-            if self.at_eof() || self.current_indent < method_indent {
-                break;
-            }
+        self.in_layout(Layout::Block(method_col), |p| {
+            loop {
+                p.skip_separators();
+                if p.at_block_end() || p.at_block_closer() {
+                    break;
+                }
 
-            let head_tok = self.pos;
-            let Some(head) = self.parse_method_name("instance method")? else { break };
+                let head_tok = p.cur();
+                // A token no method begins with closes the body (the
+                // parse-error(t) rule); the declaration loop reports it.
+                let Some(head) = p.parse_method_name("instance method")? else { break };
 
-            // Collect all clauses for this method. An operator (or
-            // backtick) after the identifier is the INFIX definition form
-            // (`x <> y = …` — the identifier was the left operand); a
-            // parenthesised pattern head is always that form.
-            let (name, clause) = match head {
-                MethodHead::Infix(left) => self.parse_infix_method_clause(left, head_tok)?,
-                MethodHead::Name(name) => {
-                    if matches!(self.peek(), Token::Operator(_) | Token::Backtick) {
-                        self.bind_pattern_var(head_tok);
-                        self.parse_infix_method_clause(Pattern::Var(name), head_tok)?
-                    } else {
-                        let clause = self.parse_clause(&name)?;
-                        (name, clause)
+                // Collect all clauses for this method. An operator (or
+                // backtick) after the identifier is the INFIX definition form
+                // (`x <> y = …` — the identifier was the left operand); a
+                // parenthesised pattern head is always that form.
+                let (name, clause) = match head {
+                    MethodHead::Infix(left) => p.parse_infix_method_clause(left, head_tok)?,
+                    MethodHead::Name(name) => {
+                        if matches!(p.peek(), Token::Operator(_) | Token::Backtick) {
+                            p.bind_pattern_var(head_tok);
+                            p.parse_infix_method_clause(Pattern::Var(name), head_tok)?
+                        } else {
+                            let clause = p.parse_clause(&name)?;
+                            (name, clause)
+                        }
+                    }
+                };
+
+                // The equations of one method group like a top-level
+                // function's (`push_decl`): an equation continues the method
+                // the previous line was defining, or starts a method — which
+                // must then be one this body has not defined yet.
+                match methods.last_mut() {
+                    Some(InstanceMethod { name: last, clauses })
+                        if *last == name && clauses.first().is_some_and(|c| !c.patterns.is_empty()) =>
+                    {
+                        clauses.push(clause)
+                    }
+                    _ => {
+                        if let Some(i) = methods.iter().position(|m| m.name == name) {
+                            return Err(p.conflicting_method_err(
+                                &name,
+                                method_toks[i],
+                                head_tok,
+                                &format!("this instance of '{}'", class_name),
+                            ));
+                        }
+                        methods.push(InstanceMethod { name, clauses: vec![clause] });
+                        method_toks.push(head_tok);
                     }
                 }
-            };
-
-            // The equations of one method group like a top-level
-            // function's (`push_decl`): an equation continues the method
-            // the previous line was defining, or starts a method — which
-            // must then be one this body has not defined yet.
-            match methods.last_mut() {
-                Some(InstanceMethod { name: last, clauses })
-                    if *last == name && clauses.first().is_some_and(|c| !c.patterns.is_empty()) =>
-                {
-                    clauses.push(clause)
-                }
-                _ => {
-                    if let Some(i) = methods.iter().position(|m| m.name == name) {
-                        return Err(self.conflicting_method_err(
-                            &name,
-                            method_toks[i],
-                            head_tok,
-                            &format!("this instance of '{}'", class_name),
-                        ));
-                    }
-                    methods.push(InstanceMethod { name, clauses: vec![clause] });
-                    method_toks.push(head_tok);
-                }
             }
-        }
+            Ok(())
+        })?;
 
         Ok(vec![Decl::InstanceDecl { class_name, target_type, context, methods }])
     }
@@ -1757,7 +1920,7 @@ impl Parser {
 
     fn parse_export_decl(&mut self) -> PResult<Vec<Decl>> {
         self.expect(&Token::Export)?;
-        let name_tok = self.pos;
+        let name_tok = self.cur();
         let name = self.expect_ident()?;
         self.expect(&Token::DblColon)?;
         let ty = self.parse_type()?;
@@ -1785,7 +1948,7 @@ impl Parser {
 
         // Plain type alias: `type Name a b = ...`
         if !self.at(&Token::Family) {
-            let name_tok = self.pos;
+            let name_tok = self.cur();
             let name = self.expect_upper_ident()?;
             self.declare(&name, DeclaredAs::Synonym, name_tok);
             let mut params = Vec::new();
@@ -1801,7 +1964,7 @@ impl Parser {
         }
 
         self.expect(&Token::Family)?;
-        let name_tok = self.pos;
+        let name_tok = self.cur();
         let name = self.expect_upper_ident()?;
         self.declare(&name, DeclaredAs::Family, name_tok);
 
@@ -1814,32 +1977,40 @@ impl Parser {
         }
 
         self.expect(&Token::Where)?;
-        self.skip_newlines_and_indent();
 
+        // The equations form an implicit layout block; an empty one
+        // (`type family F a where` followed by the next declaration) is
+        // legal — an open family with no equations.
         let mut equations = Vec::new();
-        let eq_indent = self.current_indent;
-
-        loop {
-            self.skip_newlines_and_indent();
-            if self.at_eof() || self.current_indent < eq_indent {
-                break;
-            }
-            // Each equation: FamilyName argType... = resultType
-            if let Token::UpperIdent(ref eq_name) = self.peek().clone() {
-                if *eq_name != name {
-                    break;
+        if let Some(col) = self.open_block() {
+            self.in_layout(Layout::Block(col), |p| {
+                loop {
+                    p.skip_separators();
+                    if p.at_block_end() || p.at_block_closer() {
+                        break;
+                    }
+                    // Each equation: FamilyName argType... = resultType. A
+                    // token no equation begins with closes the block (the
+                    // parse-error(t) rule); the declaration loop reports it.
+                    let Token::UpperIdent(eq_name) = p.peek().clone() else { break };
+                    if eq_name != name {
+                        return Err(p.err_here(format!(
+                            "Expected an equation of type family '{}' (each line of its \
+                             block begins with the family's name), found '{}'",
+                            name, eq_name
+                        )));
+                    }
+                    p.advance(); // consume family name
+                    let mut args = Vec::new();
+                    while !p.at(&Token::Eq) && !p.at_eof() {
+                        args.push(p.parse_type_atom()?);
+                    }
+                    p.expect(&Token::Eq)?;
+                    let result = p.parse_type()?;
+                    equations.push(TypeFamilyEq { args, result });
                 }
-                self.advance(); // consume family name
-                let mut args = Vec::new();
-                while !self.at(&Token::Eq) && !self.at_eof() {
-                    args.push(self.parse_type_atom()?);
-                }
-                self.expect(&Token::Eq)?;
-                let result = self.parse_type()?;
-                equations.push(TypeFamilyEq { args, result });
-            } else {
-                break;
-            }
+                Ok(())
+            })?;
         }
 
         Ok(vec![Decl::TypeFamily { name, params, equations }])
@@ -1853,7 +2024,7 @@ impl Parser {
         }
         // intrinsic name :: type => parse as type signature (implementation is compiler-provided)
         if let Token::Ident(_) = self.peek() {
-            let name_tok = self.pos;
+            let name_tok = self.cur();
             let name = self.expect_ident()?;
             self.expect(&Token::DblColon)?;
             let ty = self.parse_type()?;
@@ -1895,13 +2066,13 @@ impl Parser {
         };
         let mut decls = Vec::new();
         loop {
-            let mut op_tok = self.pos;
+            let mut op_tok = self.cur();
             let op = match self.peek().clone() {
                 Token::Operator(s) => { self.advance(); s }
                 Token::Ident(s) => { self.advance(); s } // backtick operator, bare
                 Token::Backtick => {
                     self.advance();
-                    op_tok = self.pos;
+                    op_tok = self.cur();
                     let s = self.expect_ident()?;
                     self.expect(&Token::Backtick)?;
                     s
@@ -1923,7 +2094,7 @@ impl Parser {
     fn parse_value_decl(&mut self) -> PResult<Vec<Decl>> {
         let loc = self.peek_loc();
         let (def_line, def_col) = (loc.line, loc.col);
-        let name_tok = self.pos;
+        let name_tok = self.cur();
         let name = self.expect_ident()?;
 
         // Type signature: `name :: type`
@@ -1940,8 +2111,6 @@ impl Parser {
         // following pattern is the second operand.
         if matches!(self.peek(), Token::Operator(_) | Token::Backtick) {
             let span = Span::new(def_line, def_col);
-            let saved_block = self.block_indent;
-            self.block_indent = self.current_indent;
 
             self.bind_pattern_var(name_tok);
             let left = Pattern::Var(name);
@@ -1959,7 +2128,7 @@ impl Parser {
                 _ => unreachable!(),
             };
             let right = self.parse_pattern_atom()?;
-            let clause = self.finish_clause(&op, vec![left, right], span, saved_block, name_tok)?;
+            let clause = self.finish_clause(&op, vec![left, right], span, name_tok)?;
             return Ok(vec![Decl::FunDef {
                 name: op,
                 clauses: vec![clause],
@@ -1978,7 +2147,7 @@ impl Parser {
     /// Parse an operator definition like `(+) a b = ...`
     fn parse_operator_decl(&mut self) -> PResult<Vec<Decl>> {
         self.expect(&Token::LeftParen)?;
-        let op_tok = self.pos;
+        let op_tok = self.cur();
         let op = match self.peek().clone() {
             Token::Operator(op) => {
                 self.advance();
@@ -2006,16 +2175,15 @@ impl Parser {
     }
 
     /// One equation of `name`, from just after the name: its parameter
-    /// patterns, then `finish_clause`.
+    /// patterns, then `finish_clause`. The equation is an item of the
+    /// enclosing block (the module's declarations, a class or instance
+    /// body), whose layout context is already in force: a line indented
+    /// past the block's column continues the equation, a line at the
+    /// column is the next equation or declaration.
     fn parse_clause(&mut self, name: &str) -> PResult<Clause> {
-        let binders_from = self.pos;
+        let binders_from = self.cur();
         let loc = self.peek_loc();
         let span = Span::new(loc.line, loc.col);
-        // The clause's column is the layout block for its RHS: continuation
-        // lines must be indented past it; a line at this column is the next
-        // clause/binding. Covers top-level defs and class/instance methods.
-        let saved_block = self.block_indent;
-        self.block_indent = self.current_indent;
 
         let mut patterns = Vec::new();
         while self.is_pattern_atom_start() || matches!(self.peek(), Token::UpperIdent(_)) {
@@ -2036,12 +2204,11 @@ impl Parser {
             }
         }
 
-        self.finish_clause(name, patterns, span, saved_block, binders_from)
+        self.finish_clause(name, patterns, span, binders_from)
     }
 
     /// Parse the tail of a clause (guards or `= body`, then an optional `where`)
-    /// given its already-parsed parameter patterns. `saved_block` is the
-    /// caller's previous `block_indent`, restored before returning. Shared by
+    /// given its already-parsed parameter patterns. Shared by
     /// the prefix form (`f a b = ...`) and the infix form (`a `op` b = ...`)
     /// of top-level functions, class defaults and instance methods alike —
     /// every equation with a clause passes through here, so this is where
@@ -2052,13 +2219,12 @@ impl Parser {
         name: &str,
         patterns: Vec<Pattern>,
         span: Span,
-        saved_block: usize,
         binders_from: usize,
     ) -> PResult<Clause> {
         self.check_linear(binders_from, &format!("an equation for '{}'", name))?;
-        // Guards
-        self.skip_newlines_and_indent();
-        let chain = self.parse_guard_chain(&Token::Eq, 0)?;
+        // Guards (`| cond = body`, each part free to start a new line
+        // indented past the block's column)
+        let chain = self.parse_guard_chain(&Token::Eq)?;
 
         // A guarded clause has no single body: the guard chain IS the body.
         let body = if chain.is_empty() {
@@ -2078,7 +2244,6 @@ impl Parser {
         // where clause
         let where_binds = self.parse_where()?;
 
-        self.block_indent = saved_block;
         Ok(Clause {
             patterns,
             guards,
@@ -2095,14 +2260,14 @@ impl Parser {
     /// all three positions; each guard body gets the `Spanned` statement
     /// marker so a type error inside it is reported at the body's own
     /// line, not the clause head.
-    /// `min_indent` bounds a `|` that starts a NEW line: one at that
-    /// column or less belongs to an enclosing construct, not to this chain.
-    /// A case alternative passes its alternatives' column, so the guard of
-    /// a function clause written after a guarded alternative
-    /// (`| c == 92 = case cs of … (e : r) | e == 110 -> … \n | otherwise = …`)
-    /// is left for the clause; a function clause passes 0 (nothing encloses
-    /// a clause's own chain at a smaller indent).
-    fn parse_guard_chain(&mut self, sep: &Token, min_indent: usize) -> PResult<GuardChain> {
+    /// A `|` that starts a new line belongs to this chain only when the
+    /// line continues the enclosing item — is indented past the block's
+    /// column; the layout context decides, so the guard of a function
+    /// clause written after a guarded case alternative
+    /// (`| c == 92 = case cs of … (e : r) | e == 110 -> … \n | otherwise = …`,
+    /// the last `|` left of the alternatives) ends the alternative's chain
+    /// and is read by the clause.
+    fn parse_guard_chain(&mut self, sep: &Token) -> PResult<GuardChain> {
         let mut raws: Vec<RawGuard> = Vec::new();
         let mut any_binding = false;
         while self.at(&Token::Pipe) {
@@ -2121,14 +2286,6 @@ impl Parser {
             self.expect(sep)?;
             let body = self.parse_stmt_expr()?;
             raws.push(RawGuard { quals, body });
-            let before = self.checkpoint();
-            self.skip_newlines_and_indent();
-            if self.at(&Token::Pipe) && self.current_indent <= min_indent {
-                // The enclosing construct's guard; leave its line break in
-                // place so that construct sees it as before.
-                self.rewind(before);
-                break;
-            }
         }
         if any_binding {
             return Ok(GuardChain::Raw(raws));
@@ -2187,7 +2344,7 @@ impl Parser {
     /// caller has already established that an identifier starts the line).
     fn parse_binding_head(&mut self) -> PResult<(String, Vec<Pattern>)> {
         let name = self.expect_ident()?;
-        let binders_from = self.pos;
+        let binders_from = self.cur();
         let mut patterns = Vec::new();
         while self.is_pattern_start() {
             patterns.push(self.parse_pattern_atom()?);
@@ -2382,23 +2539,6 @@ impl Parser {
         }
     }
 
-    /// The `where` block of a LOCAL equation (a binding inside a `let` or
-    /// `where` group), if the next token is one. On the equation's own
-    /// line it always belongs to the equation; on a new line only when it
-    /// is indented past the group's binding column — a `where` at or
-    /// before that column closes the group (and whatever encloses it) and
-    /// belongs to the enclosing function clause, as in
-    /// `main = do { let x = 1; … } where helper = …`.
-    fn parse_local_where(&mut self, group_indent: usize) -> PResult<Vec<LocalDef>> {
-        let before = self.checkpoint();
-        let last_line = self.tokens[self.pos.saturating_sub(1)].line;
-        self.skip_newlines_and_indent();
-        let own = self.at(&Token::Where)
-            && (self.peek_loc().line == last_line || self.current_indent > group_indent);
-        self.rewind(before);
-        if own { self.parse_where() } else { Ok(vec![]) }
-    }
-
     /// The bindings a pattern binding `pat = rhs` lowers to, in the SAME
     /// recursive group as its siblings: one fresh binding for the scrutinee
     /// plus one lazy SELECTOR binding per pattern variable
@@ -2504,71 +2644,79 @@ impl Parser {
         Ok(())
     }
 
+    /// The optional `where` block of an equation — a top-level or
+    /// class/instance clause, or a LOCAL equation inside a `let` or `where`
+    /// group. The keyword belongs to the equation when it stands on the
+    /// equation's line or on a line that continues it (indented past the
+    /// enclosing block's column); a `where` at or left of that column is
+    /// not visible here — the layout context shows the line start instead
+    /// — and closes the group for the enclosing clause, as in
+    /// `main = do { let x = 1; … } where helper = …`.
     fn parse_where(&mut self) -> PResult<Vec<LocalDef>> {
-        self.skip_newlines_and_indent();
         if !self.at(&Token::Where) {
             return Ok(vec![]);
         }
-        let where_line = self.peek_loc().line;
         self.advance();
 
-        // The clause's column (`block_indent`, set by parse_clause) is the
-        // enclosing layout context: bindings must be indented past it, or
+        // Bindings must be indented past the enclosing block's column, or
         // the `where` is empty and the next line is the next definition.
-        let saved_block = self.block_indent;
-        let Some(where_indent) = self.open_layout_block(where_line, self.block_indent) else {
+        let Some(where_col) = self.open_block() else {
             return Ok(Vec::new());
         };
-        self.block_indent = where_indent;
 
         let mut fresh_counter = 0usize;
         let mut sigs: Vec<(String, Type, Span)> = Vec::new();
         let mut entries: Vec<LocalEntry> = Vec::new();
-        loop {
-            self.skip_newlines_and_indent();
-            if self.at_eof() || self.current_indent < where_indent {
-                break;
-            }
-            // Tuple pattern binding `(a, b) = expr` (pattern_binding_defs).
-            // A where block used to break out of its loop on the '(' and
-            // the binding died far away as "Expected operator".
-            if matches!(self.peek(), Token::LeftParen) {
-                let save = self.checkpoint();
-                let span = self.span_of(save.pos);
-                match self.parse_pattern_atom() {
-                    Ok(pat @ Pattern::Tuple(_)) if self.at(&Token::Eq) => {
-                        self.check_linear(save.pos, "a pattern binding")?;
-                        self.advance(); // consume '='
-                        let rhs = self.parse_stmt_expr()?;
-                        let fresh = format!("__wtup_{}", fresh_counter);
-                        fresh_counter += 1;
-                        let bound = pat.var_names().into_iter().map(|v| (v, span)).collect();
-                        let defs = Self::pattern_binding_defs(pat, rhs, fresh);
-                        entries.push(LocalEntry::Lowered { defs, bound });
-                        continue;
-                    }
-                    _ => {
-                        self.rewind(save);
-                        break;
+        self.in_layout(Layout::Block(where_col), |p| {
+            loop {
+                p.skip_separators();
+                if p.at_block_end() || p.at_block_closer() {
+                    break;
+                }
+                // Tuple pattern binding `(a, b) = expr` (pattern_binding_defs).
+                // A where block used to break out of its loop on the '(' and
+                // the binding died far away as "Expected operator".
+                if matches!(p.peek(), Token::LeftParen) {
+                    let save = p.checkpoint();
+                    let span = p.span_of(p.cur());
+                    match p.parse_pattern_atom() {
+                        Ok(pat @ Pattern::Tuple(_)) if p.at(&Token::Eq) => {
+                            p.check_linear(save.pos, "a pattern binding")?;
+                            p.advance(); // consume '='
+                            let rhs = p.parse_stmt_expr()?;
+                            let fresh = format!("__wtup_{}", fresh_counter);
+                            fresh_counter += 1;
+                            let bound = pat.var_names().into_iter().map(|v| (v, span)).collect();
+                            let defs = Self::pattern_binding_defs(pat, rhs, fresh);
+                            entries.push(LocalEntry::Lowered { defs, bound });
+                            continue;
+                        }
+                        _ => {
+                            p.rewind(save);
+                            break;
+                        }
                     }
                 }
+                // A token no binding begins with closes the block (the
+                // parse-error(t) rule); the enclosing construct reads it
+                // next and reports it if nothing there takes it either.
+                if !matches!(p.peek(), Token::Ident(_)) {
+                    break;
+                }
+                let head_loc = p.peek_loc().clone();
+                let (name, patterns) = p.parse_binding_head()?;
+                // A signature line, `h :: Bool -> String` (C6): recorded now,
+                // attached to h's equations when the block closes.
+                if p.at(&Token::DblColon) || (patterns.is_empty() && p.at(&Token::Comma)) {
+                    p.parse_local_sig_tail(name, &patterns, &head_loc, &mut sigs)?;
+                    continue;
+                }
+                entries.push(LocalEntry::Equation(
+                    p.parse_local_equation_tail(name, patterns, &head_loc)?,
+                ));
             }
-            if !matches!(self.peek(), Token::Ident(_)) {
-                break;
-            }
-            let head_loc = self.peek_loc().clone();
-            let (name, patterns) = self.parse_binding_head()?;
-            // A signature line, `h :: Bool -> String` (C6): recorded now,
-            // attached to h's equations when the block closes.
-            if self.at(&Token::DblColon) || (patterns.is_empty() && self.at(&Token::Comma)) {
-                self.parse_local_sig_tail(name, &patterns, &head_loc, &mut sigs)?;
-                continue;
-            }
-            entries.push(LocalEntry::Equation(
-                self.parse_local_equation_tail(name, patterns, &head_loc, where_indent)?,
-            ));
-        }
-        self.block_indent = saved_block;
+            Ok(())
+        })?;
         self.close_local_group(entries, sigs)
     }
 
@@ -2582,17 +2730,15 @@ impl Parser {
         name: String,
         patterns: Vec<Pattern>,
         head_loc: &Located,
-        group_indent: usize,
     ) -> PResult<LocalEquation> {
         let span = Span::new(head_loc.line, head_loc.col);
-        self.skip_newlines_and_indent();
         let rhs = if self.at(&Token::Pipe) {
-            LocalRhs::Guards(self.parse_guard_chain(&Token::Eq, 0)?)
+            LocalRhs::Guards(self.parse_guard_chain(&Token::Eq)?)
         } else {
             self.expect(&Token::Eq)?;
             LocalRhs::Body(self.parse_stmt_expr()?)
         };
-        let where_binds = self.parse_local_where(group_indent)?;
+        let where_binds = self.parse_where()?;
         Ok(LocalEquation { name, patterns, rhs, where_binds, span })
     }
 
@@ -2667,27 +2813,23 @@ impl Parser {
 
     fn parse_type_arrow_inner(&mut self) -> PResult<Type> {
         let lhs = self.parse_type_op()?;
-        self.skip_newlines_and_indent();
         // A multiplicity annotation before the arrow: `a %1 -> b` (the
         // argument is consumed exactly once) or the explicit unrestricted
         // spellings `a %Many -> b` / `a %'Many -> b`. `%` only ever means
         // this in a type — types have no operators.
         if self.at(&Token::Operator("%".to_string())) {
             let mult = self.parse_multiplicity()?;
-            self.skip_newlines_and_indent();
             if !self.at(&Token::Arrow) {
                 return Err(self.err_here(
                     "a multiplicity annotation belongs to a function arrow: \
                      expected '->' after the '%' annotation".to_string()));
             }
             self.advance();
-            self.skip_newlines_and_indent();
             let rhs = self.parse_type_arrow()?;
             return Ok(Type::Arrow(Box::new(lhs), Box::new(rhs), mult));
         }
         if self.at(&Token::Arrow) {
             self.advance();
-            self.skip_newlines_and_indent();
             let rhs = self.parse_type_arrow()?;
             Ok(Type::Arrow(Box::new(lhs), Box::new(rhs), MultAnn::Many))
         } else {
@@ -2765,9 +2907,8 @@ impl Parser {
                 Token::Operator(o) if Self::is_type_operator(o) => o.clone(),
                 _ => break,
             };
-            let span = self.span_of(self.pos);
+            let span = self.span_of(self.cur());
             self.advance();
-            self.skip_newlines_and_indent();
             let operand = self.parse_type_app()?;
             rest.push((ChainOp { name: op, span }, operand));
         }
@@ -2980,7 +3121,7 @@ impl Parser {
                     // constructor the infix `f :+: g` spelling names (see
                     // is_type_operator), exactly as `data (:+:) a b` declares it.
                     if Self::is_type_operator(&op)
-                        && self.tokens.get(self.pos + 1).is_some_and(|t| t.token == Token::RightParen)
+                        && self.nth(1).token == Token::RightParen
                     {
                         self.advance();
                         self.advance();
@@ -3051,9 +3192,7 @@ impl Parser {
                 let sym = self.strlit_as_symbol(s, "a type-level Symbol")?;
                 Ok(Type::Con(format!("\"{}\"", sym)))
             }
-            _ => {
-                Err(self.err_here(format!("Expected type, found {}", self.peek())))
-            }
+            _ => Err(self.err_expected("type")),
         }
     }
 
@@ -3064,9 +3203,8 @@ impl Parser {
     /// `Expr::Spanned` marker carrying the line it starts on. The marker is
     /// transparent to every later pass but lets the type checker report an
     /// error against the offending statement's line rather than the clause
-    /// head. Skips leading layout first so the span is the real first token.
+    /// head.
     fn parse_stmt_expr(&mut self) -> PResult<Expr> {
-        self.skip_newlines_and_indent();
         let loc = self.peek_loc();
         let span = Span::new(loc.line, loc.col);
         let e = self.parse_expr()?;
@@ -3074,12 +3212,7 @@ impl Parser {
     }
 
     fn parse_expr(&mut self) -> PResult<Expr> {
-        // Skip leading indent/newlines to find the actual expression start
-        self.skip_newlines_and_indent();
-        let saved_expr_min_indent = self.expr_min_indent;
-        self.expr_min_indent = self.current_indent;
         let expr = self.parse_infix_chain()?;
-        self.expr_min_indent = saved_expr_min_indent;
 
         // Type ascription: expr :: Type
         if self.at(&Token::DblColon) {
@@ -3108,33 +3241,13 @@ impl Parser {
         let first = self.parse_chain_operand()?;
         let mut rest: Vec<(ChainOp, ChainOperand)> = Vec::new();
         loop {
-            // Try to consume indentation for continuation lines
-            // Only if the next real token after indent is an operator and
-            // the indent is STRICTLY deeper than the enclosing layout
-            // block's item column: at exactly that column GHC's layout
-            // inserts a `;` — the line is the block's NEXT item (`x = 1`
-            // then `+ 2` at x's own column is a parse error in GHC, and
-            // used to be silently accepted as a continuation here, keyed
-            // to the weaker `>= expr_min_indent`). Deeper than the block
-            // column is a continuation even when it equals the
-            // expression-start line's own indent (`( 40` / `+ 2` aligned
-            // inside a let binding), which is why the block column — not
-            // the expression start — is the base.
-            if let Token::Indent(n) = self.peek() {
-                let n = *n;
-                if n > self.block_indent {
-                    let save = self.checkpoint();
-                    self.advance(); // consume indent
-                    self.current_indent = n;
-                    // Check if next token is an operator (continuation)
-                    if !matches!(self.peek(), Token::Operator(_) | Token::Backtick) {
-                        // Not a continuation — put it back
-                        self.rewind(save);
-                    }
-                }
-            }
-
-            // Check for operator
+            // An operator that starts a new line continues the chain when
+            // the line is indented past the enclosing block's column — the
+            // layout context reads such a line start as whitespace, so the
+            // operator is simply the next token. At the block's column the
+            // line start is the block's `;` and the chain ends in front of
+            // it (`x = 1` then `+ 2` at x's own column is GHC's parse
+            // error on `+`, reported by the block).
             match self.peek().clone() {
                 Token::Operator(ref op) if op == ".." => {
                     break; // '..' is range syntax, not an infix operator
@@ -3145,20 +3258,17 @@ impl Parser {
                     // parenthesised-expression path, which builds the
                     // section. Never take it as an infix operator — there
                     // is no expression after it to parse.
-                    if self.pos + 1 < self.tokens.len()
-                        && self.tokens[self.pos + 1].token == Token::RightParen
-                    {
+                    if self.nth(1).token == Token::RightParen {
                         break;
                     }
-                    let span = self.span_of(self.pos);
+                    let span = self.span_of(self.cur());
                     self.advance();
-                    self.skip_newlines_and_indent();
                     let operand = self.parse_chain_operand()?;
                     rest.push((ChainOp { name: op, span }, operand));
                 }
                 Token::Backtick => {
                     let save = self.checkpoint();
-                    let span = self.span_of(self.pos);
+                    let span = self.span_of(self.cur());
                     self.advance();
                     let func = self.expect_ident()?;
                     self.expect(&Token::Backtick)?;
@@ -3169,7 +3279,6 @@ impl Parser {
                         self.rewind(save);
                         break;
                     }
-                    self.skip_newlines_and_indent();
                     let operand = self.parse_chain_operand()?;
                     rest.push((ChainOp { name: func, span }, operand));
                 }
@@ -3191,7 +3300,7 @@ impl Parser {
     fn parse_chain_operand(&mut self) -> PResult<ChainOperand> {
         let neg = match self.peek() {
             Token::Operator(op) if op == "-" => {
-                let span = self.span_of(self.pos);
+                let span = self.span_of(self.cur());
                 self.advance(); // consume '-'
                 Some(span)
             }
@@ -3211,13 +3320,8 @@ impl Parser {
     /// operator. `op_shown` is the operator as the user wrote it
     /// (backticks included), for the error's concrete rewrite hint.
     fn parse_right_section_operand(&mut self, op_shown: &str) -> PResult<Expr> {
-        // Mirrors `parse_expr` (leading layout skip, `expr_min_indent`)
-        // minus its ascription tail.
-        self.skip_newlines_and_indent();
-        let saved_expr_min_indent = self.expr_min_indent;
-        self.expr_min_indent = self.current_indent;
+        // `parse_expr` minus its ascription tail.
         let expr = self.parse_infix_chain()?;
-        self.expr_min_indent = saved_expr_min_indent;
         if self.at(&Token::DblColon) {
             let loc = self.peek_loc();
             let mut diag = Diagnostic::parse_at(
@@ -3238,41 +3342,18 @@ impl Parser {
     }
 
 
+    /// Function application: an atom followed by argument atoms. An
+    /// argument may stand on a following line indented past the enclosing
+    /// block's column (the layout context reads that line start as
+    /// whitespace); at the block's column the line start is the block's
+    /// `;`, which no atom begins with, so a sibling item is never taken
+    /// as an argument.
     fn parse_expr_app(&mut self) -> PResult<Expr> {
         let mut func = self.parse_expr_atom_dotted()?;
-
-        loop {
-            // Same-line arguments (existing behavior)
-            if self.is_expr_atom_start_in_context() {
-                let arg = self.parse_expr_atom_dotted()?;
-                func = Expr::App(Box::new(func), Box::new(arg));
-                continue;
-            }
-
-            // Cross-line continuation: a line indented strictly past the
-            // current layout block's column is a continuation (more arguments),
-            // not a new item. This is the Haskell layout rule (deeper than the
-            // block = continuation; at the block column = next clause/binding/
-            // statement). The block-column check alone keeps siblings from being
-            // grabbed, so this works even for a function whose first argument is
-            // on the next line (e.g. inside explicit brackets).
-            if matches!(self.peek(), Token::Indent(_)) {
-                let save_pos = self.checkpoint();
-                self.skip_newlines_and_indent();
-                if self.current_indent > self.block_indent
-                    && self.is_expr_atom_start()
-                {
-                    let arg = self.parse_expr_atom_dotted()?;
-                    func = Expr::App(Box::new(func), Box::new(arg));
-                    continue;
-                }
-                // Not a continuation — backtrack
-                self.rewind(save_pos);
-            }
-
-            break;
+        while self.is_expr_atom_start() {
+            let arg = self.parse_expr_atom_dotted()?;
+            func = Expr::App(Box::new(func), Box::new(arg));
         }
-
         Ok(func)
     }
 
@@ -3290,62 +3371,69 @@ impl Parser {
         // The first binding's column is the group's layout block: a later
         // line at that column is the next binding, a line indented less
         // closes the group (so a do-block's next statement, at the `let`
-        // line's own indent, is never read as a binding).
-        let saved_block = self.block_indent;
-        let let_indent = self.open_item_block();
+        // line's own indent, is never read as a binding). An empty group
+        // (`let` followed by a line at or left of the enclosing block's
+        // column) is reported by the caller.
+        let Some(let_col) = self.open_block() else {
+            return Ok(Vec::new());
+        };
         let mut fresh_counter = 0usize;
         let mut sigs: Vec<(String, Type, Span)> = Vec::new();
         let mut entries: Vec<LocalEntry> = Vec::new();
 
-        loop {
-            self.skip_newlines_and_indent();
-            if self.at_eof() || self.current_indent < let_indent {
-                break;
-            }
-            if self.at(&Token::In) {
-                break;
-            }
-            // Explicit `;` between bindings (`let a = 1; b = 2 in …`) — the
-            // Haskell 2010 separator, accepted alongside layout.
-            if self.at(&Token::Semicolon) {
-                self.advance();
-                continue;
-            }
-            // Tuple pattern binding `(a, b) = expr` (pattern_binding_defs).
-            if matches!(self.peek(), Token::LeftParen) {
-                let binders_from = self.pos;
-                let span = self.span_of(binders_from);
-                let pat = self.parse_pattern_atom()?;
-                if matches!(pat, Pattern::Tuple(_)) {
-                    self.check_linear(binders_from, "a pattern binding")?;
-                    self.expect(&Token::Eq)?;
-                    let rhs = self.parse_expr()?;
-                    let fresh = format!("__tup_{}", fresh_counter);
-                    fresh_counter += 1;
-                    let bound = pat.var_names().into_iter().map(|v| (v, span)).collect();
-                    let defs = Self::pattern_binding_defs(pat, rhs, fresh);
-                    entries.push(LocalEntry::Lowered { defs, bound });
+        self.in_layout(Layout::Block(let_col), |p| {
+            loop {
+                p.skip_separators();
+                // `in` at the bindings' own column closes the group by the
+                // parse-error(t) rule (it is in `at_block_closer`), as do a
+                // comprehension's `,` and `]`.
+                if p.at_block_end() || p.at_block_closer() {
+                    break;
+                }
+                // Explicit `;` between bindings (`let a = 1; b = 2 in …`) — the
+                // Haskell 2010 separator, accepted alongside layout.
+                if p.at(&Token::Semicolon) {
+                    p.advance();
                     continue;
                 }
-                return Err(self.err_here("Expected tuple pattern or identifier in let binding".to_string()));
+                // Tuple pattern binding `(a, b) = expr` (pattern_binding_defs).
+                if matches!(p.peek(), Token::LeftParen) {
+                    let binders_from = p.cur();
+                    let span = p.span_of(binders_from);
+                    let pat = p.parse_pattern_atom()?;
+                    if matches!(pat, Pattern::Tuple(_)) {
+                        p.check_linear(binders_from, "a pattern binding")?;
+                        p.expect(&Token::Eq)?;
+                        let rhs = p.parse_expr()?;
+                        let fresh = format!("__tup_{}", fresh_counter);
+                        fresh_counter += 1;
+                        let bound = pat.var_names().into_iter().map(|v| (v, span)).collect();
+                        let defs = Self::pattern_binding_defs(pat, rhs, fresh);
+                        entries.push(LocalEntry::Lowered { defs, bound });
+                        continue;
+                    }
+                    return Err(p.err_here("Expected tuple pattern or identifier in let binding".to_string()));
+                }
+                // A token no binding begins with closes the group by the
+                // parse-error(t) rule — a guard's `=` or `->` right after
+                // a `let` qualifier's last binding (`| let d = v - n = …`),
+                // or the `in` of a let-expression at the bindings' column.
+                if !matches!(p.peek(), Token::Ident(_)) {
+                    break;
+                }
+                let head_loc = p.peek_loc().clone();
+                let (name, patterns) = p.parse_binding_head()?;
+                // A signature line (C6), as in a where block.
+                if p.at(&Token::DblColon) || (patterns.is_empty() && p.at(&Token::Comma)) {
+                    p.parse_local_sig_tail(name, &patterns, &head_loc, &mut sigs)?;
+                    continue;
+                }
+                entries.push(LocalEntry::Equation(
+                    p.parse_local_equation_tail(name, patterns, &head_loc)?,
+                ));
             }
-            if !matches!(self.peek(), Token::Ident(_)) {
-                break;
-            }
-            let head_loc = self.peek_loc().clone();
-            let (name, patterns) = self.parse_binding_head()?;
-            // A signature line (C6), as in a where block.
-            if self.at(&Token::DblColon) || (patterns.is_empty() && self.at(&Token::Comma)) {
-                self.parse_local_sig_tail(name, &patterns, &head_loc, &mut sigs)?;
-                continue;
-            }
-            entries.push(LocalEntry::Equation(
-                self.parse_local_equation_tail(name, patterns, &head_loc, let_indent)?,
-            ));
-        }
-
-        self.skip_newlines_and_indent();
-        self.block_indent = saved_block;
+            Ok(())
+        })?;
         self.close_local_group(entries, sigs)
     }
 
@@ -3355,7 +3443,6 @@ impl Parser {
     /// Shared by the let-expression atom and the do-block, whose
     /// `let … in e` statement is the same expression.
     fn let_expr_body(&mut self, binds: Vec<LocalDef>) -> PResult<Expr> {
-        self.skip_newlines_and_indent();
         let body = self.parse_expr()?;
         Ok(Expr::Let {
             binds,
@@ -3369,14 +3456,12 @@ impl Parser {
     fn parse_list_comprehension_quals(&mut self) -> PResult<Vec<ListCompQual>> {
         let mut quals = Vec::new();
         loop {
-            self.skip_newlines_and_indent();
             // `let decls` qualifier: bindings visible in the body and every
             // later qualifier. Desugars to `let decls in <rest>`.
             if self.at(&Token::Let) {
                 self.advance();
                 let binds = self.parse_let_binds()?;
                 quals.push(ListCompQual::Let(binds));
-                self.skip_newlines_and_indent();
                 if self.at(&Token::Comma) { self.advance(); continue; }
                 break;
             }
@@ -3389,7 +3474,6 @@ impl Parser {
                         self.advance();
                         let expr = self.parse_expr()?;
                         quals.push(ListCompQual::Generator { pattern: pat, expr });
-                        self.skip_newlines_and_indent();
                         if self.at(&Token::Comma) { self.advance(); continue; }
                         break;
                     }
@@ -3399,7 +3483,6 @@ impl Parser {
             // Guard expression
             let expr = self.parse_expr()?;
             quals.push(ListCompQual::Guard(expr));
-            self.skip_newlines_and_indent();
             if self.at(&Token::Comma) { self.advance(); continue; }
             break;
         }
@@ -3503,8 +3586,11 @@ impl Parser {
         while self.at(&Token::Operator(".".to_string())) {
             // Check adjacency: the '.' must be on the same line as the
             // previous token and immediately follow it (no whitespace).
-            let prev_tok = &self.tokens[self.pos - 1];
-            let dot_tok = &self.tokens[self.pos];
+            // Adjacency is a raw-stream property: the token before the
+            // dot's index and the one after it, line starts included.
+            let dot = self.cur();
+            let prev_tok = &self.tokens[dot - 1];
+            let dot_tok = &self.tokens[dot];
             if dot_tok.line != prev_tok.line {
                 break;
             }
@@ -3513,13 +3599,13 @@ impl Parser {
             if dot_tok.col != prev_end {
                 break; // there's a gap — this is composition, not field access
             }
-            if self.pos + 1 < self.tokens.len()
-                && let Token::Ident(_) = &self.tokens[self.pos + 1].token {
+            if dot + 1 < self.tokens.len()
+                && let Token::Ident(_) = &self.tokens[dot + 1].token {
                     // The identifier must hug the dot on the RIGHT too
                     // (OverloadedRecordDot's rule): `negate. abs` is the
                     // composition `negate . abs`, not the field access
                     // `abs negate` it used to silently parse as.
-                    let ident_tok = &self.tokens[self.pos + 1];
+                    let ident_tok = &self.tokens[dot + 1];
                     if ident_tok.line != dot_tok.line || ident_tok.col != dot_tok.col + 1 {
                         break;
                     }
@@ -3539,30 +3625,11 @@ impl Parser {
         // Record update: expr { field = val, ... }
         // Loop to allow chained updates: expr { x = 1 } { y = 2 }.
         // The brace attaches on the same line, or from a following line
-        // indented strictly past the current layout block's column (the
-        // cross-line continuation rule from parse_expr_app) — a brace at or
-        // left of the block column belongs to a sibling item (a do-statement,
-        // the next binding), never to this expression.
-        loop {
+        // indented past the enclosing block's column (a continuation line,
+        // like an application argument's); a brace at or left of the block
+        // column stands behind the block's `;` and is never seen here.
+        while self.at(&Token::LeftBrace) {
             let save_pos = self.checkpoint();
-            if matches!(self.peek(), Token::Indent(_)) {
-                self.skip_newlines_and_indent();
-                if !(self.at(&Token::LeftBrace)
-                    && self.current_indent > self.block_indent)
-                {
-                    self.rewind(save_pos);
-                    break;
-                }
-            } else {
-                if !(self.at(&Token::LeftBrace) && self.pos > 0) {
-                    break;
-                }
-                let prev_tok = &self.tokens[self.pos - 1];
-                let brace_tok = &self.tokens[self.pos];
-                if brace_tok.line != prev_tok.line {
-                    break;
-                }
-            }
             if let Ok(updates) = self.try_parse_record_update() {
                 expr = Expr::RecordUpdate {
                     expr: Box::new(expr),
@@ -3581,7 +3648,6 @@ impl Parser {
         self.expect(&Token::LeftBrace)?;
         let mut updates = Vec::new();
         loop {
-            self.skip_newlines_and_indent();
             if self.at(&Token::RightBrace) {
                 break;
             }
@@ -3592,7 +3658,6 @@ impl Parser {
             self.expect(&Token::Eq)?;
             let value = self.parse_expr()?;
             updates.push((field_name, value));
-            self.skip_newlines_and_indent();
             if self.at(&Token::Comma) {
                 self.advance();
             } else {
@@ -3606,28 +3671,15 @@ impl Parser {
         Ok(updates)
     }
 
-    /// Check if the next token could start an expression atom,
-    /// respecting indentation context. Stops when we've returned to
-    /// a line at or below the expression's starting indentation.
-    fn is_expr_atom_start_in_context(&self) -> bool {
-        // If there's an Indent token next, check indentation
-        if let Token::Indent(n) = self.peek()
-            && *n <= self.expr_min_indent {
-                return false;
-            }
-        if !self.is_expr_atom_start() {
-            return false;
-        }
-        let loc = self.peek_loc();
-        // If current_indent is at or below expr start and the token is at
-        // the beginning of its line (col == current_indent + 1), it's a new
-        // statement/declaration, not a continuation argument.
-        if self.current_indent <= self.expr_min_indent
-            && loc.col == self.current_indent + 1
-        {
-            return false;
-        }
-        true
+    /// Can the next token begin an expression (Haskell 2010 `exp`): an
+    /// atom, a layout keyword's construct, a lambda, or a prefix minus?
+    fn is_stmt_expr_start(&self) -> bool {
+        self.is_expr_atom_start()
+            || matches!(
+                self.peek(),
+                Token::If | Token::Case | Token::Let | Token::Do | Token::Backslash
+            )
+            || matches!(self.peek(), Token::Operator(op) if op == "-")
     }
 
     /// Can the next token begin an argument atom (Haskell 2010 `aexp`)?
@@ -3674,18 +3726,21 @@ impl Parser {
         let cp = self.checkpoint();
         let mut chain = Vec::new();
         loop {
-            let dot = self.tokens[self.pos].clone();
+            // Hugging is a raw-stream property: the identifier is the very
+            // next token after the dot.
+            let dot_idx = self.cur();
+            let dot = self.tokens[dot_idx].clone();
             if !matches!(dot.token, Token::Operator(ref o) if o == ".") {
                 break;
             }
-            let Some(next) = self.tokens.get(self.pos + 1) else { break };
+            let Some(next) = self.tokens.get(dot_idx + 1) else { break };
             let Token::Ident(name) = &next.token else { break };
             if next.line != dot.line || next.col != dot.end_col
                 || !name.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_') {
                 break;
             }
             chain.push(name.clone());
-            self.pos += 2;
+            self.pos = dot_idx + 2;
             if self.at(&Token::RightParen) {
                 self.advance();
                 return Some(chain);
@@ -3746,8 +3801,7 @@ impl Parser {
         // `negate (a * b)`, not a blanket negation of the whole
         // body.
         if let Token::Operator(op) = self.peek().clone() {
-            let bare_op = self.pos + 1 < self.tokens.len()
-                && self.tokens[self.pos + 1].token == Token::RightParen;
+            let bare_op = self.nth(1).token == Token::RightParen;
             if op != "-" || bare_op {
                 let op_span = {
                     let l = self.peek_loc();
@@ -3809,79 +3863,60 @@ impl Parser {
         // nothing is parsed twice (re-parsing the body to test for a
         // section made nested parens cost O(2^n)).
         //
-        // Set up exactly as `parse_expr` does (leading layout skip and
-        // `expr_min_indent = current_indent`). `expr_min_indent` is
-        // restored before handling `::` ascription and the tuple/paren
-        // tail, mirroring `parse_expr`. A leading '-' is prefix minus
-        // here (`(-a + b)` fell through from the operator-section check
-        // above).
-        self.skip_newlines_and_indent();
-        let saved_expr_min_indent = self.expr_min_indent;
-        self.expr_min_indent = self.current_indent;
+        // A leading '-' is prefix minus here (`(-a + b)` fell through
+        // from the operator-section check above). Parentheses do not
+        // suspend the layout rule (Haskell 2010 §10.3 knows only layout
+        // keywords and explicit braces): `::`, a tuple comma or the `)`
+        // may stand on a continuation line, but a line at the enclosing
+        // block's column is the block's next item, as GHC reads it.
         let mut expr = self.parse_infix_chain_inner()?;
 
         // (expr op) — left section: \x -> expr op x. The operand must
         // satisfy the section-operand precedence rule — `(a * b +)` is
         // legal, `(a + b *)` is not — which is checked when the chain is
         // grouped (`Expr::Section`).
-        if let Token::Operator(op) = self.peek().clone() {
-            let after_op = self.pos + 1;
-            if after_op < self.tokens.len()
-                && self.tokens[after_op].token == Token::RightParen {
-                    let op_span = {
-                        let l = self.peek_loc();
-                        Span::new(l.line, l.col)
-                    };
-                    self.advance(); // consume operator
-                    self.advance(); // consume )
-                    self.expr_min_indent = saved_expr_min_indent;
-                    return Ok(Expr::Section {
-                        op: ChainOp { name: op, span: op_span },
-                        side: SectionSide::Left,
-                        operand: Box::new(expr),
-                    });
-                }
+        if let Token::Operator(op) = self.peek().clone()
+            && self.nth(1).token == Token::RightParen
+        {
+            let op_span = {
+                let l = self.peek_loc();
+                Span::new(l.line, l.col)
+            };
+            self.advance(); // consume operator
+            self.advance(); // consume )
+            return Ok(Expr::Section {
+                op: ChainOp { name: op, span: op_span },
+                side: SectionSide::Left,
+                operand: Box::new(expr),
+            });
         }
 
         // (expr `name`) — backtick left section: \x -> expr `name` x
-        if self.at(&Token::Backtick) {
-            let after_bt = self.pos + 1;
-            if after_bt + 1 < self.tokens.len()
-                && let Token::Ident(_) = &self.tokens[after_bt].token
-                    && self.tokens[after_bt + 1].token == Token::Backtick
-                        && after_bt + 2 < self.tokens.len()
-                        && self.tokens[after_bt + 2].token == Token::RightParen
-                    {
-                        let op_span = {
-                            let l = self.peek_loc();
-                            Span::new(l.line, l.col)
-                        };
-                        self.advance(); // consume first backtick
-                        let name = self.expect_ident()?;
-                        self.advance(); // consume second backtick
-                        self.advance(); // consume )
-                        self.expr_min_indent = saved_expr_min_indent;
-                        return Ok(Expr::Section {
-                            op: ChainOp { name, span: op_span },
-                            side: SectionSide::Left,
-                            operand: Box::new(expr),
-                        });
-                    }
+        if self.at(&Token::Backtick)
+            && let Token::Ident(_) = &self.nth(1).token
+            && self.nth(2).token == Token::Backtick
+            && self.nth(3).token == Token::RightParen
+        {
+            let op_span = {
+                let l = self.peek_loc();
+                Span::new(l.line, l.col)
+            };
+            self.advance(); // consume first backtick
+            let name = self.expect_ident()?;
+            self.advance(); // consume second backtick
+            self.advance(); // consume )
+            return Ok(Expr::Section {
+                op: ChainOp { name, span: op_span },
+                side: SectionSide::Left,
+                operand: Box::new(expr),
+            });
         }
 
-        // Not a section — this mirrors `parse_expr`:
-        // restore `expr_min_indent`, then `::` ascription.
-        self.expr_min_indent = saved_expr_min_indent;
-        // Inside explicit ( ) newlines are insignificant: `::`, a tuple
-        // comma, or the closing `)` may sit on a continuation line.
-        // The infix chain stops at the newline, so skip it before each
-        // of those decisions.
-        self.skip_newlines_and_indent();
+        // Not a section — this mirrors `parse_expr`: `::` ascription.
         if self.at(&Token::DblColon) {
             self.advance();
             let ty = self.parse_type()?;
             expr = Expr::Ascription(Box::new(expr), ty);
-            self.skip_newlines_and_indent();
         }
         if self.at(&Token::Comma) {
             // Tuple expression: (a, b, ...)
@@ -3889,7 +3924,6 @@ impl Parser {
             while self.at(&Token::Comma) {
                 self.advance();
                 elems.push(self.parse_expr()?);
-                self.skip_newlines_and_indent();
             }
             self.expect(&Token::RightParen)?;
             Ok(Expr::Tuple(elems))
@@ -3904,29 +3938,25 @@ impl Parser {
     /// Consumes the opening `[`.
     fn parse_list_expr(&mut self) -> PResult<Expr> {
         self.advance();
-        self.skip_newlines_and_indent();
         if self.at(&Token::RightBracket) {
             self.advance();
             return Ok(Expr::Con("[]".to_string()));
         }
         let first = self.parse_expr()?;
-        // Inside brackets newlines/indents are insignificant, so a
-        // comprehension bar, range `..`, comma or closing `]` may sit
-        // on a continuation line.
-        self.skip_newlines_and_indent();
+        // A comprehension bar, range `..`, comma or closing `]` may sit
+        // on a continuation line (indented past the enclosing block's
+        // column); the layout context reads that line start as whitespace.
         // Check for list comprehension: [expr | qualifiers]
         if self.at(&Token::Pipe) {
             self.advance();
             let quals = self.parse_list_comprehension_quals()?;
-            self.skip_newlines_and_indent();
-            self.expect(&Token::RightBracket)?;
+                self.expect(&Token::RightBracket)?;
             return Ok(self.desugar_list_comprehension(first, &quals, &mut 0));
         }
         // Check for range syntax: [x..], [x..y], [x,y..], [x,y..z]
         if self.at(&Token::Operator("..".to_string())) {
             self.advance();
-            self.skip_newlines_and_indent();
-            if self.at(&Token::RightBracket) {
+                if self.at(&Token::RightBracket) {
                 // [x..] → enumFrom x
                 self.advance();
                 return Ok(Expr::App(
@@ -3936,8 +3966,7 @@ impl Parser {
             }
             // [x..y] → enumFromTo x y
             let end = self.parse_expr()?;
-            self.skip_newlines_and_indent();
-            self.expect(&Token::RightBracket)?;
+                self.expect(&Token::RightBracket)?;
             return Ok(Expr::App(
                 Box::new(Expr::App(
                     Box::new(WiredIn::EnumFromTo.var()),
@@ -3948,16 +3977,13 @@ impl Parser {
         }
         // Regular list literal or range with step
         let mut items = vec![first];
-        self.skip_newlines_and_indent();
         if self.at(&Token::Comma) {
             self.advance();
-            self.skip_newlines_and_indent();
-            let second = self.parse_expr()?;
+                let second = self.parse_expr()?;
             // Check for [x,y..] or [x,y..z]
             if self.at(&Token::Operator("..".to_string())) {
                 self.advance();
-                self.skip_newlines_and_indent();
-                if self.at(&Token::RightBracket) {
+                        if self.at(&Token::RightBracket) {
                     // [x,y..] → enumFromThen x y
                     self.advance();
                     return Ok(Expr::App(
@@ -3970,8 +3996,7 @@ impl Parser {
                 }
                 // [x,y..z] → enumFromThenTo x y z
                 let end = self.parse_expr()?;
-                self.skip_newlines_and_indent();
-                self.expect(&Token::RightBracket)?;
+                        self.expect(&Token::RightBracket)?;
                 return Ok(Expr::App(
                     Box::new(Expr::App(
                         Box::new(Expr::App(
@@ -3985,14 +4010,11 @@ impl Parser {
             }
             items.push(second);
             loop {
-                self.skip_newlines_and_indent();
-                if !self.at(&Token::Comma) { break; }
+                        if !self.at(&Token::Comma) { break; }
                 self.advance();
-                self.skip_newlines_and_indent();
-                items.push(self.parse_expr()?);
+                        items.push(self.parse_expr()?);
             }
         }
-        self.skip_newlines_and_indent();
         self.expect(&Token::RightBracket)?;
         let mut list = Expr::Con("[]".to_string());
         for item in items.into_iter().rev() {
@@ -4014,12 +4036,13 @@ impl Parser {
         let scrutinee = self.parse_expr()?;
         self.expect(&Token::Of)?;
 
-        // Inline brace syntax: case x of { A -> e1; B -> e2 }
+        // Explicit brace syntax: case x of { A -> e1; B -> e2 }. Inside
+        // the braces no implicit block is open (`advance` suspended the
+        // context at the `{`), so line starts mean nothing.
         if self.at(&Token::LeftBrace) {
             self.advance();
             let mut branches = Vec::new();
             loop {
-                self.skip_newlines_and_indent();
                 if self.at(&Token::RightBrace) { break; }
                 let pattern = self.parse_case_pattern()?;
                 self.expect(&Token::Arrow)?;
@@ -4039,65 +4062,66 @@ impl Parser {
         // (branch index, raw chain) for alternatives whose guards use
         // binding qualifiers — lowered after the loop.
         let mut raw_branches: Vec<(usize, Vec<RawGuard>)> = Vec::new();
-        let saved_block = self.block_indent;
-        let case_indent = self.open_item_block();
+        let Some(case_col) = self.open_block() else {
+            // `case x of` followed by a line at or left of the enclosing
+            // block's column: the alternatives are `{}`.
+            return Err(self.err_expected("case alternative"));
+        };
 
-        loop {
-            let save_pos = self.checkpoint();
-            self.skip_newlines_and_indent();
-            if self.at_eof() || self.current_indent < case_indent || self.at_block_closer() {
-                // Restore position so the caller sees the
-                // newline/indent tokens and doesn't accidentally
-                // consume the next statement as an argument.
-                self.rewind(save_pos);
-                break;
-            }
-            let pattern = self.parse_case_pattern()?;
-
-            // A guard chain may begin on the line after the pattern
-            // (`Just a\n    | a < 0 -> …`), indented past the
-            // alternatives' column, exactly as a function clause's guards
-            // may. Look past the newlines for the `|`; anything else
-            // rewinds so the `->` check sees the line break as before.
-            if !self.at(&Token::Pipe) {
-                let before = self.checkpoint();
-                self.skip_newlines_and_indent();
-                if !(self.at(&Token::Pipe) && self.current_indent > case_indent) {
-                    self.rewind(before);
+        self.in_layout(Layout::Block(case_col), |p| {
+            loop {
+                p.skip_separators();
+                if p.at_block_end() || p.at_block_closer() {
+                    break;
                 }
-            }
+                // A token no alternative begins with closes the block (the
+                // parse-error(t) rule) and is read by the enclosing
+                // construct: a `|` at the alternatives' column continues
+                // the enclosing clause's guard chain (`| c = case … of …`
+                // then `| otherwise = …` aligned with the alternatives),
+                // an operator there makes the whole `case` its left operand.
+                if !p.is_case_alt_start() {
+                    break;
+                }
+                let pattern = p.parse_case_pattern()?;
 
-            if self.at(&Token::Pipe) {
-                // Guards on case branch
-                match self.parse_guard_chain(&Token::Arrow, case_indent)? {
-                    GuardChain::Plain(guards) => branches.push(CaseBranch {
-                        pattern,
-                        guards,
-                        body: None,
-                    }),
-                    GuardChain::Raw(raws) => {
-                        // A binding-qualifier chain (§3.13); remembered per
-                        // branch and lowered below, once the alternatives
-                        // it can fall through to are parsed.
-                        raw_branches.push((branches.len(), raws));
-                        branches.push(CaseBranch {
+                // A guard chain may begin on the line after the pattern
+                // (`Just a\n    | a < 0 -> …`), indented past the
+                // alternatives' column, exactly as a function clause's
+                // guards may; a `|` at or left of that column is not seen
+                // here (its line start is), and the `->` check reports it.
+                if p.at(&Token::Pipe) {
+                    // Guards on case branch
+                    match p.parse_guard_chain(&Token::Arrow)? {
+                        GuardChain::Plain(guards) => branches.push(CaseBranch {
                             pattern,
-                            guards: vec![],
+                            guards,
                             body: None,
-                        });
+                        }),
+                        GuardChain::Raw(raws) => {
+                            // A binding-qualifier chain (§3.13); remembered per
+                            // branch and lowered below, once the alternatives
+                            // it can fall through to are parsed.
+                            raw_branches.push((branches.len(), raws));
+                            branches.push(CaseBranch {
+                                pattern,
+                                guards: vec![],
+                                body: None,
+                            });
+                        }
                     }
+                } else {
+                    p.expect(&Token::Arrow)?;
+                    let body = p.parse_stmt_expr()?;
+                    branches.push(CaseBranch {
+                        pattern,
+                        guards: vec![],
+                        body: Some(body),
+                    });
                 }
-            } else {
-                self.expect(&Token::Arrow)?;
-                let body = self.parse_stmt_expr()?;
-                branches.push(CaseBranch {
-                    pattern,
-                    guards: vec![],
-                    body: Some(body),
-                });
             }
-        }
-        self.block_indent = saved_block;
+            Ok(())
+        })?;
 
         let branches = self.desugar_pattern_guard_branches(branches, raw_branches);
         Ok(Expr::Case {
@@ -4108,7 +4132,7 @@ impl Parser {
 
     /// The pattern of one case alternative — a binder list of its own.
     fn parse_case_pattern(&mut self) -> PResult<Pattern> {
-        let binders_from = self.pos;
+        let binders_from = self.cur();
         let pattern = self.parse_pattern()?;
         self.check_linear(binders_from, "a case alternative")?;
         Ok(pattern)
@@ -4120,53 +4144,85 @@ impl Parser {
         let do_loc = self.peek_loc().clone();
         self.advance();
         let mut stmts = Vec::new();
-        let saved_block = self.block_indent;
-        let do_indent = self.open_item_block();
+        let empty_block_error = |do_loc: &Located| {
+            Box::new(Diagnostic::parse_at(
+                "Empty 'do' block: a 'do' block needs at least one \
+                 statement, and its last statement must be an expression \
+                 (it is the block's result)"
+                    .to_string(),
+                Span::new(do_loc.line, do_loc.col),
+            ))
+        };
+        // The explicit-brace form `do { a; b }` is not supported (HASKDIFF:
+        // only `case … of { … }` has one); fail at the brace, loudly.
+        if self.at(&Token::LeftBrace) {
+            let mut diag = self.err_here("parse error on input '{'".to_string());
+            diag.notes.push(
+                "mata-ll lays out a do block's statements by indentation only; the \
+                 explicit brace-and-semicolon form `do { a; b }` of Haskell 2010 is \
+                 not supported (an explicit `case … of { … }` is). Put each \
+                 statement on its own line, aligned under the first."
+                    .to_string(),
+            );
+            return Err(diag);
+        }
+        let Some(do_col) = self.open_block() else {
+            return Err(empty_block_error(&do_loc));
+        };
 
-        loop {
-            self.skip_newlines_and_indent();
-            if self.at_eof() || self.current_indent < do_indent || self.at_block_closer() {
-                break;
-            }
-
-            // `let` statement: one binding group — simple, function and
-            // tuple-pattern bindings, all in one mutually recursive scope —
-            // parsed by the same layout rules as a let-expression's group.
-            // Haskell 2010 §3.14 has two statements that start with `let`:
-            // `let decls` alone is the let STATEMENT, and `let decls in e`
-            // is an expression statement — the let-expression — so the
-            // keyword alone does not decide which; the `in` after the
-            // bindings does (F8). Where that `in` stands matters: on the
-            // bindings' line or indented past the block's statement column
-            // it continues the statement; at the statement column the
-            // layout rule has put a `;` before it, and a statement cannot
-            // begin with `in`.
-            if self.at(&Token::Let) {
-                let let_kw = self.peek_loc().clone();
-                self.advance();
-                let let_loc = self.peek_loc().clone();
-                let binds = self.parse_let_binds()?;
-                if binds.is_empty() {
-                    return Err(Box::new(Diagnostic::parse_at(
-                        "Expected a binding after `let`: `name = expr`, \
-                         `f x = expr`, or `(a, b) = expr`"
-                            .to_string(),
-                        Span::new(let_loc.line, let_loc.col),
-                    )));
+        self.in_layout(Layout::Block(do_col), |p| {
+            loop {
+                p.skip_separators();
+                if p.at_block_end() || p.at_block_closer() {
+                    break;
                 }
-                if self.at(&Token::In) {
-                    let in_loc = self.peek_loc().clone();
-                    let starts_line = in_loc.col == self.current_indent + 1;
-                    if !starts_line || self.current_indent > do_indent {
-                        self.advance();
-                        let expr = self.let_expr_body(binds)?;
+
+                // `let` statement: one binding group — simple, function and
+                // tuple-pattern bindings, all in one mutually recursive scope —
+                // parsed by the same layout rules as a let-expression's group.
+                // Haskell 2010 §3.14 has two statements that start with `let`:
+                // `let decls` alone is the let STATEMENT, and `let decls in e`
+                // is an expression statement — the let-expression — so the
+                // keyword alone does not decide which; the `in` after the
+                // bindings does (F8). Where that `in` stands matters: on the
+                // bindings' line or indented past the block's statement column
+                // it continues the statement; at the statement column the
+                // layout rule has put a `;` before it, and a statement cannot
+                // begin with `in`.
+                if p.at(&Token::Let) {
+                    let let_kw = p.peek_loc().clone();
+                    p.advance();
+                    let let_loc = p.peek_loc().clone();
+                    let binds = p.parse_let_binds()?;
+                    if binds.is_empty() {
+                        return Err(Box::new(Diagnostic::parse_at(
+                            "Expected a binding after `let`: `name = expr`, \
+                             `f x = expr`, or `(a, b) = expr`"
+                                .to_string(),
+                            Span::new(let_loc.line, let_loc.col),
+                        )));
+                    }
+                    // An `in` on the bindings' line or on a continuation
+                    // line of the statement is the let-expression's.
+                    if p.at(&Token::In) {
+                        p.advance();
+                        let expr = p.let_expr_body(binds)?;
                         stmts.push(DoStmt::Expr(Expr::Spanned(
                             Span::new(let_kw.line, let_kw.col),
                             Box::new(expr),
                         )));
                         continue;
                     }
-                    if self.current_indent == do_indent && self.let_in_pending == 0 {
+                    // An `in` at the statement column stands behind the
+                    // block's `;`. With no let-expression waiting for it,
+                    // that is GHC's parse error on the `in`; otherwise it
+                    // closes this block for that let-expression (the
+                    // parse-error(t) rule) — the let statement is then the
+                    // block's last, which the check below reports as GHC
+                    // does. (An `in` further left closes the block by
+                    // indentation.)
+                    if matches!(p.after_separator(), Some(Token::In)) && p.let_in_pending == 0 {
+                        let in_loc = p.nth(1).clone();
                         let mut diag = Diagnostic::parse_at(
                             "parse error on input 'in': a 'let' statement in a \
                              'do' block has no 'in' — its bindings are in scope \
@@ -4184,63 +4240,65 @@ impl Parser {
                         );
                         return Err(Box::new(diag));
                     }
-                    // The `in` closes this block: it belongs to an enclosing
-                    // let-expression (at the statement column, by the
-                    // parse-error(t) rule; further left, by indentation). The
-                    // let statement is then the block's last, which the check
-                    // below reports as GHC does.
+                    stmts.push(DoStmt::DoLet { binds });
+                    continue;
                 }
-                stmts.push(DoStmt::DoLet { binds });
-                continue;
-            }
 
-            // `pat <- expr` — a monadic bind over ANY pattern (A15):
-            // `x`, `_`, `(a, b)`, `()`, `Just x`, `(x : rest)`, literals.
-            // Probed exactly like a list-comprehension generator: parse a
-            // full pattern and commit only on `<-` (an expression statement
-            // often starts like a pattern, so anything else rewinds). Plain
-            // variables and `_` stay on the simple Bind path — the
-            // refutable-pattern desugar (a case with GHC's MonadFail
-            // fallback, see desugar.rs) is only for the shapes that need it.
-            if self.is_pattern_start() {
-                let bind_loc = self.peek_loc().clone();
-                let save_pat = self.checkpoint();
-                if let Ok(pat) = self.parse_pattern()
-                    && self.at(&Token::Bind) {
-                        // The pattern's last token: its end is the span's
-                        // end (inclusive last column, as GHC prints it).
-                        let pat_end = {
-                            let last = &self.tokens[self.pos - 1];
-                            Span::new(last.line, last.end_col.saturating_sub(1))
-                        };
-                        self.check_linear(save_pat.pos, "a 'do' statement")?;
-                        self.advance();
-                        let expr = self.parse_stmt_expr()?;
-                        match pat {
-                            Pattern::Var(name) => {
-                                stmts.push(DoStmt::Bind { name, expr });
+                // `pat <- expr` — a monadic bind over ANY pattern (A15):
+                // `x`, `_`, `(a, b)`, `()`, `Just x`, `(x : rest)`, literals.
+                // Probed exactly like a list-comprehension generator: parse a
+                // full pattern and commit only on `<-` (an expression statement
+                // often starts like a pattern, so anything else rewinds). Plain
+                // variables and `_` stay on the simple Bind path — the
+                // refutable-pattern desugar (a case with GHC's MonadFail
+                // fallback, see desugar.rs) is only for the shapes that need it.
+                if p.is_pattern_start() {
+                    let bind_loc = p.peek_loc().clone();
+                    let save_pat = p.checkpoint();
+                    if let Ok(pat) = p.parse_pattern()
+                        && p.at(&Token::Bind) {
+                            // The pattern's last token: its end is the span's
+                            // end (inclusive last column, as GHC prints it).
+                            let pat_end = {
+                                let last = &p.tokens[p.pos - 1];
+                                Span::new(last.line, last.end_col.saturating_sub(1))
+                            };
+                            p.check_linear(save_pat.pos, "a 'do' statement")?;
+                            p.advance();
+                            let expr = p.parse_stmt_expr()?;
+                            match pat {
+                                Pattern::Var(name) => {
+                                    stmts.push(DoStmt::Bind { name, expr });
+                                }
+                                Pattern::Wildcard => {
+                                    stmts.push(DoStmt::Bind { name: "_".to_string(), expr });
+                                }
+                                pattern => stmts.push(DoStmt::PatternBind {
+                                    pattern,
+                                    expr,
+                                    span: Span::new(bind_loc.line, bind_loc.col),
+                                    end: pat_end,
+                                }),
                             }
-                            Pattern::Wildcard => {
-                                stmts.push(DoStmt::Bind { name: "_".to_string(), expr });
-                            }
-                            pattern => stmts.push(DoStmt::PatternBind {
-                                pattern,
-                                expr,
-                                span: Span::new(bind_loc.line, bind_loc.col),
-                                end: pat_end,
-                            }),
+                            continue;
                         }
-                        continue;
-                    }
-                self.rewind(save_pat);
+                    p.rewind(save_pat);
+                }
+
+                // Bare expression. A token no statement begins with closes
+                // the block (the parse-error(t) rule) and is read by the
+                // enclosing construct: an operator at the statement column
+                // makes the whole `do` its left operand, as in GHC (where
+                // `print x` then `+ 2` under it is the type error `Num (IO
+                // ())`, not a parse error).
+                if !p.is_stmt_expr_start() {
+                    break;
+                }
+                let expr = p.parse_stmt_expr()?;
+                stmts.push(DoStmt::Expr(expr));
             }
-
-            // Bare expression
-            let expr = self.parse_stmt_expr()?;
-            stmts.push(DoStmt::Expr(expr));
-        }
-
-        self.block_indent = saved_block;
+            Ok(())
+        })?;
 
         // GHC's rule (Haskell 2010 §3.14): a `do` block has at least one
         // statement, and its LAST statement is an expression — it is the
@@ -4250,15 +4308,7 @@ impl Parser {
         // the binding's right-hand side — silently RUNNING the action the
         // let only meant to name.
         match stmts.last() {
-            None => {
-                return Err(Box::new(Diagnostic::parse_at(
-                    "Empty 'do' block: a 'do' block needs at least one \
-                     statement, and its last statement must be an expression \
-                     (it is the block's result)"
-                        .to_string(),
-                    Span::new(do_loc.line, do_loc.col),
-                )));
-            }
+            None => return Err(empty_block_error(&do_loc)),
             Some(DoStmt::DoLet { .. }) => {
                 return Err(Box::new(Diagnostic::parse_at(
                     "The last statement in a 'do' block must be an \
@@ -4295,7 +4345,7 @@ impl Parser {
     /// on an earlier parameter is reported before a later one is looked at.
     fn parse_lambda(&mut self) -> PResult<Expr> {
         self.advance();
-        let binders_from = self.pos;
+        let binders_from = self.cur();
         let mut pats = Vec::new();
         while matches!(
             self.peek(),
@@ -4619,27 +4669,15 @@ impl Parser {
     /// constructor. The constructor name is already consumed.
     fn parse_con_atom(&mut self, name: String) -> PResult<Expr> {
             // Check for record construction: Con { field = val, ... }
-            // The brace may open on a following line indented
-            // strictly past the current layout block's column —
-            // the same cross-line continuation rule application
-            // arguments use (parse_expr_app). At or left of the
-            // block column the brace would belong to a sibling
-            // item, so `Foo` stays a bare constructor and the
-            // position is restored.
-            if matches!(self.peek(), Token::Indent(_)) {
-                let save_pos = self.checkpoint();
-                self.skip_newlines_and_indent();
-                if !(self.at(&Token::LeftBrace)
-                    && self.current_indent > self.block_indent)
-                {
-                    self.rewind(save_pos);
-                }
-            }
+            // The brace may open on a following line indented past the
+            // enclosing block's column (a continuation line, like an
+            // application argument's); at or left of the block column it
+            // stands behind the block's `;` and is not seen here, so `Foo`
+            // stays a bare constructor.
             if self.at(&Token::LeftBrace) {
                 self.advance();
                 let mut fields = Vec::new();
                 loop {
-                    self.skip_newlines_and_indent();
                     if self.at(&Token::RightBrace) {
                         self.advance();
                         break;
@@ -4648,11 +4686,9 @@ impl Parser {
                     self.expect(&Token::Eq)?;
                     let value = self.parse_expr()?;
                     fields.push((field_name, value));
-                    self.skip_newlines_and_indent();
                     if self.at(&Token::Comma) {
                         self.advance();
                     } else {
-                        self.skip_newlines_and_indent();
                         self.expect(&Token::RightBrace)?;
                         break;
                     }
@@ -4698,10 +4734,18 @@ impl Parser {
             Token::If => {
                 self.advance();
                 let cond = self.parse_expr()?;
-                self.skip_newlines_and_indent();
+                // Haskell 2010 §3.6: `if exp [;] then exp [;] else exp` —
+                // the optional semicolons let `then` and `else` stand at a
+                // do block's statement column, where the layout rule puts
+                // a `;` in front of them (DoAndIfThenElse).
+                if matches!(self.after_separator(), Some(Token::Then)) {
+                    self.skip_separators();
+                }
                 self.expect(&Token::Then)?;
                 let then_branch = self.parse_stmt_expr()?;
-                self.skip_newlines_and_indent();
+                if matches!(self.after_separator(), Some(Token::Else)) {
+                    self.skip_separators();
+                }
                 self.expect(&Token::Else)?;
                 let else_branch = self.parse_stmt_expr()?;
                 Ok(Expr::If {
@@ -4726,9 +4770,7 @@ impl Parser {
             }
             Token::Do => self.parse_do_block(),
             Token::Backslash => self.parse_lambda(),
-            _ => {
-                Err(self.err_here(format!("Expected expression, found {}", self.peek())))
-            }
+            _ => Err(self.err_expected("expression")),
         }
     }
 
@@ -4783,6 +4825,18 @@ impl Parser {
         self.is_pattern_atom_start() || matches!(self.peek(), Token::UpperIdent(_))
     }
 
+    /// Can the next token begin a case alternative's pattern? A pattern
+    /// start, or the `-` of a whole-pattern negative literal (`-1 -> …`,
+    /// the one place Haskell 2010 admits one outside parentheses).
+    fn is_case_alt_start(&self) -> bool {
+        self.is_pattern_start()
+            || (matches!(self.peek(), Token::Operator(op) if op == "-")
+                && matches!(
+                    self.nth(1).token,
+                    Token::IntLit(_) | Token::BigIntLit(_) | Token::NumLit(_)
+                ))
+    }
+
     fn is_pattern_atom_start(&self) -> bool {
         if matches!(
             self.peek(),
@@ -4820,8 +4874,8 @@ impl Parser {
     fn parse_pattern_atom_inner(&mut self) -> PResult<Pattern> {
         // Negative literal pattern: -N
         if let Token::Operator(op) = self.peek()
-            && op == "-" && self.pos + 1 < self.tokens.len() {
-                match self.tokens[self.pos + 1].token.clone() {
+            && op == "-" {
+                match self.nth(1).token.clone() {
                     Token::IntLit(n) => {
                         self.advance(); self.advance();
                         return Ok(Pattern::LitPat(Literal::Integer(-n)));
@@ -4839,7 +4893,7 @@ impl Parser {
             }
         match self.peek().clone() {
             Token::Ident(name) => {
-                self.bind_pattern_var(self.pos);
+                self.bind_pattern_var(self.cur());
                 self.advance();
                 if self.at(&Token::At) {
                     // As-pattern `xs@(x:_)` (Haskell 2010 §3.17: apat →
@@ -4928,9 +4982,7 @@ impl Parser {
                 let name = self.try_parse_qualified_tail(&name).unwrap_or(name);
                 Ok(Pattern::Constructor { name, args: vec![] })
             }
-            _ => {
-                Err(self.err_here(format!("Expected pattern, found {}", self.peek())))
-            }
+            _ => Err(self.err_expected("pattern")),
         }
     }
 
@@ -4942,9 +4994,7 @@ impl Parser {
                 self.advance();
                 Ok(name)
             }
-            _ => {
-                Err(self.err_here(format!("Expected identifier, found {}", self.peek())))
-            }
+            _ => Err(self.err_expected("identifier")),
         }
     }
 
@@ -4954,9 +5004,7 @@ impl Parser {
                 self.advance();
                 Ok(name)
             }
-            _ => {
-                Err(self.err_here(format!("Expected type/constructor name, found {}", self.peek())))
-            }
+            _ => Err(self.err_expected("type/constructor name")),
         }
     }
 }

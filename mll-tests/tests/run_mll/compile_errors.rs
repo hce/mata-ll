@@ -632,13 +632,71 @@ fn double_underscore_identifiers_are_reserved() {
 // by `+ 2` at x's own column — a parse error in GHC. Deeper-than-block
 // continuations (including ones aligned with the expression-start line,
 // e.g. `( 40` / `+ 2` inside a let binding) stay legal and are covered
-// by the tuples.mll corpus case.
+// by the tuples.mll corpus case. Since the layout rule became a property
+// of the token stream (F11), the sibling boundary is pinned for every
+// block kind here — with GHC's message shape and a note stating the rule:
+// the module's declaration column, a where group's binding column (GHC:
+// parse error on input `+` for both), a line at a do block's statement
+// column that cannot start a statement (GHC closes the block by its
+// parse-error(t) rule and reads `(do …) + 2` — the type error `Num (IO
+// ())`), an operand continued at the statement column inside parentheses
+// (parentheses do not suspend layout), and a smaller indent closing a
+// block for the enclosing context (`where` at column 1 after a clause).
 #[test]
 fn operator_line_at_block_column_is_next_item() {
     expect_compile_error(
         "x :: Int\nx = 1\n+ 2\n\nmain :: IO ()\nmain = print x\n",
         &[],
-        &["Unexpected token '+' at top level"],
+        &["parse error on input '+'", "at 3:1", "note:", "starts at column 1", "layout rule"],
+    );
+    expect_compile_error(
+        "f :: Int -> Int\nf n = y\n  where\n    y = n\n    + 2\nmain :: IO ()\nmain = print (f 1)\n",
+        &[],
+        &["parse error on input '+'", "at 5:5", "starts at column 5"],
+    );
+    expect_compile_error(
+        "main :: IO ()\nmain = do\n  let x = 1 :: Int\n  print x\n  + 2\n",
+        &[],
+        &["No instance for 'Num (IO ())'"],
+    );
+    expect_compile_error(
+        "main :: IO ()\nmain = do\n  print (1 +\n  2)\n",
+        &[],
+        &["parse error on input integer literal '2'", "at 4:3", "not past column 3"],
+    );
+    expect_compile_error(
+        "f :: Int -> Int\nf n = y\nwhere y = n\nmain :: IO ()\nmain = print (f 1)\n",
+        &[],
+        &["parse error on input 'where'", "at 3:1"],
+    );
+    expect_compile_error(
+        "data T\n= A | B\nmain :: IO ()\nmain = print 1\n",
+        &[],
+        &["parse error on input '='", "at 2:1"],
+    );
+    expect_compile_error(
+        "x :: Int\nx =\n5\nmain :: IO ()\nmain = print x\n",
+        &[],
+        &["parse error on input integer literal '5'", "at 3:1"],
+    );
+    // A `{` suspends layout until its match (Haskell 2010 §10.3 pushes
+    // context 0), which is what lets a record body stand at the block's
+    // column (accept side: layout_continuation_lines.mll); the `}` is
+    // still required — an unclosed brace is a parse error at the end of
+    // the file, never a block silently closed by indentation.
+    expect_compile_error(
+        "data R = R { a :: Int, b :: Int }\nmain :: IO ()\nmain = do\n    let r = R { a = 1\n    print (a r)\n",
+        &[],
+        &["Parse error", "Expected '}', found end of file"],
+    );
+    // A `case` whose alternatives stand at the column of the `let`
+    // binding it belongs to: the layout rule reads that line as the next
+    // binding, so the case has no alternatives (GHC: parse error on the
+    // alternative; the parser used to accept the shape).
+    expect_compile_error(
+        "main :: IO ()\nmain = do\n    let x = Just (3 :: Int)\n    let res = case x of\n        Just n -> n\n        Nothing -> 0\n    print res\n",
+        &[],
+        &["parse error on input 'Just'", "at 5:9", "case alternative expected"],
     );
 }
 
@@ -4576,14 +4634,17 @@ fn non_structural_instance_on_maybe_is_recognized() {
 // non-injectivity is not assumed, and divergence errors rather than hangs.
 
 /// The `Plus` family + a length-indexed `Vec`, shared by the tests below.
+// (A `\` line continuation drops the next line's leading spaces; the
+// `\x20` keeps the block indented — a line at column 1 after `where` is
+// an empty block followed by a top-level parse error, as in GHC.)
 const TF_VEC_PRELUDE: &str = "\
 data Nat = Z | S Nat\n\
 type family Plus n m where\n\
-    Plus 'Z     m = m\n\
-    Plus ('S n) m = 'S (Plus n m)\n\
+\x20   Plus 'Z     m = m\n\
+\x20   Plus ('S n) m = 'S (Plus n m)\n\
 data Vec n a where\n\
-    VNil  :: Vec 'Z a\n\
-    VCons :: a -> Vec n a -> Vec ('S n) a\n\
+\x20   VNil  :: Vec 'Z a\n\
+\x20   VCons :: a -> Vec n a -> Vec ('S n) a\n\
 vappend :: Vec n a -> Vec m a -> Vec (Plus n m) a\n\
 vappend VNil ys = ys\n\
 vappend (VCons x xs) ys = VCons x (vappend xs ys)\n";
@@ -4672,8 +4733,8 @@ fn type_family_divergence_errors_not_hangs() {
 const PROMOTED_VEC_PRELUDE: &str = "\
 data Nat = Z | S Nat\n\
 data Vec n a where\n\
-    VNil  :: Vec 'Z a\n\
-    VCons :: a -> Vec n a -> Vec ('S n) a\n";
+\x20   VNil  :: Vec 'Z a\n\
+\x20   VCons :: a -> Vec n a -> Vec ('S n) a\n";
 
 #[test]
 fn promoted_kind_rejects_bool_tag_for_nat_index() {
@@ -4715,8 +4776,8 @@ fn promoted_kind_type_family_argument_is_checked() {
     let src = format!(
         "{PROMOTED_VEC_PRELUDE}\
 type family Plus n m where\n\
-    Plus 'Z     m = m\n\
-    Plus ('S n) m = 'S (Plus n m)\n\
+\x20   Plus 'Z     m = m\n\
+\x20   Plus ('S n) m = 'S (Plus n m)\n\
 bad :: Vec (Plus 'True 'Z) a -> a\n\
 bad _ = undefined\n\
 main :: IO ()\n\
@@ -7044,7 +7105,7 @@ fn at_operator_and_brace_do_fail_loudly() {
     expect_compile_error(source, &[], &["Parse error"]);
 
     let source = "main :: IO ()\nmain = do { putStrLn \"a\"; putStrLn \"b\" }\n";
-    expect_compile_error(source, &[], &["Parse error", "'{'"]);
+    expect_compile_error(source, &[], &["Parse error", "parse error on input '{'", "not supported"]);
 }
 
 /// G7: the first-class-dict diagnosis is deferred to DCE reachability —

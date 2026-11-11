@@ -177,14 +177,33 @@ defined once: entering a second definition of \texttt{x} is the
 
 \subsection{Layout Rule}
 
-MATA-LL uses indentation-sensitive layout, like Haskell or Python.
-When a definition spans more than one line, each wrapped line must be
-indented past the definition's start column:
+MATA-LL uses Haskell's layout rule (Haskell 2010 \S10.3).  A line indented
+past the column of the enclosing block's items --- the module's
+declarations, the bindings of a \texttt{where} or \texttt{let}, the
+statements of a \texttt{do}, the alternatives of a \texttt{case} ---
+continues the item above it, whatever that item is; a line at that column
+starts the next item; a line indented less ends the block.  So any part of
+a construct may start a new line, as long as the line is indented past the
+block:
 
 \begin{lstlisting}
 longExpression :: Int
 longExpression = 1 + 2
     + 3 + 4    -- wrapped line: indented past 'l'
+
+sign
+  :: Int
+  -> Int
+sign n
+  | n < 0
+  = -1
+  | otherwise
+  = 1
+
+data Shape
+  = Circle Int
+  | Rect Int Int
+  deriving (Show, Eq)
 \end{lstlisting}
 
 \subsection{Type Signatures}

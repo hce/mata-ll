@@ -170,8 +170,9 @@ export table.
 %----------------------------------------------------------------------
 \subsection{Lexer (\texttt{mllc/src/lexer.rs})}
 
-The lexer is layout-sensitive.  It emits \texttt{Indent(n)} at the start of each
-indented line and \texttt{Newline} tokens between logical lines.  Block comments
+The lexer is layout-sensitive.  It emits \texttt{Indent(n)} at the start of
+every line that carries a token, \texttt{n} being the line's indentation; what
+that mark means is decided by the parser (below).  Block comments
 \texttt{\{- \ldots\ -\}} nest correctly.  Operators are maximal sequences of
 symbol characters.
 
@@ -188,11 +189,25 @@ an import, as in GHC.  Same-precedence chains are rejected when an operator is
 non-associative or the associativities disagree (the GHC precedence-parsing
 rule), so \texttt{a == b == c} is a parse error.
 
-Layout handling: a wrapped line indented past the enclosing layout block's
-column is merged into the same declaration.  Record construction and record
-update follow the same rule: the \texttt{\{ \ldots \}} brace may open on a
-following, deeper-indented line, and chained updates may break the line
-between braces.
+Layout handling is Haskell 2010 \S10.3 as one property of the token stream.
+The parser keeps the innermost layout context (\texttt{Layout}): the column of
+the implicit block whose items it is reading --- the module's declarations, a
+class or instance body, a GADT's constructors, a type family's equations, a
+\texttt{where}/\texttt{let} group, a \texttt{do} block, a \texttt{case}'s
+alternatives --- or no block at all (the module header, and the inside of
+every \texttt{\{ \ldots \}} pair, record braces included: \S10.3 pushes
+the context 0 on any brace, so a record body may stand at the enclosing
+block's column; parentheses and brackets suspend nothing).  The token access
+(\texttt{peek}, \texttt{advance}, \texttt{at}, \texttt{expect}) reads an
+\texttt{Indent(n)} with \texttt{n} past the block's column as whitespace, so
+no parse site knows that a construct may span lines: a guard's \texttt{=}, a
+signature's \texttt{->}, a constructor's fields, a \texttt{deriving}, a record
+brace or an infix operator may all start a deeper-indented line.  A mark AT the
+column is the block's \texttt{;} and one LEFT of it the block's \texttt{\}};
+only the block loops read those, and the \texttt{\}} is left in the stream for
+the enclosing context to read in turn.  A block whose next line begins with a
+token no item can start with closes there (the parse-error(t) rule), and the
+token belongs to the enclosing construct.
 
 Declaration forms: \texttt{TypeSig}, \texttt{FunDef}, \texttt{DataDef},
 \texttt{NewtypeDef}, \texttt{ClassDecl}, \texttt{InstanceDecl},

@@ -42,6 +42,34 @@ Two ordering facts that are easy to get wrong and matter:
   which `fold.rs` pattern-matches as `App(App(Var(name), lhs), rhs)` and
   reduces. Folding earlier would miss most opportunities.
 
+- **Layout is one property of the parser's token stream.** The lexer marks
+  every line start with `Indent(n)`, `n` the line's indentation, and
+  decides nothing. The parser keeps the innermost layout context
+  (`Parser::layout`, a `Layout`): the column of the implicit block whose
+  items it is reading (the module's declarations, a class/instance body,
+  a GADT's constructors, a type family's equations, a `where`/`let`
+  group, a `do` block, a `case`'s alternatives) or none (the module
+  header, an explicit `case … of { … }`). Its token access (`peek`,
+  `advance`, `at`, `expect`, `nth`) reads a mark indented PAST the block's
+  column as whitespace (Haskell 2010 §10.3's continuation case), so no
+  parse site knows that a construct may span lines; `advance` on a `{`
+  pushes the context onto `Parser::brace_stack` and makes it `Explicit`
+  until the matching `}` (§10.3's context 0 on every brace, record braces
+  included — parentheses and brackets get none). A mark AT the column
+  is the block's `;`, one LEFT of it the block's `}`; only the block
+  loops read them (`skip_separators`, `at_block_end`), and the `}` stays
+  in the stream for the enclosing context, which reads it as its own
+  continuation, separator or closer — the report's `L` re-reading `<n>`
+  against the outer context. Every block construct parses its items
+  under `in_layout(Layout::Block(col), …)`, which restores the enclosing
+  context on success and failure alike, and a `Checkpoint` carries the
+  context so a failed speculative parse never leaves an inner block's
+  column in force. A line whose first token no item of the block can
+  begin with closes the block (the parse-error(t) rule) and the token
+  belongs to the enclosing construct; a token nothing open can take is
+  `parse error on input 't'` (`parse_error_on_input`, `err_expected`),
+  with a note stating the rule and the column.
+
 - **"Declared twice" is decided in the parser, per source file.** Stages 3
   and 4 merge the Prelude, every import and the user's file into ONE
   declaration list. Stage 3 gives every module's declarations canonical
