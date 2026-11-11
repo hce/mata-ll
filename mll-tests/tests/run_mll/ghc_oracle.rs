@@ -306,6 +306,8 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_fixity_own_operator, "cases", "fixity_own_operator.mll"),
         (ghc_oracle_fixity_not_imported, "cases", "fixity_not_imported.mll"),
         (ghc_oracle_fixity_qualified_only, "cases", "fixity_qualified_only.mll"),
+        (ghc_oracle_qualified_lexemes, "cases", "qualified_lexemes.mll"),
+        (ghc_oracle_alias_ctor_collision, "cases", "alias_ctor_collision.mll"),
         (ghc_oracle_fixity_local_binders, "cases", "fixity_local_binders.mll"),
         (ghc_oracle_fixity_class_method, "cases", "fixity_class_method.mll"),
         (ghc_oracle_fixity_reexport, "cases", "fixity_reexport.mll"),

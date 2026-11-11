@@ -760,47 +760,31 @@ fn shadowed_where_local_row_keeps_binding_lazy() {
     );
 }
 
-/// An import alias that is also a data constructor: the constructor wins
-/// (alias_ctor_collision.mll pins the program meaning), and the compiler
-/// must SAY that qualified references through the alias will not resolve
-/// (Q67) — silently dropping the alias would leave `M.size` failing with
-/// an unexplained unbound-variable error.
+/// An import alias that is also a data constructor: both meanings resolve,
+/// and the compiler says nothing about it. A qualified name is one lexeme
+/// (Haskell 2010 §2.4, lexer.rs `Token::QualIdent`), so `M.size` and `tag
+/// M` never share a parse — GHC keeps module aliases in their own
+/// namespace, and so does this (F10). Until then `M.f` and `f M` parsed
+/// to one shape, the constructor won, and a warning announced that the
+/// qualified form would not resolve (Q67); alias_ctor_collision.mll pins
+/// the program meaning against GHC.
 #[test]
-fn alias_constructor_collision_warns() {
+fn alias_constructor_collision_resolves_both_meanings() {
     let src = "import qualified AliasCtor as M\n\n\
                data Mode = M | N\n\n\
                tag :: Mode -> Int\n\
                tag M = 1\n\
                tag N = 2\n\n\
                main :: IO ()\n\
-               main = print (tag M)\n";
+               main = print (tag M + M.size)\n";
     let result = compile(src, Path::new("tests/cases"), &[])
-        .expect("the constructor meaning must compile");
-    assert_eq!(result.warnings.len(), 1, "exactly one collision warning");
-    let rendered = format!("{}", result.warnings[0]);
-    assert!(
-        rendered.contains("import alias 'M' is also a data constructor"),
-        "warning must name the collision:\n{}",
-        rendered
-    );
-    assert!(
-        rendered.contains("rename the alias"),
-        "warning must offer the fix:\n{}",
-        rendered
-    );
-
-    // A non-colliding alias stays fully functional and warns nothing.
-    let clean = "import qualified AliasCtor as A\n\n\
-                 main :: IO ()\n\
-                 main = print A.size\n";
-    let result = compile(clean, Path::new("tests/cases"), &[])
-        .expect("non-colliding alias compiles");
+        .expect("the constructor and the qualified reference both compile");
     assert!(
         result.warnings.is_empty(),
-        "no warning without a collision: {:?}",
+        "a module alias and a constructor of one spelling are no collision: {:?}",
         result.warnings.iter().map(|w| format!("{}", w)).collect::<Vec<_>>()
     );
-    assert!(result.lua_code.contains("99"), "qualified use resolves");
+    assert!(result.lua_code.contains("99"), "the qualified use resolves to AliasCtor.size");
 }
 
 /// shell *silently*; the compiler must now say so via `CompileResult.warnings`.

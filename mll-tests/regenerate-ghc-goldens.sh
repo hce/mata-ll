@@ -155,10 +155,7 @@ excluded_reason() {
         cases/MergeNames)                echo "helper module (twinned for import, no main)";;
         cases/OpsExports)                echo "helper module (twinned for import, no main)";;
         cases/AliasCtor)                 echo "helper module (twinned for import, no main)";;
-        # mata-ll DEVIATION (documented in HASKDIFF): the constructor wins
-        # over the colliding alias, GHC would accept both meanings — but the
-        # twin could not resolve the qualified sibling anyway (Q77 seam).
-        cases/alias_ctor_collision)      echo "alias/constructor collision: documented deviation + Q77 seam";;
+        cases/QualOps)                   echo "helper module (twinned for import, no main)";;
         # Same twin module-resolution gap as qualified_import_instances (Q77
         # seam) — the case mixes a qualified alias with unqualified imports.
         cases/import_merge)              echo "qualified import: twin module resolution gap (Q77 seam)";;
@@ -319,7 +316,7 @@ make_twin() { # $1 = source .mll, $2 = output .hs
 }
 
 # Helper modules must be importable by name from the twin directory.
-for helper in DiamondLeaf DiamondMid DiamondShared DiamondWest DiamondEast ExportHelper FixityOps OpsExports ReexInner ReexUmbrella ReexSelf ReexOuter ReexAlias PrivateHelperLib ScopeInner ScopeLeak ScopeMid ScopeLeft ScopeRight ScopeTake ScopeCfgA ScopeCfgB ScopeStack DesugarOwn NamesA NamesA_b FixityInner FixityOuter FixityPrivate FixityListed FixityHidden FixityQual FixityClass FixityUmbrella FixityByName FixityPow FixityTypeOps EntConA EntConB EntClassA EntClassB EntFieldA EntFieldB EntListA EntListB; do
+for helper in DiamondLeaf DiamondMid DiamondShared DiamondWest DiamondEast ExportHelper FixityOps OpsExports AliasCtor QualOps ReexInner ReexUmbrella ReexSelf ReexOuter ReexAlias PrivateHelperLib ScopeInner ScopeLeak ScopeMid ScopeLeft ScopeRight ScopeTake ScopeCfgA ScopeCfgB ScopeStack DesugarOwn NamesA NamesA_b FixityInner FixityOuter FixityPrivate FixityListed FixityHidden FixityQual FixityClass FixityUmbrella FixityByName FixityPow FixityTypeOps EntConA EntConB EntClassA EntClassB EntFieldA EntFieldB EntListA EntListB; do
     make_twin "$tests/cases/$helper.mll" "$gen/$helper.hs"
 done
 

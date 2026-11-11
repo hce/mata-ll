@@ -8318,3 +8318,124 @@ fn guarded_ffi_result_must_be_written_as_either() {
         }
     }
 }
+
+/// A qualified name is one lexeme (Haskell 2010 §2.4) and refers to an
+/// imported module's entity, so it can stand wherever a name is USED and
+/// nowhere a name is BOUND (F10). Every binding site rejects it with
+/// GHC's "Qualified name in binding position": a definition's head, an
+/// infix definition's operator, a backtick infix definition, an equation's
+/// parameter, a lambda parameter, a case alternative, a where and a let
+/// binding. A qualified signature and a qualified fixity declaration are
+/// their own GHC errors.
+#[test]
+fn qualified_names_bind_nothing() {
+    let dir = Path::new("tests/cases");
+    let tail = "\nmain :: IO ()\nmain = pure ()\n";
+    for (head, name) in [
+        ("Q.plus a b = a + b", "Q.plus"),
+        ("a Q.<+> b = a + b", "Q.<+>"),
+        ("a `Q.plus` b = a + b", "Q.plus"),
+        ("f Q.x = 1", "Q.x"),
+        ("g = \\Q.x -> 1", "Q.x"),
+        ("h y = case y of\n  Q.x -> 1", "Q.x"),
+        ("k = v where Q.v = 1", "Q.v"),
+        ("m = let Q.v = 1 in v", "Q.v"),
+    ] {
+        let source = format!("import qualified QualOps as Q\n\n{head}{tail}");
+        expect_compile_error_in(&source, dir, &[], &[
+            &format!("Qualified name in binding position: {name}"),
+            "written unqualified",
+        ]);
+    }
+    expect_compile_error_in(
+        "import qualified QualOps as Q\n\nQ.plus :: Int -> Int -> Int\nmain :: IO ()\nmain = pure ()\n",
+        dir, &[], &["Invalid qualified name in type signature: Q.plus", "'plus :: …'"],
+    );
+    expect_compile_error_in(
+        "import qualified QualOps as Q\n\ninfixl 6 Q.<+>\nmain :: IO ()\nmain = print (1 Q.<+> 2)\n",
+        dir, &[], &["A fixity declaration names an unqualified operator, found 'Q.<+>'",
+                    "the module that defines the operator"],
+    );
+    // The lexeme rule holds at the top level and in a where block alike:
+    // the dotted head is read as one token, never as a constructor `Q`
+    // applied to something.
+    expect_compile_error_in(
+        "import qualified QualOps as Q\n\nQ.plus :: Int\nmain :: IO ()\nmain = pure ()\n",
+        dir, &[], &["Invalid qualified name in type signature"],
+    );
+}
+
+/// A qualified reference nothing answers is unbound — under its qualified
+/// spelling, with the reason: the alias names modules that do not export
+/// the name, or no import declares the alias at all (GHC: "The module ‘X’
+/// does not export ‘name’" / "No module named ‘A’ is imported"). The same
+/// for a qualified constructor and a qualified type (F10).
+#[test]
+fn unbound_qualified_names_say_which_half_is_missing() {
+    let dir = Path::new("tests/cases");
+    let known = "import qualified QualOps as Q\n\nmain :: IO ()\nmain = print (Q.nothere 1)\n";
+    expect_compile_error_in(known, dir, &[], &[
+        "Unbound variable: Q.nothere",
+        "the module imported as 'Q' does not export 'nothere'",
+    ]);
+    let unknown = "main :: IO ()\nmain = print (Z.plus 1 2)\n";
+    expect_compile_error_in(unknown, dir, &[], &[
+        "Unbound variable: Z.plus",
+        "no module is imported under the name 'Z'",
+    ]);
+    // `Just.f` is the qualified name `Just.f`, not `Just . f` — GHC reads
+    // it so too ("Not in scope: ‘Just.f’").
+    let glued = "main :: IO ()\nmain = print (Just.negate 1)\n";
+    expect_compile_error_in(glued, dir, &[], &[
+        "Unbound variable: Just.negate",
+        "no module is imported under the name 'Just'",
+    ]);
+    let op = "import qualified QualOps as Q\n\nmain :: IO ()\nmain = print (1 Q.<*> 2)\n";
+    expect_compile_error_in(op, dir, &[], &[
+        "Unbound variable: Q.<*>",
+        "the module imported as 'Q' does not export '<*>'",
+    ]);
+    let con = "import qualified QualOps as Q\n\nmain :: IO ()\nmain = print (Q.Square 1)\n";
+    expect_compile_error_in(con, dir, &[], &[
+        "Unknown constructor: Q.Square",
+        "the module imported as 'Q' does not export 'Square'",
+    ]);
+    let ty = "import qualified QualOps as Q\n\nf :: Q.Square -> Int\nf _ = 1\n\nmain :: IO ()\nmain = print (f undefined)\n";
+    expect_compile_error_in(ty, dir, &[], &[
+        "Unknown type: Q.Square",
+        "the module imported as 'Q' does not export 'Square'",
+    ]);
+}
+
+/// `[Monday..]` lexes `Monday..` as the qualified operator `.` of a module
+/// `Monday` — maximal munch over Haskell 2010 §2.4, exactly as GHC reads
+/// it (GHC: "parse error on input ‘]’", or "Not in scope: ‘Monday..’"
+/// with an upper bound). The error says what the token is and shows the
+/// spelling that means the range; `[Monday ..]` itself is pinned by
+/// qualified_lexemes.mll (F10).
+#[test]
+fn glued_enum_range_is_a_qualified_operator() {
+    for range in ["[Monday..]", "[Monday..Tuesday]"] {
+        let source = format!(
+            "data D = Monday | Tuesday deriving (Show, Enum, Bounded)\n\n\
+             main :: IO ()\nmain = print {range}\n"
+        );
+        expect_compile_error(&source, &[], &[
+            "Expected expression, found 'Monday..'",
+            "'Monday..' is one lexeme: the operator '.' qualified with the module name 'Monday'",
+            "write a space before the dots: '[Monday ..]'",
+        ]);
+    }
+}
+
+/// A qualified import's alias is one name. Haskell 2010 allows a dotted
+/// alias (`as Data.Map`); mata-ll resolves through a single segment and
+/// says so at the import, where the dotted alias arrives as one lexeme.
+#[test]
+fn dotted_import_alias_is_refused_at_the_import() {
+    expect_compile_error_in(
+        "import qualified QualOps as Qual.Ops\n\nmain :: IO ()\nmain = print (Qual.Ops.plus 1 2)\n",
+        Path::new("tests/cases"), &[],
+        &["A qualified import's alias is a single name, found 'Qual.Ops'", "write `as M`"],
+    );
+}

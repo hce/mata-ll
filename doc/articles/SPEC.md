@@ -1734,7 +1734,16 @@ Haskell 2010: `import Data.Tree (depth, Tree(..))` brings `Tree`, its
 constructors and its fields into scope, `import Data.Tree (depth, Tree)`
 the type alone, and `hiding (Tree(..))` keeps all of them out. After
 `import qualified Data.Tree as T` a constructor is reachable only as
-`T.Leaf` (in expressions and patterns), like a function as `T.depth`. A
+`T.Leaf` (in expressions and patterns), like a function as `T.depth`, a
+type as `T.Tree` and an operator as `T.<+>` — in an infix chain, in
+either section, first-class as `(T.<+>)`, and a function between
+backticks as `` x `T.depth` y ``; the operator keeps the fixity Data.Tree
+declared for it. A qualified name is one lexeme (Haskell 2010 §2.4),
+written without spaces: `Just.f` is the qualified name `Just.f`, not a
+composition, and `[Monday..]` is the qualified operator `Monday..` — the
+range is `[Monday ..]`. A qualified name refers; it cannot be bound
+(`T.depth x = …`, `f T.x = …` are "Qualified name in binding position",
+as in GHC), signed or given a fixity. A
 constructor cannot be named in an import list by itself, and an import
 list names a type's constructors with `(..)` only (an export list also
 takes an explicit `Tree(Leaf, Node)`).

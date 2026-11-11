@@ -829,17 +829,10 @@ impl Parser {
         let mut module_exports: Option<ModuleExports> = None;
         if self.at(&Token::KwModule) {
             self.advance();
-            // Module name (may be dotted: Data.List)
-            let mut name_parts: Vec<String> = Vec::new();
-            while let Token::UpperIdent(part) | Token::Ident(part) = self.peek().clone() {
-                name_parts.push(part);
+            // Module name: a dotted one (`Data.List`) is one lexeme.
+            if let Token::UpperIdent(name) | Token::QualUpperIdent(name) = self.peek().clone() {
                 self.advance();
-                if self.at(&Token::Operator(".".to_string())) {
-                    self.advance();
-                }
-            }
-            if !name_parts.is_empty() {
-                module_name = Some(name_parts.join("."));
+                module_name = Some(name);
             }
             // Parse optional export list
             if self.at(&Token::LeftParen) {
@@ -864,14 +857,7 @@ impl Parser {
                         // matching import edge is known.
                         Token::KwModule => {
                             self.advance();
-                            let mut parts = vec![self.expect_upper_ident()
-                                .map_err(|d| vec![*d])?];
-                            while self.at(&Token::Operator(".".to_string())) {
-                                self.advance();
-                                parts.push(self.expect_upper_ident()
-                                    .map_err(|d| vec![*d])?);
-                            }
-                            reexports.push(parts.join("."));
+                            reexports.push(self.expect_module_name().map_err(|d| vec![*d])?);
                         }
                         Token::Operator(op) => { exports.push(op); self.advance(); }
                         // Parenthesized operator export, GHC style:
@@ -1077,6 +1063,23 @@ impl Parser {
             Token::Infixl | Token::Infixr | Token::Infix => self.parse_fixity_decl(),
             Token::Ident(_) => self.parse_value_decl(),
             Token::LeftParen => self.parse_operator_decl(),
+            // `O.plus a b = …` binds nothing (see `qualified_binder_error`);
+            // `O.plus :: T` is GHC's "Invalid qualified name in type
+            // signature" — a signature names a declaration of this module.
+            Token::QualIdent(name) => {
+                if self.nth(1).token == Token::DblColon {
+                    let mut diag = self.err_here(format!(
+                        "Invalid qualified name in type signature: {name}"
+                    ));
+                    diag.notes.push(format!(
+                        "a signature belongs to a declaration of this module, \
+                         written unqualified: '{} :: …'",
+                        crate::lexer::unqualified(&name)
+                    ));
+                    return Err(diag);
+                }
+                Err(self.qualified_binder_error(&name))
+            }
             // A token no declaration begins with — or a line indented LESS
             // than the module's declarations, the block's `}` with nothing
             // outside it to take the line.
@@ -1445,12 +1448,8 @@ impl Parser {
             false
         };
 
-        let mut module_path = Vec::new();
-        module_path.push(self.expect_upper_ident()?);
-        while self.at(&Token::Operator(".".to_string())) {
-            self.advance();
-            module_path.push(self.expect_upper_ident()?);
-        }
+        let module_path: Vec<String> =
+            self.expect_module_name()?.split('.').map(str::to_string).collect();
 
         if qualified {
             // 'as' is not a keyword — check for Ident("as")
@@ -1469,6 +1468,23 @@ impl Parser {
                     );
                     return Err(diag);
                 }
+            }
+            // The alias is a single name. Haskell 2010 lets it be dotted
+            // (`as Data.Map`, used as `Data.Map.insert`); mata-ll's alias
+            // tables are keyed by one segment, so the dotted form is
+            // refused here with the rule spelled out rather than failing
+            // later at the first qualified reference.
+            if let Token::QualUpperIdent(alias) = self.peek().clone() {
+                let mut diag = self.err_here(format!(
+                    "A qualified import's alias is a single name, found '{alias}'"
+                ));
+                diag.notes.push(
+                    "Haskell 2010 allows a dotted alias (`as Data.Map`); mata-ll \
+                     resolves every qualified reference through a one-segment \
+                     alias, so write `as M` and refer to the module as `M.name`."
+                        .to_string(),
+                );
+                return Err(diag);
             }
             let alias = self.expect_upper_ident()?;
             return Ok(Decl::Import {
@@ -2077,6 +2093,24 @@ impl Parser {
                     self.expect(&Token::Backtick)?;
                     s
                 }
+                // `infixl 6 O.<+>`: Haskell 2010 §4.4.2 gives a fixity
+                // declaration unqualified operators only (`fixity → … ops`,
+                // `op → varop | conop`) — it governs operators THIS module
+                // declares, and GHC's "parse error on input 'O.<+>'" is
+                // that rule. Said with the reason.
+                Token::QualOperator(name) | Token::QualIdent(name) => {
+                    let mut diag = self.err_here(format!(
+                        "A fixity declaration names an unqualified operator, found '{name}'"
+                    ));
+                    diag.notes.push(
+                         "a fixity belongs to the operator's own declaration: the \
+                         defining module declares it, and an import brings it along. \
+                         Declare the fixity next to the definition in the module that \
+                         defines the operator."
+                            .to_string(),
+                    );
+                    return Err(diag);
+                }
                 _ => return Err(self.err_here("Expected operator after fixity precedence".to_string())),
             };
             self.declare(&op, DeclaredAs::Fixity, op_tok);
@@ -2103,6 +2137,12 @@ impl Parser {
             let ty = self.parse_type()?;
             self.declare(&name, DeclaredAs::Signature, name_tok);
             return Ok(vec![Decl::TypeSig { name, ty }]);
+        }
+
+        // `a O.<+> b = …`: the operator being defined is qualified, and a
+        // definition cannot bind an imported module's operator.
+        if let Token::QualOperator(op) = self.peek().clone() {
+            return Err(self.qualified_binder_error(&op));
         }
 
         // Infix definition: `lhs <op> rhs = ...` or ``lhs `f` rhs = ...``.
@@ -2186,22 +2226,11 @@ impl Parser {
         let span = Span::new(loc.line, loc.col);
 
         let mut patterns = Vec::new();
-        while self.is_pattern_atom_start() || matches!(self.peek(), Token::UpperIdent(_)) {
-            if let Token::UpperIdent(_) = self.peek() {
-                // A constructor at clause level — parse as full pattern
-                // but don't consume args (they're separate clause patterns)
-                let pat = match self.peek().clone() {
-                    Token::UpperIdent(name) => {
-                        self.advance();
-                        let name = self.try_parse_qualified_tail(&name).unwrap_or(name);
-                        Pattern::Constructor { name, args: vec![] }
-                    }
-                    _ => unreachable!(),
-                };
-                patterns.push(pat);
-            } else {
-                patterns.push(self.parse_pattern_atom()?);
-            }
+        while self.is_pattern_atom_start() {
+            // A constructor at clause level (`M.Just` included) is nullary:
+            // what follows are the clause's further patterns, not its
+            // arguments — `parse_pattern_atom` reads it so.
+            patterns.push(self.parse_pattern_atom()?);
         }
 
         self.finish_clause(name, patterns, span, binders_from)
@@ -2697,6 +2726,11 @@ impl Parser {
                         }
                     }
                 }
+                // A qualified name begins no binding either, but nothing
+                // outside the block could take it: say why here.
+                if let Token::QualIdent(name) = p.peek().clone() {
+                    return Err(p.qualified_binder_error(&name));
+                }
                 // A token no binding begins with closes the block (the
                 // parse-error(t) rule); the enclosing construct reads it
                 // next and reports it if nothing there takes it either.
@@ -2931,50 +2965,13 @@ impl Parser {
         matches!(
             self.peek(),
             Token::UpperIdent(_)
+                | Token::QualUpperIdent(_)
                 | Token::Ident(_)
                 | Token::LeftParen
                 | Token::LeftBracket
                 | Token::StrLit(_)
                 | Token::Tick
         )
-    }
-
-    /// After consuming an UpperIdent, join an adjacent `.UpperIdent` chain into
-    /// a module-qualified name like `Data.Map` or `M.Map`. Returns None when the
-    /// UpperIdent stands alone. Requiring adjacency (no spaces around the dot)
-    /// distinguishes a qualifier from the only other `.` a type can contain — a
-    /// `forall` dot, which always follows a lowercase variable, never an
-    /// UpperIdent.
-    fn try_parse_qualified_tail(&mut self, head: &str) -> Option<String> {
-        let mut name = head.to_string();
-        let mut matched = false;
-        loop {
-            if self.pos == 0 || self.pos + 1 >= self.tokens.len() {
-                break;
-            }
-            let prev = &self.tokens[self.pos - 1];
-            let dot = &self.tokens[self.pos];
-            if !matches!(&dot.token, Token::Operator(o) if o == ".") {
-                break;
-            }
-            if dot.line != prev.line || dot.col != prev.end_col {
-                break; // space before the dot: not a qualifier
-            }
-            let seg = &self.tokens[self.pos + 1];
-            let seg_name = match &seg.token {
-                Token::UpperIdent(n) => n.clone(),
-                _ => break,
-            };
-            if seg.line != dot.line || seg.col != dot.col + 1 {
-                break; // space after the dot
-            }
-            self.advance(); // consume '.'
-            self.advance(); // consume the segment
-            name.push('.');
-            name.push_str(&seg_name);
-            matched = true;
-        }
-        if matched { Some(name) } else { None }
     }
 
     /// Parse the FFI target string of `LuaPure "…"`, `LuaIO "…"`,
@@ -3015,12 +3012,13 @@ impl Parser {
 
     fn parse_type_atom_inner(&mut self) -> PResult<Type> {
         match self.peek().clone() {
+            // Module-qualified type reference: `M.Map`, `Data.Map.Map`.
+            Token::QualUpperIdent(name) => {
+                self.advance();
+                Ok(Type::Con(name))
+            }
             Token::UpperIdent(name) => {
                 self.advance();
-                // Module-qualified type reference: `M.Map`, `Data.Map.Map`.
-                if let Some(qual) = self.try_parse_qualified_tail(&name) {
-                    return Ok(Type::Con(qual));
-                }
                 match name.as_str() {
                     "IO" => {
                         if self.is_type_atom_start() {
@@ -3252,7 +3250,10 @@ impl Parser {
                 Token::Operator(ref op) if op == ".." => {
                     break; // '..' is range syntax, not an infix operator
                 }
-                Token::Operator(op) => {
+                // A bare operator or a module-qualified one (`1 O.<+> 2`):
+                // the same chain entry, named as written; which entity and
+                // fixity `O.<+>` denotes is import resolution's.
+                Token::Operator(op) | Token::QualOperator(op) => {
                     // An operator directly followed by ')' is a left-section
                     // tail (`(a * b +)`): it belongs to the enclosing
                     // parenthesised-expression path, which builds the
@@ -3270,7 +3271,7 @@ impl Parser {
                     let save = self.checkpoint();
                     let span = self.span_of(self.cur());
                     self.advance();
-                    let func = self.expect_ident()?;
+                    let func = self.expect_backtick_name()?;
                     self.expect(&Token::Backtick)?;
                     // A backtick operator directly followed by ')' is a
                     // left-section tail (``(a * b `div`)``) — same stop as
@@ -3418,6 +3419,9 @@ impl Parser {
                 // parse-error(t) rule — a guard's `=` or `->` right after
                 // a `let` qualifier's last binding (`| let d = v - n = …`),
                 // or the `in` of a let-expression at the bindings' column.
+                if let Token::QualIdent(name) = p.peek().clone() {
+                    return Err(p.qualified_binder_error(&name));
+                }
                 if !matches!(p.peek(), Token::Ident(_)) {
                     break;
                 }
@@ -3580,6 +3584,10 @@ impl Parser {
     /// binds to the field. Only applies when the `.` is
     /// adjacent to the preceding token (no space) and followed by an
     /// identifier, to distinguish it from function composition `f . g`.
+    /// A dot glued to a CONSTRUCTOR name never arrives here: the lexer has
+    /// already joined `M.field` into the qualified name `M.field`
+    /// (Haskell 2010 §2.4), so this rule only ever sees a record value's
+    /// selection (`r.field`, `(f x).field`, `M.r.field`).
     fn parse_expr_atom_dotted(&mut self) -> PResult<Expr> {
         let mut expr = self.parse_expr_atom()?;
 
@@ -3699,6 +3707,8 @@ impl Parser {
             self.peek(),
             Token::Ident(_)
                 | Token::UpperIdent(_)
+                | Token::QualIdent(_)
+                | Token::QualUpperIdent(_)
                 | Token::IntLit(_)
                 | Token::BigIntLit(_)
                 | Token::NumLit(_)
@@ -3800,8 +3810,10 @@ impl Parser {
         // so `(-a + b)` is `(negate a) + b` and `(-a * b)` is
         // `negate (a * b)`, not a blanket negation of the whole
         // body.
-        if let Token::Operator(op) = self.peek().clone() {
+        if let Token::Operator(op) | Token::QualOperator(op) = self.peek().clone() {
             let bare_op = self.nth(1).token == Token::RightParen;
+            // Only the bare `-` is prefix minus; a qualified `M.-` is an
+            // ordinary operator, as in GHC.
             if op != "-" || bare_op {
                 let op_span = {
                     let l = self.peek_loc();
@@ -3834,7 +3846,7 @@ impl Parser {
                 Span::new(l.line, l.col)
             };
             self.advance();
-            let name = self.expect_ident()?;
+            let name = self.expect_backtick_name()?;
             self.expect(&Token::Backtick)?;
             if self.at(&Token::RightParen) {
                 // (`name`) — operator as function
@@ -3875,7 +3887,7 @@ impl Parser {
         // satisfy the section-operand precedence rule — `(a * b +)` is
         // legal, `(a + b *)` is not — which is checked when the chain is
         // grouped (`Expr::Section`).
-        if let Token::Operator(op) = self.peek().clone()
+        if let Token::Operator(op) | Token::QualOperator(op) = self.peek().clone()
             && self.nth(1).token == Token::RightParen
         {
             let op_span = {
@@ -3893,7 +3905,7 @@ impl Parser {
 
         // (expr `name`) — backtick left section: \x -> expr `name` x
         if self.at(&Token::Backtick)
-            && let Token::Ident(_) = &self.nth(1).token
+            && let Token::Ident(_) | Token::QualIdent(_) = &self.nth(1).token
             && self.nth(2).token == Token::Backtick
             && self.nth(3).token == Token::RightParen
         {
@@ -3902,7 +3914,7 @@ impl Parser {
                 Span::new(l.line, l.col)
             };
             self.advance(); // consume first backtick
-            let name = self.expect_ident()?;
+            let name = self.expect_backtick_name()?;
             self.advance(); // consume second backtick
             self.advance(); // consume )
             return Ok(Expr::Section {
@@ -4354,6 +4366,8 @@ impl Parser {
                 | Token::LeftParen
                 | Token::LeftBracket
                 | Token::UpperIdent(_)
+                | Token::QualUpperIdent(_)
+                | Token::QualIdent(_)
                 | Token::IntLit(_)
                 | Token::BigIntLit(_)
                 | Token::NumLit(_)
@@ -4723,14 +4737,39 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Var(name))
             }
-            Token::UpperIdent(name) => {
+            // A module-qualified variable: `M.lookup`, `P.print`.
+            Token::QualIdent(name) => {
                 self.advance();
-                // A module-qualified constructor: `M.Just`, `M.Rect`.
-                let name = self.try_parse_qualified_tail(&name).unwrap_or(name);
+                Ok(Expr::Var(name))
+            }
+            // A constructor, bare or module-qualified (`M.Just`, `M.Rect`).
+            Token::UpperIdent(name) | Token::QualUpperIdent(name) => {
+                self.advance();
                 self.parse_con_atom(name)
             }
             Token::LeftParen => self.parse_paren_expr(),
             Token::LeftBracket => self.parse_list_expr(),
+            // `[Monday..]`: the lexer read `Monday..` as the qualified
+            // operator `.` of a module `Monday` (Haskell 2010 §2.4, exactly
+            // GHC's reading), so no expression starts here. Said in those
+            // words, with the spelling that means the range.
+            Token::QualOperator(op) => {
+                let mut diag = self.err_expected("expression");
+                let bare = crate::lexer::unqualified(&op);
+                let module = crate::lexer::qualifier(&op).unwrap_or("");
+                diag.notes.push(format!(
+                     "'{op}' is one lexeme: the operator '{bare}' qualified with the module \
+                     name '{module}' (a qualified name is written without spaces, so a '.' \
+                     glued to a constructor name is a qualifier, not an operator)"
+                ));
+                if bare == "." {
+                    diag.notes.push(format!(
+                         "for an enumeration range write a space before the dots: \
+                         '[{module} ..]'"
+                    ));
+                }
+                Err(diag)
+            }
             Token::If => {
                 self.advance();
                 let cond = self.parse_expr()?;
@@ -4782,9 +4821,8 @@ impl Parser {
     }
 
     fn parse_pattern_inner(&mut self) -> PResult<Pattern> {
-        let lhs = if let Token::UpperIdent(name) = self.peek().clone() {
+        let lhs = if let Token::UpperIdent(name) | Token::QualUpperIdent(name) = self.peek().clone() {
             self.advance();
-            let name = self.try_parse_qualified_tail(&name).unwrap_or(name);
             // `True` and `False` take no arguments here (as they always
             // have): a following atom is the next pattern. Which entity
             // they denote is decided by import resolution, which turns the
@@ -4822,7 +4860,7 @@ impl Parser {
     }
 
     fn is_pattern_start(&self) -> bool {
-        self.is_pattern_atom_start() || matches!(self.peek(), Token::UpperIdent(_))
+        self.is_pattern_atom_start()
     }
 
     /// Can the next token begin a case alternative's pattern? A pattern
@@ -4853,6 +4891,12 @@ impl Parser {
                 // `T R (T R a x b) y c`. Constructors with arguments must be
                 // parenthesized in argument position.
                 | Token::UpperIdent(_)
+                | Token::QualUpperIdent(_)
+                // A qualified variable starts no pattern, but it stands
+                // where one would: `parse_pattern_atom` reports it as GHC
+                // does ("Qualified name in binding position") instead of
+                // the pattern list ending in front of it.
+                | Token::QualIdent(_)
         ) {
             return true;
         }
@@ -4977,11 +5021,12 @@ impl Parser {
             }
             // A constructor in atom position is nullary. Constructors with arguments must be parenthesized to
             // appear in argument position, e.g. `(T R a x b)`.
-            Token::UpperIdent(name) => {
+            Token::UpperIdent(name) | Token::QualUpperIdent(name) => {
                 self.advance();
-                let name = self.try_parse_qualified_tail(&name).unwrap_or(name);
                 Ok(Pattern::Constructor { name, args: vec![] })
             }
+            // A pattern variable binds a name; a qualified one cannot.
+            Token::QualIdent(name) => Err(self.qualified_binder_error(&name)),
             _ => Err(self.err_expected("pattern")),
         }
     }
@@ -4994,8 +5039,55 @@ impl Parser {
                 self.advance();
                 Ok(name)
             }
+            // Every caller wants the name of something this construct
+            // introduces — a binder, a parameter, a field label, a type
+            // variable — and a qualified spelling can only refer to an
+            // imported entity.
+            Token::QualIdent(name) => Err(self.qualified_binder_error(&name)),
             _ => Err(self.err_expected("identifier")),
         }
+    }
+
+    /// A name in operator position between backticks: a variable, bare or
+    /// qualified (``x `O.plus` y``, Haskell 2010 §3: `qop → qvarop`).
+    fn expect_backtick_name(&mut self) -> PResult<String> {
+        match self.peek().clone() {
+            Token::Ident(name) | Token::QualIdent(name) => {
+                self.advance();
+                Ok(name)
+            }
+            _ => Err(self.err_expected("identifier")),
+        }
+    }
+
+    /// A module name: one `conid` or a dotted chain of them, which the
+    /// lexer hands over as one `QualUpperIdent` (`Data.Map`).
+    fn expect_module_name(&mut self) -> PResult<String> {
+        match self.peek().clone() {
+            Token::UpperIdent(name) | Token::QualUpperIdent(name) => {
+                self.advance();
+                Ok(name)
+            }
+            _ => Err(self.err_expected("module name")),
+        }
+    }
+
+    /// GHC's "Qualified name in binding position": a definition, an
+    /// equation's parameter, a lambda's parameter or a pattern binds a NEW
+    /// name of this module, and a qualified spelling refers to an entity of
+    /// the module imported under its qualifier — there is nothing it could
+    /// bind. Haskell 2010 §4.4.3 (`funlhs → var apat {apat}`, `pat` over
+    /// `var`) admits only unqualified variables there.
+    fn qualified_binder_error(&self, name: &str) -> Box<Diagnostic> {
+        let mut diag = self.err_here(format!("Qualified name in binding position: {name}"));
+        let bare = crate::lexer::unqualified(name);
+        let module = crate::lexer::qualifier(name).unwrap_or("");
+        diag.notes.push(format!(
+            "'{name}' is a qualified name — the '{bare}' of a module imported as \
+             '{module}' — and refers to that module's entity; a binding introduces a \
+             name of this module, written unqualified: '{bare}'"
+        ));
+        diag
     }
 
     fn expect_upper_ident(&mut self) -> PResult<String> {

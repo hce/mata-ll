@@ -314,10 +314,19 @@ makes visible unqualified enter the importing module's scope; the rest
 are reachable through an alias (`M.filter`) while a bare `filter` keeps
 its Prelude meaning. Qualified constructors (`M.Just`, `M.Rect 1 2`, in
 expressions and patterns), class methods and record fields resolve
-through an alias too. An alias names what the modules imported under it
-export, as in GHC; a plain `import A` does not put `A.f` in scope
-(Haskell 2010 does), and a qualified name must be written with the
-declared alias.
+through an alias too, as are qualified operators in every position
+(`1 M.<+> 2`, `(M.<+> 1)`, `(1 M.<+>)`, `(M.<+>)`, `` x `M.plus` y ``,
+`P..` for the Prelude's composition), with the fixity the defining module
+declared. A qualified name is one lexeme, as in Haskell 2010 §2.4: `M.f`
+is written without spaces, `Just.f` is the qualified name `Just.f` (not
+`Just . f`), `[Monday..]` is the qualified operator `Monday..` (write
+`[Monday ..]`), and an import alias may share its spelling with a data
+constructor (`M.f` and `f M` are different tokens), all exactly GHC's
+reading. An alias names what the modules imported under it export, as in
+GHC; a plain `import A` does not put `A.f` in scope (Haskell 2010 does),
+a qualified name must be written with the declared alias, and the alias
+is a single name (`as M`; Haskell 2010's dotted `as Data.Map` is refused
+at the import).
 
 `import Prelude hiding (lookup)`, `import Prelude (print, (+))` and
 `import qualified Prelude as P` work as in Haskell 2010 §5.6.1: they
@@ -705,18 +714,6 @@ part like a written one: `deriving` records GHC's derived context (the
 class at each parameter that occurs in a field, nothing for a phantom
 parameter), and the fallback composes the instance's dictionary from
 it.
-
-## An import alias that names a data constructor loses its qualified form
-
-In GHC, module aliases live in their own namespace: after
-`import qualified Foo as M` alongside `data Mode = M | N`, both `f M`
-(the constructor) and `M.f` (the qualified reference) work. mata-ll
-parses `M.f` and `f M` into the same shape, so the two meanings cannot
-be told apart when `M` is also a visible data constructor. The
-constructor wins — `f M` means what it means without the import — and
-qualified references through that alias do not resolve. The compiler
-warns at the colliding import; renaming the alias restores the
-qualified form.
 
 ## Orphan instances: only the top-level module is checked
 

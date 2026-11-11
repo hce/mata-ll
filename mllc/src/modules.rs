@@ -978,56 +978,17 @@ impl ModuleLoader {
             }
         }
 
-        // A field selection from a constructor `M.f` and a qualified
-        // reference `M.f` parse to the SAME shape — `App(Var <field f>,
-        // Con "M")` — so when an alias name is also a data constructor in
-        // scope the two meanings cannot be told apart here. The constructor
-        // wins: the selection is the meaning the expression already has
-        // without the alias, and collapsing it produced a bogus "Unbound
-        // variable: M.f" (or a silent call of the wrong module's function).
-        // Qualified references through such an alias are therefore
-        // unavailable — a deviation from GHC, whose module aliases live in
-        // a separate namespace — so warn, pointing at the rename that
-        // restores them.
-        let qualified_aliases: HashSet<String> = alias_table.keys()
-            .filter(|a| {
-                let keep = !own.con.contains_key(*a) && !imp.con.contains_key(*a);
-                if !keep {
-                    self.warnings.push(crate::types::Diagnostic {
-                        kind: crate::types::DiagnosticKind::Other(format!(
-                            "import alias '{}' is also a data constructor; \
-                             qualified references '{}.name' will not resolve",
-                            a, a)),
-                        context: None,
-                        span: None,
-                        file: None,
-                        notes: vec![format!(
-                            "in mata-ll, a qualified reference '{a}.f' and an \
-                             application 'f {a}' parse identically, so the \
-                             constructor meaning wins. GHC keeps module \
-                             aliases in a separate namespace and allows both; \
-                             rename the alias (e.g. 'as {a}M') to use \
-                             qualified references.")],
-                        baseline: false, excerpt: None, names: None,
-                    });
-                }
-                keep
-            })
-            .cloned()
-            .collect();
-        // Use sites in this module: `A.f` (collapsed from the field-access
-        // shape), `A.T` and `A.C` resolve through the alias table. A
-        // qualified TYPE or CONSTRUCTOR is unambiguous, so it resolves
-        // through every alias, including one a constructor shadows at the
-        // value level. A qualified name the table does not hold is given
-        // no entry here; the rewrite reports it as unbound (`Rename::v`,
-        // `Rename::t`, `Rename::c`) rather than leave a spelling that could
-        // coincide with some module's canonical name.
+        // Use sites in this module: `A.f`, `A.<+>`, `A.T` and `A.C` — each
+        // one lexeme, spelled as written (lexer.rs, `Token::QualIdent`) —
+        // resolve through the alias table. An alias that is also a data
+        // constructor in scope is no conflict: `A.f` is the qualified name
+        // and `f A` the application, as in GHC, where module aliases have
+        // their own namespace. A qualified name the table does not hold is
+        // given no entry here; the rewrite reports it as unbound
+        // (`Rename::v`, `Rename::t`, `Rename::c`) rather than leave a
+        // spelling that could coincide with some module's canonical name.
         for (alias, names) in &alias_table {
             for ns in NAMESPACES {
-                if ns == Ns::Val && !qualified_aliases.contains(alias) {
-                    continue;
-                }
                 for (n, ents) in names.get(ns) {
                     tables.get_mut(ns).insert(format!("{alias}.{n}"), match ents.as_slice() {
                         [one] => one.canon.clone(),
@@ -1056,12 +1017,7 @@ impl ModuleLoader {
             if matches!(decl, Decl::Import { .. }) {
                 continue;
             }
-            let d = if qualified_aliases.is_empty() {
-                decl.clone()
-            } else {
-                rewrite_qualified_uses_decl(decl.clone(), &qualified_aliases)
-            };
-            own_decls.push(rename.decl(&d));
+            own_decls.push(rename.decl(decl));
         }
         syntax_errors.extend(chain_errors.into_inner());
         if !syntax_errors.is_empty() {
@@ -1871,7 +1827,7 @@ impl Rename<'_> {
         if bound.contains(name) {
             return self.local(name);
         }
-        let qualified = self.is_alias_qualified(name);
+        let qualified = Self::is_qualified_spelling(name);
         match self.vals.get(name) {
             // A qualified reference that resolves to a bare name (a
             // Prelude function, field or method reached through a
@@ -1893,11 +1849,36 @@ impl Rename<'_> {
                 })
             }
             Some(target) => target.clone(),
-            // `A.name` where the alias `A` offers no `name`. Left as
-            // written it could coincide with the canonical name of some
-            // module `A`'s private declaration; it is unbound.
-            None if qualified => self.placeholders.make(ScopeError::Unbound(name.to_string())),
+            // `A.name` where the alias `A` offers no `name`, or where no
+            // import declares an alias `A`. Left as written it could
+            // coincide with the canonical name of some module `A`'s private
+            // declaration; it is unbound, and the note says which of the
+            // two it is (GHC: "The module ‘X’ does not export ‘name’" /
+            // "No module named ‘A’ is imported").
+            None if qualified => self.placeholders.make(self.unbound_qualified("Unbound variable", name)),
             None => name.to_string(),
+        }
+    }
+
+    /// The scope error for a qualified reference nothing in scope answers:
+    /// the message `what: name`, then why — the alias names modules that do
+    /// not export the name, or no import declares the alias at all.
+    fn unbound_qualified(&self, what: &str, name: &str) -> ScopeError {
+        let module = crate::lexer::qualifier(name).unwrap_or("");
+        let bare = crate::lexer::unqualified(name);
+        let note = if self.aliases.contains(module) {
+            format!("the module imported as '{module}' does not export '{bare}'")
+        } else {
+            format!(
+                 "no module is imported under the name '{module}'; a qualified name \
+                 refers to a module through the alias of its `import qualified … as \
+                 {module}`"
+            )
+        };
+        ScopeError::Explained {
+            name: name.to_string(),
+            message: format!("{what}: {name}"),
+            notes: vec![note],
         }
     }
 
@@ -1944,12 +1925,13 @@ impl Rename<'_> {
         }
     }
 
-    /// Is `name` an alias-qualified value spelling (`A.f`, as collapsed by
-    /// `rewrite_qualified_uses_decl`)? An alias is a single identifier, so
-    /// the first dot ends it.
-    fn is_alias_qualified(&self, name: &str) -> bool {
-        name.split_once('.')
-            .is_some_and(|(head, rest)| !rest.is_empty() && self.aliases.contains(head))
+    /// Is `name` a module-qualified spelling (`A.f`, `A.<+>`, `A.T`,
+    /// `Data.Map.insert`)? The lexer produces these as single lexemes
+    /// (`Token::QualIdent` and kin), spelled as written: a constructor-name
+    /// head followed by a dot and a non-empty rest. No canonical name has
+    /// this shape (`ast::MINT` separates a canonical name's parts).
+    fn is_qualified_spelling(name: &str) -> bool {
+        crate::lexer::qualifier(name).is_some()
     }
 
     /// A declared value name: never shadowed.
@@ -1961,15 +1943,12 @@ impl Rename<'_> {
         if let Some(target) = self.tys.get(name) {
             return target.clone();
         }
-        // A module-qualified type name (`M.Map`: the parser spells it as
-        // one dotted name) the scope does not hold. Left as written it
-        // could coincide with a canonical type name; it is unknown. A
-        // type-level string literal (`"math.sqrt"`) is not a name.
-        let qualified = name.split_once('.').is_some_and(|(head, rest)| {
-            !rest.is_empty() && head.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-        });
-        if qualified {
-            return self.placeholders.make(ScopeError::UnknownType(name.to_string()));
+        // A module-qualified type name (`M.Map`, one lexeme) the scope
+        // does not hold. Left as written it could coincide with a canonical
+        // type name; it is unknown. A type-level string literal
+        // (`"math.sqrt"`) is not a name.
+        if Self::is_qualified_spelling(name) {
+            return self.placeholders.make(self.unbound_qualified("Unknown type", name));
         }
         name.to_string()
     }
@@ -1990,11 +1969,8 @@ impl Rename<'_> {
             return target.clone();
         }
         // `A.C` where the alias `A` offers no `C`: unbound, as for values.
-        let qualified = name.split_once('.').is_some_and(|(head, rest)| {
-            !rest.is_empty() && head.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-        });
-        if qualified {
-            return self.placeholders.make(ScopeError::UnboundConstructor(name.to_string()));
+        if Self::is_qualified_spelling(name) {
+            return self.placeholders.make(self.unbound_qualified("Unknown constructor", name));
         }
         name.to_string()
     }
@@ -2011,9 +1987,10 @@ impl Rename<'_> {
     }
 
     /// A name used as an operator or in operator position is a
-    /// constructor when spelled like one (`Node`, `:|`).
+    /// constructor when spelled like one (`Node`, `:|`, `M.:|`): the name
+    /// part decides, not a module qualifier (`M.plus` is a variable).
     fn is_con_spelling(name: &str) -> bool {
-        name.chars().next().is_some_and(|c| c.is_uppercase() || c == ':')
+        crate::lexer::unqualified(name).chars().next().is_some_and(|c| c.is_uppercase() || c == ':')
     }
 
     /// An operator-position reference (`a `op` b`, `(op)`), bound in the
@@ -2512,79 +2489,6 @@ impl Rename<'_> {
 /// Collect the variable names bound by a pattern (for scope tracking).
 fn collect_pattern_vars(p: &Pattern, out: &mut HashSet<String>) {
     p.for_each_var(&mut |v| { out.insert(v.to_string()); });
-}
-
-/// Rewrite qualified use-sites in one of the importing module's declarations.
-/// `M.foo` parsed as the field-selection shape `App(Var <field foo>, Con
-/// "M")` (`ast::field_selection`); where `M` is a known qualified alias,
-/// collapse it to `Var "M.foo"`.
-fn rewrite_qualified_uses_decl(decl: Decl, aliases: &HashSet<String>) -> Decl {
-    let clauses_of = |cs: Vec<Clause>| -> Vec<Clause> {
-        cs.into_iter().map(|c| rewrite_uses_clause(c, aliases)).collect()
-    };
-    match decl {
-        Decl::FunDef { name, clauses } => Decl::FunDef { name, clauses: clauses_of(clauses) },
-        // Instance method bodies and class default bodies can also
-        // reference qualified imports.
-        Decl::InstanceDecl { class_name, target_type, context, methods } => Decl::InstanceDecl {
-            class_name, target_type, context,
-            methods: methods.into_iter().map(|m| InstanceMethod {
-                name: m.name,
-                clauses: clauses_of(m.clauses),
-            }).collect(),
-        },
-        Decl::ClassDecl { name, type_var, superclasses, methods } => Decl::ClassDecl {
-            name, type_var, superclasses,
-            methods: methods.into_iter().map(|m| ClassMethod {
-                name: m.name,
-                ty: m.ty,
-                default_clauses: m.default_clauses.map(&clauses_of),
-            }).collect(),
-        },
-        other => other,
-    }
-}
-
-fn rewrite_uses_clause(c: Clause, aliases: &HashSet<String>) -> Clause {
-    Clause {
-        patterns: c.patterns,
-        guards: c.guards.into_iter().map(|g| Guard {
-            condition: rewrite_uses_expr(g.condition, aliases),
-            body: rewrite_uses_expr(g.body, aliases),
-        }).collect(),
-        body: c.body.map(|b| rewrite_uses_expr(b, aliases)),
-        where_binds: c.where_binds.into_iter()
-            .map(|ld| rewrite_uses_localdef(ld, aliases)).collect(),
-        span: c.span,
-        raw_guards: { debug_assert!(c.raw_guards.is_none(), "raw guards survived parsing"); None },
-    }
-}
-
-fn rewrite_uses_localdef(ld: LocalDef, aliases: &HashSet<String>) -> LocalDef {
-    LocalDef {
-        name: ld.name,
-        patterns: ld.patterns,
-        body: rewrite_uses_expr(ld.body, aliases),
-        sig: ld.sig,
-    }
-}
-
-fn rewrite_uses_expr(e: Expr, aliases: &HashSet<String>) -> Expr {
-    // Recurse first (post-order), then collapse the field-access shape.
-    let e = e.map_subexprs(&mut |c| rewrite_uses_expr(c, aliases));
-    // `M.f` parses as the selection of field `f` from `M` (`App(Var
-    // <field f>, Con M)`); with a known alias `M` it is the qualified
-    // reference `M.f`. (Only a selection forms one: an application `f M`
-    // and a compiler-written head — the `enumFrom` of `[A ..]` — do not.)
-    if let Expr::App(f, x) = &e
-        && let Expr::Var(field) = f.as_ref()
-        && let Some(field) = crate::ast::of_field_selection(field)
-        && let Expr::Con(name) = x.as_ref()
-        && aliases.contains(name)
-    {
-        return Expr::Var(format!("{}.{}", name, field));
-    }
-    e
 }
 
 /// A structural fingerprint of a type as written, with variable names

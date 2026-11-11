@@ -410,6 +410,7 @@ mll_lib_test!(entities_runtime_spellings, "entities_runtime_spellings.mll");
 mll_test!(fixity_own_operator, "fixity_own_operator.mll");
 mll_test!(fixity_not_imported, "fixity_not_imported.mll");
 mll_test!(fixity_qualified_only, "fixity_qualified_only.mll");
+mll_test!(qualified_lexemes, "qualified_lexemes.mll");
 mll_test!(fixity_local_binders, "fixity_local_binders.mll");
 mll_test!(fixity_class_method, "fixity_class_method.mll");
 mll_test!(fixity_reexport, "fixity_reexport.mll");
@@ -1168,6 +1169,7 @@ fn mll_case_registry_is_complete() {
         "FixityListed.mll",
         "FixityHidden.mll",
         "FixityQual.mll",
+        "QualOps.mll",
         "FixityClass.mll",
         "FixityUmbrella.mll",
         "FixityByName.mll",

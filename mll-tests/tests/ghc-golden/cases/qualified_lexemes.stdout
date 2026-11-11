@@ -1,0 +1,29 @@
+(3,7)
+7
+5
+[2,3]
+[9,8]
+123
+False
+[11,21]
+[51,52]
+78
+16
+True
+15
+15
+(1,2,2)
+("circle 2","rect 3x4")
+(0,1)
+(12,[3,10])
+Pair {first = 2, second = 1}
+(16,9)
+[2,3]
+[2,3]
+"-5"
+(5,"-6")
+([Just 2],[Just 2])
+(Just 3,Just (-1))
+(Just 4,-4)
+([Red,Green,Blue],[Red,Green,Blue],[Red,Green,Blue])
+(1.5,2)

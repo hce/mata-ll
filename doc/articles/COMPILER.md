@@ -70,6 +70,38 @@ Two ordering facts that are easy to get wrong and matter:
   `parse error on input 't'` (`parse_error_on_input`, `err_expected`),
   with a note stating the rule and the column.
 
+- **A qualified name is one lexeme.** Haskell 2010 §2.4 makes `M.x`,
+  `M.Just`, `Data.Map.Map` and `O.<+>` single tokens (`qvarid`, `qconid`,
+  `qvarsym`, `modid → {conid .} conid`), and so does `lexer::lex`: after
+  a constructor name, a `.` glued to a following name joins it — a conid
+  extends the module path, a varid closes `Token::QualIdent`, a symbol
+  run closes `Token::QualOperator`, all under maximal munch
+  (`lex_qualifier_tail`). The dot stays the composition operator with a
+  space on either side (`Just . f`, `Just .f`), before a digit or a
+  bracket (`(Just.)` is a left section), before a keyword (`M.where`),
+  a reserved operator (`M.->`) or a comment (`M.--`); a lowercase head
+  is never a module (`r.field` stays the parser's field access). This is
+  the whole mechanism — the parser consumes the three tokens wherever a
+  name may be referred to (atoms, infix chains, sections, backticks,
+  patterns, types, record construction, module headers and imports,
+  whose dotted names arrive as one `QualUpperIdent`) and refuses them
+  wherever a name is bound (`qualified_binder_error`: GHC's "Qualified
+  name in binding position"; a qualified signature and a qualified
+  fixity declaration have their own errors). Import resolution sees the
+  spelling as written, `Rename::v`/`t`/`c` look it up in the alias
+  tables, and a qualified spelling nothing answers is unbound with the
+  reason (`Rename::unbound_qualified`: the alias's modules do not export
+  the name / no import declares the alias). Consequences GHC shares:
+  `Just.f` is the qualified name `Just.f`, `[Monday..]` is the qualified
+  operator `Monday..` (write `[Monday ..]`), and an import alias may
+  share its spelling with a data constructor — `M.f` and `f M` never
+  meet. Until 2026-11 the qualified-identifier case was assembled in the
+  parser from adjacent tokens, the lowercase case by collapsing the
+  field-access shape `App(Var <field f>, Con M)` in import resolution,
+  and the operator case did not exist (the lexer had glued `.<+>` into
+  one operator), which cost `O.<+>`, `` `O.plus` `` and the alias that
+  shares a constructor's name.
+
 - **"Declared twice" is decided in the parser, per source file.** Stages 3
   and 4 merge the Prelude, every import and the user's file into ONE
   declaration list. Stage 3 gives every module's declarations canonical
@@ -1311,8 +1343,9 @@ apart is done entirely in `modules.rs`, before the merge
   `(.f)` is written by the parser as a reserved spelling
   (`ast::field_selection`) and bound to a field in scope — unqualified,
   else through the one alias offering a field `f` — past any local binder
-  of that spelling (`Rename::field_selection`); `M.f` with `M` an alias
-  is the same shape and becomes the qualified reference. Instances have no names: every instance of
+  of that spelling (`Rename::field_selection`); a qualified reference
+  `M.f` is a different token altogether (one lexeme, see the lexer
+  invariant above) and resolves through the alias tables. Instances have no names: every instance of
   the program is in force everywhere, and two modules' private classes
   `Pretty` are two classes, each with its own `instance Pretty Int`. The
   constructor of an unsettled `newtype N = <type>` is settled here too

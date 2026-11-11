@@ -58,6 +58,29 @@ pub enum Token {
     UpperIdent(String),  // uppercase start: type, constructor
     Operator(String),    // +, -, *, etc.
 
+    // Module-qualified names. Haskell 2010 §2.4 makes a qualified name ONE
+    // lexeme — `qvarid → [modid .] varid`, `qconid → [modid .] conid`,
+    // `qvarsym → [modid .] varsym`, `modid → {conid .} conid` — so `M.x`,
+    // `Data.Map.Map` and `O.<+>` are single tokens, spelled as written. The
+    // dot between the module and the name is the qualifier only when
+    // nothing separates it from either side; `Just . f`, `Just .f` and
+    // `Just. f` keep the dot as the composition operator. Which module a
+    // qualifier names is import resolution's business (`modules.rs`): the
+    // lexer just hands over the lexeme, as GHC's does. The parser accepts
+    // these wherever a name is REFERRED to and rejects them where a name is
+    // BOUND, which is GHC's "Qualified name in binding position".
+    /// `M.x`, `Data.Map.insert` — a qualified variable.
+    QualIdent(String),
+    /// `M.Just`, `Data.Map.Map` — a qualified constructor or type; also the
+    /// spelling of every dotted module name (`module Data.Map where`,
+    /// `import Data.Map`), which the parser splits into its segments.
+    QualUpperIdent(String),
+    /// `M.+`, `M..` (the qualified composition operator), `M.:+` — a
+    /// qualified operator. The operator part is maximal-munched like a bare
+    /// one, so `Monday..` is this token — GHC reads `[Monday..]` the same
+    /// way, which is why the range needs a space.
+    QualOperator(String),
+
     // Keywords
     KwModule,
     Import,
@@ -127,6 +150,9 @@ impl fmt::Display for Token {
             Token::Ident(s) => return write!(f, "'{}'", s),
             Token::UpperIdent(s) => return write!(f, "'{}'", s),
             Token::Operator(s) => return write!(f, "'{}'", s),
+            Token::QualIdent(s) | Token::QualUpperIdent(s) | Token::QualOperator(s) => {
+                return write!(f, "'{}'", s)
+            }
             Token::KwModule => "module",
             Token::Import => "import",
             Token::Qualified => "qualified",
@@ -558,79 +584,30 @@ pub fn lex_with_pragmas(
         // Identifier or keyword
         if ch.is_alphabetic() || ch == '_' {
             let start = pos;
-            while pos < chars.len() && (chars[pos].is_alphanumeric() || chars[pos] == '_' || chars[pos] == '\'') {
+            while pos < chars.len() && is_ident_char(chars[pos]) {
                 pos += 1;
                 col += 1;
             }
             let word: String = chars[start..pos].iter().collect();
-            let token = match word.as_str() {
-                "module" => Token::KwModule,
-                "import" => Token::Import,
-                "qualified" => Token::Qualified,
-                // "as" not reserved — usable as variable name (the parser checks
-                // Ident("as") contextually: qualified imports and record-field
-                // LuaDict key renames `field as "key" :: T`)
+            let mut token = word_token(&word, tok_line, tok_col)?;
 
-                "data" => Token::Data,
-                "newtype" => Token::Newtype,
-                "class" => Token::Class,
-                "instance" => Token::Instance,
-                "where" => Token::Where,
-                "let" => Token::Let,
-                "in" => Token::In,
-                "case" => Token::Case,
-                "of" => Token::Of,
-                "if" => Token::If,
-                "then" => Token::Then,
-                "else" => Token::Else,
-                "do" => Token::Do,
-                "intrinsic" => Token::Intrinsic,
-                "export" => Token::Export,
-                "type" => Token::KwType,
-                "deriving" => Token::Deriving,
-                "family" => Token::Family,
-                "infixl" => Token::Infixl,
-                "infixr" => Token::Infixr,
-                "infix" => Token::Infix,
-                "True" => Token::UpperIdent("True".to_string()),
-                "False" => Token::UpperIdent("False".to_string()),
-                "_" => Token::Underscore,
-                _ => {
-                    // The double-underscore prefix is the compiler's fresh-name
-                    // namespace (__lamN, __tup_N, __compN, __sec, …): desugaring
-                    // substitutes those names without renaming, so a user binder
-                    // spelled the same way would be silently captured
-                    // (`f __sec = (__sec +)` once desugared to
-                    // `\__sec -> __sec + __sec`). GHC never reserves source
-                    // names because its desugarer renames — mata-ll reserves
-                    // the prefix instead and says so loudly.
-                    if word.starts_with("__") {
-                        let mut diag = err_at(
-                            format!(
-                                "Identifiers starting with '__' are reserved \
-                                 for compiler-generated names: '{}'",
-                                word
-                            ),
-                            tok_line, tok_col,
-                        );
-                        diag.notes.push(
-                            "desugaring creates '__'-prefixed helper names \
-                             (lambda-pattern binders, tuple-binding scrutinees, \
-                             section operands) and substitutes them without \
-                             renaming, so a user name spelled the same way \
-                             would be silently captured; use a single leading \
-                             underscore or another name"
-                                .to_string(),
-                        );
-                        return Err(diag);
-                    }
-                    if word.starts_with(|c: char| c.is_uppercase()) {
-                        Token::UpperIdent(word)
-                    } else {
-                        Token::Ident(word)
-                    }
-                }
-            };
+            // A constructor name followed by an unspaced `.` may be the
+            // module qualifier of a qualified name (Haskell 2010 §2.4, see
+            // `Token::QualIdent`): `M.x`, `M.Just`, `M.+`, and through
+            // further conid segments `Data.Map.insert`. Maximal munch
+            // decides, exactly as in GHC's lexer: the longest lexeme at `M`
+            // wins, so the dot joins the name whenever a name can follow it
+            // and stays an operator otherwise (`Just .f` has a space; `M.1`,
+            // `(Just.)` have no name after the dot).
+            while let Token::UpperIdent(_) | Token::QualUpperIdent(_) = &token {
+                let Some(qualified) = lex_qualifier_tail(&chars, pos, &token, line, col)? else {
+                    break;
+                };
+                let (next_token, consumed) = qualified;
+                pos += consumed;
+                col += consumed;
+                token = next_token;
+            }
             tokens.push(Located {
                 token,
                 line: tok_line,
@@ -800,6 +777,182 @@ fn is_line_comment_start(chars: &[char], pos: usize) -> bool {
 fn is_operator_char(c: char) -> bool {
     matches!(c, '!' | '#' | '$' | '%' | '&' | '*' | '+' | '.' | '/' |
                 '<' | '=' | '>' | '?' | '@' | '^' | '|' | '-' | '~' | ':')
+}
+
+/// A character that continues an identifier (Haskell 2010 §2.4: letters,
+/// digits, `_` and `'`).
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '\''
+}
+
+/// Haskell 2010 §2.4 `reservedop`: the symbol sequences that are never an
+/// operator name, so a module qualifier cannot precede them (`M.->` is the
+/// constructor `M` followed by the operator `.->`, not a qualified arrow).
+/// `-` alone is not reserved — `M.-` is the qualified minus, as in GHC.
+fn is_reserved_op(op: &str) -> bool {
+    matches!(op, ".." | ":" | "::" | "=" | "\\" | "|" | "<-" | "->" | "@" | "~" | "=>")
+}
+
+/// The token a word (an identifier-shaped lexeme) stands for: a keyword, a
+/// constructor name, a variable name, or the `_` wildcard. One classifier
+/// for the bare word and for the name part of a qualified name, so
+/// `M.where` cannot become a qualified variable (a keyword is no `varid`).
+fn word_token(word: &str, line: usize, col: usize) -> Result<Token, Box<Diagnostic>> {
+    Ok(match word {
+        "module" => Token::KwModule,
+        "import" => Token::Import,
+        "qualified" => Token::Qualified,
+        // "as" not reserved — usable as variable name (the parser checks
+        // Ident("as") contextually: qualified imports and record-field
+        // LuaDict key renames `field as "key" :: T`)
+
+        "data" => Token::Data,
+        "newtype" => Token::Newtype,
+        "class" => Token::Class,
+        "instance" => Token::Instance,
+        "where" => Token::Where,
+        "let" => Token::Let,
+        "in" => Token::In,
+        "case" => Token::Case,
+        "of" => Token::Of,
+        "if" => Token::If,
+        "then" => Token::Then,
+        "else" => Token::Else,
+        "do" => Token::Do,
+        "intrinsic" => Token::Intrinsic,
+        "export" => Token::Export,
+        "type" => Token::KwType,
+        "deriving" => Token::Deriving,
+        "family" => Token::Family,
+        "infixl" => Token::Infixl,
+        "infixr" => Token::Infixr,
+        "infix" => Token::Infix,
+        "True" => Token::UpperIdent("True".to_string()),
+        "False" => Token::UpperIdent("False".to_string()),
+        "_" => Token::Underscore,
+        _ => {
+            // The double-underscore prefix is the compiler's fresh-name
+            // namespace (__lamN, __tup_N, __compN, __sec, …): desugaring
+            // substitutes those names without renaming, so a user binder
+            // spelled the same way would be silently captured
+            // (`f __sec = (__sec +)` once desugared to
+            // `\__sec -> __sec + __sec`). GHC never reserves source
+            // names because its desugarer renames — mata-ll reserves
+            // the prefix instead and says so loudly.
+            if word.starts_with("__") {
+                let mut diag = err_at(
+                    format!(
+                        "Identifiers starting with '__' are reserved \
+                         for compiler-generated names: '{}'",
+                        word
+                    ),
+                    line, col,
+                );
+                diag.notes.push(
+                    "desugaring creates '__'-prefixed helper names \
+                     (lambda-pattern binders, tuple-binding scrutinees, \
+                     section operands) and substitutes them without \
+                     renaming, so a user name spelled the same way \
+                     would be silently captured; use a single leading \
+                     underscore or another name"
+                        .to_string(),
+                );
+                return Err(diag);
+            }
+            if word.starts_with(|c: char| c.is_uppercase()) {
+                Token::UpperIdent(word.to_string())
+            } else {
+                Token::Ident(word.to_string())
+            }
+        }
+    })
+}
+
+/// One step of the qualified-name rule at `pos` (source position
+/// `line`:`col`), just after the module qualifier `head` (an `UpperIdent`,
+/// or the `QualUpperIdent` of the conid segments read so far). When `chars[pos]` is a `.` immediately followed
+/// by something a name can start with, the result is the longer lexeme and
+/// the number of characters it adds: a conid extends the qualifier
+/// (`Data.Map`), a varid closes a qualified variable (`M.x`), a symbol run
+/// closes a qualified operator (`M.+`). `None` leaves the dot alone, so
+/// the operator lexer reads it next — after a space, before a digit or a
+/// bracket, before a keyword (`M.where`: a keyword is no `varid`), before a
+/// reserved operator (`M.->`), and before a comment-opening dash run
+/// (`M.--`), all exactly the lexemes GHC produces there.
+fn lex_qualifier_tail(
+    chars: &[char],
+    pos: usize,
+    head: &Token,
+    line: usize,
+    col: usize,
+) -> Result<Option<(Token, usize)>, Box<Diagnostic>> {
+    if !(pos + 1 < chars.len() && chars[pos] == '.') {
+        return Ok(None);
+    }
+    let modid = match head {
+        Token::UpperIdent(m) | Token::QualUpperIdent(m) => m.as_str(),
+        _ => return Ok(None),
+    };
+    let next = chars[pos + 1];
+    if next.is_alphabetic() || next == '_' {
+        let mut j = pos + 1;
+        while j < chars.len() && is_ident_char(chars[j]) {
+            j += 1;
+        }
+        let word: String = chars[pos + 1..j].iter().collect();
+        // The name part is classified like a bare word; the reserved `__`
+        // prefix is reported at the name, where the bare word would be.
+        let token = match word_token(&word, line, col + 1)? {
+            Token::UpperIdent(seg) => Token::QualUpperIdent(format!("{modid}.{seg}")),
+            Token::Ident(seg) => Token::QualIdent(format!("{modid}.{seg}")),
+            _ => return Ok(None),
+        };
+        return Ok(Some((token, j - pos)));
+    }
+    if is_operator_char(next) {
+        let mut j = pos + 1;
+        while j < chars.len() && is_operator_char(chars[j]) {
+            j += 1;
+        }
+        let op: String = chars[pos + 1..j].iter().collect();
+        if is_reserved_op(&op) || (op.len() >= 2 && op.chars().all(|c| c == '-')) {
+            return Ok(None);
+        }
+        return Ok(Some((Token::QualOperator(format!("{modid}.{op}")), j - pos)));
+    }
+    Ok(None)
+}
+
+/// The name part of a (possibly) qualified spelling: `x` of `M.x`, `Map`
+/// of `Data.Map.Map`, `.` of `M..`, `+` of `M.+`; a bare name unchanged.
+/// The module qualifier is the run of conid segments each followed by a
+/// dot; the name is what follows the last of them — so a spelling whose
+/// segments are all conids (`M.Just`) names its final segment.
+pub fn unqualified(name: &str) -> &str {
+    let mut rest = name;
+    loop {
+        let Some(head) = rest.chars().next() else { return rest };
+        if !head.is_uppercase() {
+            return rest;
+        }
+        let seg_len = rest.chars().take_while(|c| is_ident_char(*c)).map(char::len_utf8).sum::<usize>();
+        let after = &rest[seg_len..];
+        match after.strip_prefix('.') {
+            Some(tail) if !tail.is_empty() => rest = tail,
+            _ => return rest,
+        }
+    }
+}
+
+/// The module qualifier of a qualified spelling (`M` of `M.x`, `Data.Map`
+/// of `Data.Map.insert`), `None` for a bare name. The complement of
+/// [`unqualified`].
+pub fn qualifier(name: &str) -> Option<&str> {
+    let name_part = unqualified(name);
+    if name_part.len() == name.len() {
+        return None;
+    }
+    Some(&name[..name.len() - name_part.len() - 1])
 }
 
 /// GHC's named ASCII control escapes, indexed so that entry `i` decodes to
@@ -1045,5 +1198,106 @@ mod tests {
             "tokens: {:?}",
             toks.iter().map(|t| format!("{:?}@{}..{}", t.token, t.col, t.end_col)).collect::<Vec<_>>()
         );
+    }
+
+    /// The tokens of one line, without the layout mark and the end marker.
+    fn tokens_of(src: &str) -> Vec<Token> {
+        lex(src)
+            .expect("lexes")
+            .into_iter()
+            .map(|t| t.token)
+            .filter(|t| !matches!(t, Token::Indent(_) | Token::EOF))
+            .collect()
+    }
+
+    fn op(s: &str) -> Token { Token::Operator(s.to_string()) }
+    fn up(s: &str) -> Token { Token::UpperIdent(s.to_string()) }
+    fn id(s: &str) -> Token { Token::Ident(s.to_string()) }
+    fn qid(s: &str) -> Token { Token::QualIdent(s.to_string()) }
+    fn qup(s: &str) -> Token { Token::QualUpperIdent(s.to_string()) }
+    fn qop(s: &str) -> Token { Token::QualOperator(s.to_string()) }
+
+    /// Haskell 2010 §2.4: a conid, a dot and a name with nothing between
+    /// them are ONE lexeme — for variables, constructors and operators,
+    /// through any number of conid segments. `Monday..` is the qualified
+    /// `.` (the reason `[Monday..]` is not a range, in GHC and here).
+    #[test]
+    fn qualified_names_are_single_lexemes() {
+        assert_eq!(
+            tokens_of("M.x Data.Map.insert M.Just Data.Map.Map M.+ M.. M.:+ Monday.. M.-"),
+            vec![
+                qid("M.x"), qid("Data.Map.insert"), qup("M.Just"), qup("Data.Map.Map"),
+                qop("M.+"), qop("M.."), qop("M.:+"), qop("Monday.."), qop("M.-"),
+            ]
+        );
+        // Dotted module names in headers and imports are the same lexeme.
+        assert_eq!(tokens_of("import Data.Map"), vec![Token::Import, qup("Data.Map")]);
+        // `True`/`False` are conids too.
+        assert_eq!(tokens_of("True.x"), vec![qid("True.x")]);
+    }
+
+    /// The dot is the qualifier only when glued to both sides: a space on
+    /// either side, a digit, a bracket, a keyword, a reserved operator or
+    /// a comment-opening dash run after it leave `.` an operator, and a
+    /// lowercase head is never a module name (`x.field` stays the parser's
+    /// field access, `f.g` composition).
+    #[test]
+    fn dot_without_a_qualified_name_stays_an_operator() {
+        assert_eq!(tokens_of("Just . f"), vec![up("Just"), op("."), id("f")]);
+        assert_eq!(tokens_of("Just .f"), vec![up("Just"), op("."), id("f")]);
+        assert_eq!(tokens_of("Just. f"), vec![up("Just"), op("."), id("f")]);
+        assert_eq!(tokens_of("(Just.)"), vec![Token::LeftParen, up("Just"), op("."), Token::RightParen]);
+        assert_eq!(tokens_of("M.1"), vec![up("M"), op("."), Token::IntLit(1)]);
+        assert_eq!(tokens_of("M.where"), vec![up("M"), op("."), Token::Where]);
+        assert_eq!(tokens_of("M._"), vec![up("M"), op("."), Token::Underscore]);
+        assert_eq!(tokens_of("M.->"), vec![up("M"), op(".->")]);
+        assert_eq!(tokens_of("M..."), vec![up("M"), op("...")]);
+        assert_eq!(tokens_of("M...."), vec![qop("M....")]);
+        assert_eq!(tokens_of("M.-- c"), vec![up("M"), op(".--"), id("c")]);
+        assert_eq!(tokens_of("x.field"), vec![id("x"), op("."), id("field")]);
+        assert_eq!(tokens_of("[1..3]"), vec![Token::LeftBracket, Token::IntLit(1), op(".."), Token::IntLit(3), Token::RightBracket]);
+        assert_eq!(tokens_of("1.5"), vec![Token::NumLit(1.5)]);
+    }
+
+    /// A qualified lexeme's `end_col` is its source end, like every other
+    /// token's: the parser's adjacency checks (`M.r.field`) read it.
+    #[test]
+    fn qualified_lexeme_spans_are_source_exact() {
+        let toks = lex("M.x Data.Map.insert O.<+>\n").expect("lexes");
+        let spans: Vec<(usize, usize)> = toks.iter()
+            .filter(|t| !matches!(t.token, Token::Indent(_) | Token::EOF))
+            .map(|t| (t.col, t.end_col))
+            .collect();
+        assert_eq!(spans, vec![(1, 4), (5, 20), (21, 26)]);
+    }
+
+    /// The reserved `__` prefix is reserved after a qualifier too.
+    #[test]
+    fn reserved_prefix_is_rejected_in_the_name_part() {
+        let err = lex("M.__x").expect_err("reserved");
+        assert!(format!("{err}").contains("reserved for compiler-generated names"), "{err}");
+    }
+
+    /// The name part and the qualifier of a spelling, for the renamer's
+    /// constructor-spelling test and the diagnostics.
+    #[test]
+    fn unqualified_and_qualifier_split_a_spelling() {
+        for (name, module, bare) in [
+            ("M.x", Some("M"), "x"),
+            ("Data.Map.insert", Some("Data.Map"), "insert"),
+            ("Data.Map.Map", Some("Data.Map"), "Map"),
+            ("M.Just", Some("M"), "Just"),
+            ("M..", Some("M"), "."),
+            ("M.<+>", Some("M"), "<+>"),
+            ("M.:+", Some("M"), ":+"),
+            ("Monday..", Some("Monday"), "."),
+            ("plus", None, "plus"),
+            ("Just", None, "Just"),
+            (":+", None, ":+"),
+            ("<+>", None, "<+>"),
+        ] {
+            assert_eq!(qualifier(name), module, "qualifier of {name}");
+            assert_eq!(unqualified(name), bare, "name part of {name}");
+        }
     }
 }

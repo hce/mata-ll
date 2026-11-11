@@ -44,6 +44,73 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **Qualified operators and backtick-qualified names in every operator
+  position, and a qualified name is one lexeme** (wrong rejection / wrong
+  resolution). `1 O.<+> 2` after `import qualified Ops as O` died with
+  "Unbound variable: (.<+>)", `(O.<+> 1)`, `(5 O.<+>)` and `(O.<+>)`
+  likewise, `(P.+ 1)` through `import qualified Prelude as P` the same
+  way, and ``3 `O.plus` 4`` was a parse error ("Expected identifier,
+  found 'O'") where GHC computes `3`, `7` and `[2,3]`. Haskell 2010 §2.4
+  makes a qualified name a single lexeme — `qvarid → [modid .] varid`,
+  `qvarsym → [modid .] varsym`, `modid → {conid .} conid` — and the
+  lexer did not: `.` is a symbol character, so `O.<+>` lexed as the
+  constructor `O` followed by the operator `.<+>`; the qualified
+  identifier case was assembled afterwards, in two places — the parser
+  joined `M.Con` and `M.Map` from adjacent tokens, and import resolution
+  collapsed `M.f`'s field-access parse (`App(Var <field f>, Con M)`) into
+  the qualified reference when `M` was a known alias — and the backtick
+  arms read an unqualified identifier only. Now the lexer produces the
+  lexemes (`Token::QualIdent`, `QualUpperIdent`, `QualOperator`, spelled
+  as written) under GHC's maximal munch: after a constructor name, a
+  `.` glued to a conid extends the module path, to a varid closes a
+  qualified variable, to a symbol run closes a qualified operator; a
+  space on either side, a digit, a bracket, a keyword, a reserved
+  operator or a comment after the dot leave it the operator it was
+  (`Just . f`, `Just .f`, `(Just.)`, `M.where`, `M.->`, `[1..3]`), and a
+  lowercase head is never a module (`r.field` is unchanged). The parser
+  takes the three tokens wherever a name is referred to — expression
+  atoms, infix chains, both sections, first-class `(O.<+>)`, backticks in
+  chains and sections, patterns, types, record construction, module
+  headers and imports (a dotted module name is one token) — and rejects
+  them wherever a name is bound, in GHC's words: `O.plus a b = …`,
+  `a O.<+> b = …`, `f O.x = …`, a lambda, case, `where` or `let` binder
+  are "Qualified name in binding position: O.plus", `O.plus :: T` is
+  "Invalid qualified name in type signature", `infixl 6 O.<+>` names an
+  unqualified operator (Haskell 2010 §4.4.2). Import resolution resolves
+  the spelling as written through the alias tables, so a qualified
+  operator groups by the fixity its DEFINING module declared
+  (`1 O.<+> 2 * 3` is `16` under `infixl 6 <+>`, `False O.<&&> True ||
+  True` is `True` under `infixr 3 <&&>`), and a qualified spelling
+  nothing answers is unbound under that spelling with the reason — the
+  alias's modules do not export the name, or no import declares the
+  alias (GHC's two notes). The parser's token-joining tail rule and the
+  resolution-time collapse are gone, and with them a documented
+  deviation: an import alias that is also a data constructor (`import
+  qualified Foo as M` next to `data Mode = M | N`) now gives both `f M`
+  and `M.f` their GHC meanings — the two were one parse, so the
+  constructor had to win and the compiler warned that the qualified form
+  would not resolve. Consequences GHC shares: `Just.f` is the qualified
+  name `Just.f` ("Unbound variable: Just.f", no module named `Just` is
+  imported), and `[Monday..]` is the qualified operator `Monday..` —
+  the error says so and shows `[Monday ..]`. A dotted import alias (`as
+  Qual.Ops`, legal in Haskell 2010) is refused at the import with the
+  one-segment rule stated, where it used to fail at its first use.
+  GHC-goldened case `qualified_lexemes` (helper module `QualOps`:
+  qualified functions, backtick chains and sections, qualified operators
+  in chains, both sections and first-class with the defining module's
+  fixities, mixed with the unqualified imports of the same names, an
+  alias that is also a local constructor, qualified constructors in
+  function and case patterns, qualified types, qualified record
+  construction with field access, a qualified Prelude alias with `P.+`
+  sections and `P..`, and the dot spellings that stay composition,
+  sections of `.`, ranges and literals); `alias_ctor_collision` now
+  goldened with the qualified form in use; compile-error tests for every
+  binding position, the signature, the fixity declaration, the three
+  unbound shapes (unknown alias, name the alias does not export, glued
+  `Just.negate`) for variables, operators, constructors and types, the
+  glued range, and the dotted alias; lexer unit tests for the lexeme
+  rule, its exceptions and the tokens' source spans. Found by the 2026-10
+  fresh-eyes review (F10).
 - **A line indented past the enclosing block's column continues the
   construct above it, whatever that construct is** (wrong rejection). A
   guard's `=` on its own line (`| n < 0` / `  = -1`), a `newtype`'s or
