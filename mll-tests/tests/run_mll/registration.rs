@@ -576,6 +576,12 @@ mll_test!(layout_continuation_lines, "layout_continuation_lines.mll");
 mll_test!(declaration_heads, "declaration_heads.mll");
 mll_test!(pattern_bindings, "pattern_bindings.mll");
 mll_test!(local_operator_scope, "local_operator_scope.mll");
+// Strictness annotations: lazy patterns `~p` in every pattern position,
+// strict constructor fields `!T` under every way a constructor is applied,
+// and bang patterns `!p` next to the operator `!` (F12a, F12b).
+mll_test!(lazy_patterns, "lazy_patterns.mll");
+mll_test!(strict_fields, "strict_fields.mll");
+mll_test!(bang_patterns, "bang_patterns.mll");
 mll_test!(let_recursive_groups, "let_recursive_groups.mll");
 mll_test!(let_pattern_recursive, "let_pattern_recursive.mll");
 mll_test!(exceptions, "exceptions.mll");

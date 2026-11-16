@@ -183,6 +183,7 @@
 //!     it — including whether it consumes the argument at all.
 
 use super::*;
+use crate::ast::LAZY_PATTERN_PREFIX;
 use crate::types::Mult;
 
 /// A nonzero use count: one use, or "more than one / unbounded" (ω).
@@ -406,6 +407,17 @@ struct LinearInfo {
     bound: Bound,
 }
 
+/// A linear binder as a message names it: the program's name in quotes,
+/// or — for the variable the parser put where a lazy pattern stood —
+/// what it stands for.
+fn shown_binder(name: &str) -> String {
+    if name.starts_with(LAZY_PATTERN_PREFIX) {
+        "the value a lazy pattern ('~p') matches".to_string()
+    } else {
+        format!("'{name}'")
+    }
+}
+
 /// Does this pattern discard anything through a wildcard? Matching part of
 /// a linear value with `_` drops that part unconsumed, which exactly-once
 /// rejects (a `LitPat` is fine: it forces the matched scalar to compare it,
@@ -420,7 +432,7 @@ fn pattern_has_as(p: &TPattern) -> bool {
     match p {
         TPattern::As(..) => true,
         TPattern::Var(..) | TPattern::Wildcard | TPattern::LitPat(..) | TPattern::LitEq { .. } => false,
-        TPattern::Paren(inner) => pattern_has_as(inner),
+        TPattern::Paren(inner) | TPattern::Bang(inner) => pattern_has_as(inner),
         TPattern::Constructor { args, .. } => args.iter().any(pattern_has_as),
         TPattern::Tuple(elems) => elems.iter().any(pattern_has_as),
     }
@@ -433,7 +445,9 @@ fn pattern_has_as(p: &TPattern) -> bool {
 fn inner_ty_of(p: &TPattern) -> Ty {
     match p {
         TPattern::Var(_, ty) => ty.clone(),
-        TPattern::Paren(inner) | TPattern::As(_, inner) => inner_ty_of(inner),
+        TPattern::Paren(inner) | TPattern::As(_, inner) | TPattern::Bang(inner) => {
+            inner_ty_of(inner)
+        }
         _ => Ty::Unit,
     }
 }
@@ -446,7 +460,7 @@ fn pattern_has_wildcard(p: &TPattern) -> bool {
         // inside still stands for a part the inner match discards — keep
         // the conservative rejection (linear code should bind the part).
         TPattern::As(_, inner) => pattern_has_wildcard(inner),
-        TPattern::Paren(inner) => pattern_has_wildcard(inner),
+        TPattern::Paren(inner) | TPattern::Bang(inner) => pattern_has_wildcard(inner),
         TPattern::Constructor { args, .. } => args.iter().any(pattern_has_wildcard),
         TPattern::Tuple(elems) => elems.iter().any(pattern_has_wildcard),
     }
@@ -471,7 +485,9 @@ fn pattern_binders(p: &TPattern, direct: bool, out: &mut Vec<(String, Ty, bool)>
             pattern_binders(inner, false, out);
         }
         TPattern::Wildcard | TPattern::LitPat(..) | TPattern::LitEq { .. } => {}
-        TPattern::Paren(inner) => pattern_binders(inner, direct, out),
+        // A bang evaluates the value and binds what the inner pattern
+        // binds: `!x` is the argument itself, like `x`.
+        TPattern::Paren(inner) | TPattern::Bang(inner) => pattern_binders(inner, direct, out),
         TPattern::Constructor { args, .. } => {
             for a in args {
                 pattern_binders(a, false, out);
@@ -863,9 +879,9 @@ impl<'a> UsageCk<'a> {
                         {
                             self.linear.insert(name.clone(), LinearInfo {
                                 origin: format!(
-                                    "it is pattern-bound from '{}', which \
+                                    "it is pattern-bound from {}, which \
                                      must itself be consumed exactly \
-                                     once", src),
+                                     once", shown_binder(src)),
                                 bound: *bound,
                             });
                             checked.push(name.clone());
@@ -1846,6 +1862,28 @@ impl Checker {
                     }
                     let mut binders = Vec::new();
                     pattern_binders(pat, true, &mut binders);
+                    // A lazy pattern (`~p`, by now the variable the parser
+                    // put in its place) matches the argument only if one
+                    // of its variables is ever demanded — so it may never
+                    // consume the argument, and no count of uses can show
+                    // that it does exactly once. GHC: "non-variable lazy
+                    // pattern aren't linear". Reported once, as the
+                    // construct; its variable is then not tracked.
+                    if binders.iter().any(|(n, _, _)| n.starts_with(LAZY_PATTERN_PREFIX)) {
+                        walker.viols.push(Violation {
+                            name: "~".to_string(),
+                            origin: origin.clone(),
+                            cause: None,
+                            kind: ViolKind::Unused(
+                                "a lazy pattern ('~p') on this argument is \
+                                 matched only when one of its variables is \
+                                 demanded, so nothing guarantees the value \
+                                 is consumed at all; match it with a plain \
+                                 pattern (GHC rejects a lazy pattern on a \
+                                 linear argument too)".to_string()),
+                        });
+                        binders.retain(|(n, _, _)| !n.starts_with(LAZY_PATTERN_PREFIX));
+                    }
                     for (name, ty, direct) in binders {
                         if direct || !matches!(ty, Ty::Unit) {
                             walker.linear.insert(name.clone(), LinearInfo {
@@ -1912,7 +1950,7 @@ impl Checker {
                          cleanup.",
                     ),
                 };
-                let msg = format!("'{}' {} — {} — but {}", v.name, req, v.origin, problem);
+                let msg = format!("{} {} — {} — but {}", shown_binder(&v.name), req, v.origin, problem);
                 if !seen.insert(msg.clone()) {
                     continue;
                 }

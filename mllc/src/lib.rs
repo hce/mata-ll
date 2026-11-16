@@ -43,6 +43,7 @@ pub mod lexer;
 pub mod modules;
 pub mod mono;
 pub mod newtype_erase;
+pub mod strict_fields;
 pub mod parser;
 pub mod split;
 mod stdlib;

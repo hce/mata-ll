@@ -44,6 +44,94 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **Strictness annotations: lazy patterns `~p`, strict constructor
+  fields `!T`, and bang patterns `!p`** (wrong rejection). GHC accepts
+  all three in its default language and mata-ll had none of them: `g
+  ~(Just x) n = …` was "Expected '=', found 'n'", `case e of ~(a, b) ->
+  …` "Expected ')', found '->'", `data P = P !Int !Int` "parse error on
+  input '!'", `sumTo !acc 0 = acc` "Expected '=', found integer literal
+  '0'", and `let !x = e` "Expected a binding after `let`". The three
+  are one concern — the program says when a value is evaluated — and
+  each is now implemented as its semantics, on both hosts.
+  *Lexing.* `!` and `~` are a bang and a tilde only as a PREFIX
+  occurrence: not preceded by a closing token (an identifier character,
+  a quote, a closing bracket) and directly followed by an opening one —
+  GHC's operator-whitespace rule, character for character
+  (`lexer::prefix_occurrence`, tokens `Bang` and `Tilde`). Every other
+  occurrence is the operator it always was, so `xs ! 0`, `xs!1`, `(xs
+  !)`, `(! 1)`, `(!)` and a definition `xs ! n = …` are unchanged, and a
+  prefix inside an expression (`x !y`, `xs !0`, `(!1)`, `id ~x`) is
+  GHC's "Bang pattern in expression context: !y" / "Lazy pattern in
+  expression context: ~x".
+  *Lazy patterns* (Haskell 2010 §3.17.2: matching `~p` always succeeds;
+  `p` is matched when one of its variables is demanded). `~p` is an
+  atomic pattern in the one pattern grammar, so every position takes
+  it: function, method and local-function parameters, lambdas, case
+  alternatives, do binds, comprehension generators, pattern guards,
+  nested inside tuple, constructor, cons and as-patterns, and pattern
+  bindings (where the tilde at the root is redundant). Each construct
+  that binds a pattern replaces `~p` by a fresh variable and binds the
+  variables of `p` to lazy selectors over it — the report's own
+  translation (§3.17.3) and the one lowering a pattern binding already
+  had (`Parser::take_lazy_patterns`, `pattern_selectors`) — in the
+  scope the pattern's variables have: an equation's `where` group (so
+  guards, `where` bindings and body all see them; a `where` binding of
+  the same name shadows), a `let` around a lambda's or alternative's
+  body, a `let` qualifier in front of each guard of a guarded
+  alternative, a `let` statement after a `<-`. No stage after the
+  parser sees a lazy pattern: the position is a variable, which is why
+  the demand analysis, the entry-force rule, the clause-column forcing,
+  the exhaustiveness check, the tail-loop and fusion passes are all
+  right about it without knowing it. `f ~(a, _) = 5` returns `5` for
+  `undefined`, also in a multi-clause function whose later column is
+  refutable and under a self-recursive loop; a match that fails when
+  demanded raises GHC's "Non-exhaustive patterns in Just x" (the
+  message of a failed pattern binding; a pattern is now named as GHC
+  names it there too, without its outer parentheses). A lazy pattern is
+  still typed (`f :: Int -> Int; f ~(_, _) = 5` is a type error) and
+  cannot match a `%1` argument (GHC: "non-variable lazy pattern aren't
+  linear").
+  *Bang patterns* (`!p`: evaluate the value to weak head normal form,
+  then match `p`). A new pattern node, `Pattern::Bang` / `TPattern::Bang`,
+  through the type checker, the monomorphizer, newtype erasure and the
+  demand analysis into the match emitter, under the one predicate every
+  forcing decision already asks (`TPattern::forces_scrutinee`): a bang
+  forces at its position in the clause condition, left to right, so `f
+  !x 0 = 1; f x n = 2` evaluates `x` for `f ⊥ 1` as GHC does (a guard
+  that `seq`s would not), `!_` evaluates what nothing uses, and a
+  banged `False`, `Nothing` or `[]` — Lua's false values — matches. A
+  strict binding `let !x = e` / `where !x = e` is evaluated when its
+  group's scope is entered — before the body, the statements after a
+  do-`let`, or the first guard of the equation the `where` belongs to —
+  by GHC's translation (``let x = e in x `seq` body``,
+  `ast::Expr::let_in`); `let !p = e` for a pattern performs the match
+  there, so a failed one raises at the `let`. A top-level `!x = e` is
+  GHC's "Top-level strict bindings aren't allowed".
+  *Strict fields* (§4.2.1: `P !t` makes ``P x = x `seq` P' x``). The
+  flag is a property of the constructor (`ast::Constructor::strict`,
+  `TConstructor::strict`), in positional, record (`rx :: !Int`) and
+  GADT-syntax (`MkG :: !Int -> G`) declarations, and one pass over the
+  checked module (`strict_fields.rs`, the last step of type checking)
+  writes the report's definition wherever a strict constructor is an
+  expression: saturated (``let a = e in a `seq` P a b``), partial and
+  first-class (a lambda over the missing fields — `P ⊥` evaluates
+  nothing, as GHC's wrapper), record construction, record update
+  (decided by the record's run-time constructor when the constructors
+  of a type disagree about a field), and everything a derived instance
+  builds (`fmap`, a decoded JSON value, the generic representation). A
+  record decoded at the FFI boundary is built from host values, which
+  are evaluated. After the pass a strict field is an ordinary `seq`, so
+  no later stage has to know. `sndP (P (error "…") 2)` raises, `sndL (L
+  undefined 2)` with a lazy first field does not. A newtype's field
+  takes no flag ("A newtype constructor must not have a strictness
+  annotation"), `P ! Int` and `~Int` in a declaration and a `!` in any
+  other type are GHC's errors, and `{-# UNPACK #-}` stays an ignored
+  pragma with its warning. GHC-goldened cases `lazy_patterns`,
+  `strict_fields` and `bang_patterns`; runtime tests that pin the
+  evaluation itself — 21 bang shapes, 14 constructions of a strict
+  field and 4 failing lazy matches, each raising exactly where GHC
+  does; compile-error tests for every rejection above. (F12a, F12b)
+
 - **A declaration is `(funlhs | pat) rhs` in every declaration group:
   infix definitions over full patterns, parenthesised function heads,
   pattern bindings, and operators with their own signature and fixity

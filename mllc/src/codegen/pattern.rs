@@ -59,13 +59,31 @@ pub(super) enum Cond {
         /// is rooted at this scrutinee (`local a = __force(p)[1]`) runs
         /// right after the condition and forces it first thing.
         binds: bool,
+        /// The forced value is a table whatever it is (a tuple, a record):
+        /// as a conjunct the expression itself is true. A bang pattern
+        /// forces a value of ANY type — `False`, `Nothing` and `[]` are
+        /// Lua's two false values — so its conjunct is `(expr or true)`.
+        truthy: bool,
     },
 }
 
 impl Cond {
-    fn into_expr(self) -> Expr {
+    /// The conjunct of an `and` chain: true exactly when the pattern's
+    /// test holds; a force is always true (see `Cond::Force::truthy`).
+    fn into_conjunct(self) -> Expr {
         match self {
-            Cond::Test(e) | Cond::Force { expr: e, .. } => e,
+            Cond::Test(e) | Cond::Force { expr: e, truthy: true, .. } => e,
+            Cond::Force { expr, truthy: false, .. } => {
+                Expr::paren(Expr::binop("or", expr, Expr::lit("true")))
+            }
+        }
+    }
+
+    /// A force as a statement of its own (`__force(path)`), for a clause
+    /// that tests nothing.
+    fn into_force_stmt(self) -> Stmt {
+        match self {
+            Cond::Test(e) | Cond::Force { expr: e, .. } => Stmt::Expr(e),
         }
     }
 }
@@ -103,9 +121,9 @@ impl CodeGen {
             conds.pop();
         }
         if conds.iter().all(|c| matches!(c, Cond::Force { .. })) {
-            ClauseCond::Always(conds.into_iter().map(|c| Stmt::Expr(c.into_expr())).collect())
+            ClauseCond::Always(conds.into_iter().map(Cond::into_force_stmt).collect())
         } else {
-            ClauseCond::Chain(Expr::and_chain(conds.into_iter().map(Cond::into_expr).collect()))
+            ClauseCond::Chain(Expr::and_chain(conds.into_iter().map(Cond::into_conjunct).collect()))
         }
     }
 
@@ -141,8 +159,30 @@ impl CodeGen {
         {
             let mut binds = false;
             pattern.for_each_var(&mut |_| binds = true);
-            conditions.push(Cond::Force { expr: scrutinee.clone(), binds });
+            conditions.push(Cond::Force { expr: scrutinee.clone(), binds, truthy: true });
         }
+    }
+
+    /// The forcing conjunct of a bang pattern `!p` whose inner pattern
+    /// does not force of its own accord (`!x`, `!_`, `!y@z`): the bang is
+    /// then the only thing that evaluates the value, at the pattern's
+    /// position in the chain like every other force. `scrutinee` carries
+    /// the evaluation — the caller built it for a pattern that forces
+    /// (`match_scrutinee`, `field_path*`, the cons tail's forcing reader)
+    /// — unless it is a bare name, which is a value already in WHNF (an
+    /// entry-forced or site-forced parameter, a forced `case` scrutinee)
+    /// and needs nothing. `!x` binds `x` to the same forcing expression,
+    /// so a trailing conjunct is left to that binding (`clause_condition`);
+    /// `!_` binds nothing and keeps it. When the inner pattern forces
+    /// (`!(a, b)`, `!(Just y)`), the bang adds nothing and the inner
+    /// pattern's own conjuncts stand.
+    fn push_bang_cond(scrutinee: &Expr, inner: &TPattern, conditions: &mut Vec<Cond>) {
+        if inner.forces_scrutinee() || matches!(scrutinee, Expr::Name(_)) {
+            return;
+        }
+        let mut binds = false;
+        inner.for_each_var(&mut |_| binds = true);
+        conditions.push(Cond::Force { expr: scrutinee.clone(), binds, truthy: false });
     }
 
     /// The match fall-off statement: inside a local function group, the
@@ -647,7 +687,9 @@ impl CodeGen {
     pub(super) fn pattern_cannot_fail(&self, pattern: &TPattern) -> bool {
         match pattern {
             TPattern::Var(..) | TPattern::Wildcard => true,
-            TPattern::Paren(inner) | TPattern::As(_, inner) => self.pattern_cannot_fail(inner),
+            TPattern::Paren(inner) | TPattern::As(_, inner) | TPattern::Bang(inner) => {
+                self.pattern_cannot_fail(inner)
+            }
             TPattern::LitPat(..) | TPattern::LitEq { .. } => false,
             TPattern::Tuple(pats) => pats.iter().all(|p| self.pattern_cannot_fail(p)),
             TPattern::Constructor { name, args, .. } => {
@@ -787,6 +829,14 @@ impl CodeGen {
                 self.collect_pattern_conditions(scrutinee, inner, conditions, bindings);
             }
             TPattern::Wildcard => {}
+            // Bang pattern: the value is evaluated at this position, then
+            // the inner pattern is matched against the SAME scrutinee
+            // expression (which carries the evaluation), so `!x` binds the
+            // evaluated value.
+            TPattern::Bang(inner) => {
+                Self::push_bang_cond(scrutinee, inner, conditions);
+                self.collect_pattern_conditions(scrutinee, inner, conditions, bindings);
+            }
             TPattern::LitPat(lit, pat_ty) => {
                 // An integer literal pattern is Haskell 2010 §3.17.2's
                 // `scrutinee == fromInteger k`, decided by the pattern's

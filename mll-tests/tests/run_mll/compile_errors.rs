@@ -8637,3 +8637,142 @@ fn top_level_pattern_binding_rules() {
         &["Conflicting definitions for 'k'"],
     );
 }
+
+/// `!` and `~` are a bang and a lazy pattern only as a PREFIX — set off on
+/// the left, glued to what follows (GHC's operator-whitespace rule, which
+/// the lexer applies: `lexer::prefix_occurrence`). In an expression that
+/// spelling is GHC's "Bang pattern in expression context" /
+/// "Lazy pattern in expression context" (GHC-95644, GHC-27207), for an
+/// operand (`x !y`), an index (`xs !0`) and a section (`(!1)`) alike; the
+/// operator is `x ! y` or `x!y` (accepted: bang_patterns.mll).
+#[test]
+fn bang_and_tilde_prefixes_are_no_operators_in_an_expression() {
+    expect_compile_error(
+        "f :: Int -> Int -> Int\nf x y = x !y\nmain :: IO ()\nmain = print (f 1 2)\n",
+        &[],
+        &["Bang pattern in expression context: !y", "at 2:11", "Did you mean to add a space after the '!'?"],
+    );
+    expect_compile_error(
+        "(!) :: [a] -> Int -> a\nxs ! n = xs !! n\nmain :: IO ()\nmain = print ([1, 2, 3 :: Int] !0)\n",
+        &[],
+        &["Bang pattern in expression context: !0", "at 4:32"],
+    );
+    expect_compile_error(
+        "(!) :: [a] -> Int -> a\nxs ! n = xs !! n\nmain :: IO ()\nmain = print (map (!1) [[1, 2 :: Int]])\n",
+        &[],
+        &["Bang pattern in expression context: !1", "at 4:20"],
+    );
+    expect_compile_error(
+        "f :: Int -> Int\nf x = id ~x\nmain :: IO ()\nmain = print (f 1)\n",
+        &[],
+        &["Lazy pattern in expression context: ~x", "at 2:10", "Did you mean to add a space after the '~'?"],
+    );
+}
+
+/// Where a strict binding or a strictness flag cannot stand, each with
+/// GHC's verdict: a top-level `!x = e` ("Top-level strict bindings aren't
+/// allowed", GHC-48099); a flag on a newtype's field, in all three
+/// constructor spellings ("A newtype constructor must not have a
+/// strictness annotation", GHC-04049); a `!` that is not a prefix in a
+/// data declaration (GHC reads `P ! Int` as an infix constructor: "Not a
+/// data constructor: '!'"); the StrictData laziness flag `~T` ("Lazy field
+/// annotations (~) are disabled", GHC-81601); a flag in front of a
+/// compound record field type, on a GADT constructor's result, and in a
+/// type that declares no constructor ("Unexpected strictness (!)
+/// annotation", GHC-18932).
+#[test]
+fn strictness_annotations_out_of_place_are_rejected() {
+    expect_compile_error(
+        "x :: Int\n!x = 5\nmain :: IO ()\nmain = print x\n",
+        &[],
+        &["Top-level strict bindings aren't allowed: !x = …", "at 2:1", "note:"],
+    );
+    for (source, at) in [
+        ("newtype N = N !Int\nmain :: IO ()\nmain = print 1\n", "at 1:15"),
+        ("newtype Rad = MkRad !Double\nmain :: IO ()\nmain = print 1\n", "at 1:21"),
+        ("newtype Age = MkAge { unAge :: !Int }\nmain :: IO ()\nmain = print 1\n", "at 1:32"),
+    ] {
+        expect_compile_error(
+            source,
+            &[],
+            &["A newtype constructor must not have a strictness annotation", at, "note:"],
+        );
+    }
+    expect_compile_error(
+        "data P = P ! Int Int\nmain :: IO ()\nmain = print 1\n",
+        &[],
+        &["parse error on input '!'", "at 1:12", "Not a data constructor"],
+    );
+    expect_compile_error(
+        "data G = G { a :: Int, b :: ! Int }\nmain :: IO ()\nmain = print 1\n",
+        &[],
+        &["parse error on input '!'", "at 1:29"],
+    );
+    expect_compile_error(
+        "data U = U ~Int\nmain :: IO ()\nmain = print 1\n",
+        &[],
+        &["Lazy field annotations (~) are disabled", "at 1:12", "StrictData"],
+    );
+    expect_compile_error(
+        "data T = T { x :: !Maybe Int }\nmain :: IO ()\nmain = print 1\n",
+        &[],
+        &["Unexpected strictness (!) annotation in the type of field 'x'", "!(Maybe Int)"],
+    );
+    expect_compile_error(
+        "data G where\n  MkG :: Int -> !G\nmain :: IO ()\nmain = print 1\n",
+        &[],
+        &["Unexpected strictness (!) annotation", "at 2:17", "arguments of a data constructor type"],
+    );
+    expect_compile_error(
+        "f :: !Int -> Int\nf x = x\nmain :: IO ()\nmain = print (f 1)\n",
+        &[],
+        &["Unexpected strictness (!) annotation", "at 1:6", "bang pattern"],
+    );
+    // A class body takes no pattern binding, banged or not (GHC reports
+    // this one as a top-level strict binding).
+    expect_compile_error(
+        "class C a where\n  m :: a -> Int\n  !m = undefined\nmain :: IO ()\nmain = print 1\n",
+        &[],
+        &["Pattern bindings (except simple variables) not allowed in class declaration: !m", "at 3:3"],
+    );
+}
+
+/// What a lazy or banged pattern still has to satisfy. The patterns bound
+/// together name each variable once, under a tilde or a bang as anywhere
+/// (GHC-10498); a lazy pattern is typed although nothing may ever match it
+/// (`f :: Int -> Int; f ~(_, _) = 5` is GHC's "Couldn't match expected
+/// type 'Int' with actual type '(a0, b0)'"); a record construction names
+/// every field, a strict one included (GHC-95909: "Constructor 'R' does
+/// not have the required strict field(s)"); and a lazy pattern cannot
+/// match a linear argument (GHC-18872: "non-variable lazy pattern aren't
+/// linear").
+#[test]
+fn lazy_and_bang_patterns_keep_the_pattern_rules() {
+    expect_compile_error(
+        "f :: (Int, Int) -> Int\nf ~(a, a) = 1\nmain :: IO ()\nmain = print (f (1, 2))\n",
+        &[],
+        &["Conflicting definitions for 'a' in an equation for 'f'", "at 2:8"],
+    );
+    expect_compile_error(
+        "f :: Int -> Int -> Int\nf !x !x = 1\nmain :: IO ()\nmain = print (f 1 2)\n",
+        &[],
+        &["Conflicting definitions for 'x' in an equation for 'f'", "at 2:7"],
+    );
+    let diags = expect_compile_error(
+        "f :: Int -> Int\nf ~(_, _) = 5\nmain :: IO ()\nmain = print (f 1)\n",
+        &[],
+        &["Cannot unify 'Int' with '(a, b)'", "the match of a lazy pattern (definition of 'f')"],
+    );
+    assert!(!diags.contains("__"), "a compiler-generated name leaked into: {diags}");
+    expect_compile_error(
+        "data R = R { rx :: !Int, ry :: Int } deriving Show\nmain :: IO ()\nmain = print (R { ry = 2 })\n",
+        &[],
+        &["Missing field 'rx' in constructor 'R'"],
+    );
+    let diags = expect_compile_error(
+        "g :: (Int, Int) %1 -> Int\ng ~(a, b) = a + b\nmain :: IO ()\nmain = print (g (1, 2))\n",
+        &[],
+        &["'~' must be consumed exactly once", "a lazy pattern ('~p') on this argument"],
+    );
+    assert!(!diags.contains("__"), "a compiler-generated name leaked into: {diags}");
+}

@@ -3534,8 +3534,9 @@ impl Monomorphizer {
             TPattern::Constructor { args, .. } => {
                 for a in args { Self::collect_pattern_vars(a, vars); }
             }
-            TPattern::Paren(p) => Self::collect_pattern_vars(p, vars),
-            TPattern::As(_, p) => Self::collect_pattern_vars(p, vars),
+            TPattern::Paren(p) | TPattern::As(_, p) | TPattern::Bang(p) => {
+                Self::collect_pattern_vars(p, vars)
+            }
             TPattern::Tuple(ps) => { for p in ps { Self::collect_pattern_vars(p, vars); } }
             _ => {}
         }
@@ -5776,6 +5777,7 @@ impl Monomorphizer {
             }
             TPattern::Paren(inner) => TPattern::Paren(Box::new(self.ex_rewrite_pattern(*inner, caps))),
             TPattern::As(n, inner) => TPattern::As(n, Box::new(self.ex_rewrite_pattern(*inner, caps))),
+            TPattern::Bang(inner) => TPattern::Bang(Box::new(self.ex_rewrite_pattern(*inner, caps))),
             TPattern::Tuple(ps) => TPattern::Tuple(self.ex_rewrite_patterns(ps, caps)),
             // The pattern walk is also where an integer literal pattern's
             // comparison is decided (`literal_pattern_use`): once per

@@ -413,7 +413,12 @@ list:
 
     foldl (+) 0 [1..1000000]  -- builds a chain of 1M thunks
 
-Use `seq` to force intermediate values, or prefer strict accumulator patterns.
+Use `seq` to force intermediate values, or prefer strict accumulator patterns —
+a bang pattern on the accumulator (`go !acc (x : xs) = go (acc + x) xs`), a
+strict binding (`let !y = f x`), or a strict constructor field (`data Stats =
+Stats !Int !Int`) for state kept in a data structure, all with GHC's meaning.
+Mind the spelling: `!` is the annotation only as a prefix (`f !x`, `P !Int`);
+`a ! b` and `a!b` are the operator `!`.
 `seq` works in every application form — prefix `seq a b`, backtick
 ``a `seq` b``, partial application, and as a first-class value (`foldr seq z`) —
 all with the same semantics (force the first argument, yield the second). The
@@ -477,7 +482,10 @@ A group also takes PATTERN BINDINGS over any pattern (`let Just k = m`,
 own signature and fixity declaration (`infixl 6 <+>` / `(<+>) :: Int ->
 Int -> Int` / `a <+> b = …`), scoped to the group. A pattern binding is
 lazy: `let Just k = Nothing in 5` is `5`, and a use of `k` raises
-`Non-exhaustive patterns in Just k`.
+`Non-exhaustive patterns in Just k`. A bang at its head makes a binding
+strict (`let !x = e in b` evaluates `e` before `b`; `let !(Just k) = m`
+performs the match there), in `let`, do-`let` and `where` — not at the
+top level, where nothing would say when.
 
 ## Do-block `<-` binds any pattern
 

@@ -76,6 +76,11 @@ pub struct TConstructor {
     /// module declares it under otherwise. Never the canonical name.
     pub tag: String,
     pub fields: TConFields,
+    /// Which fields are declared strict (`P !Int Int`; Haskell 2010
+    /// §4.2.1), parallel to the fields; empty when none is. Read by one
+    /// pass, `strict_fields.rs`, which makes every construction evaluate
+    /// those fields; after it nothing needs the flags to be correct.
+    pub strict: Vec<bool>,
 }
 
 impl TConstructor {
@@ -580,6 +585,7 @@ impl TPattern {
             TPattern::Paren(p) => TPattern::Paren(Box::new(p.apply_subst(subst))),
             TPattern::Tuple(ps) => TPattern::Tuple(ps.into_iter().map(|p| p.apply_subst(subst)).collect()),
             TPattern::As(n, p) => TPattern::As(n, Box::new(p.apply_subst(subst))),
+            TPattern::Bang(p) => TPattern::Bang(Box::new(p.apply_subst(subst))),
             TPattern::LitPat(l, ty) => TPattern::LitPat(l, ty.apply_subst(subst)),
             TPattern::LitEq { eq, value } => TPattern::LitEq {
                 eq: eq.apply_subst(subst),
@@ -596,7 +602,7 @@ impl TPattern {
             TPattern::Var(_, ty) => *ty = ty.demote_skolems(demote),
             TPattern::Constructor { args, .. } => { for p in args.iter_mut() { p.demote_skolems(demote); } }
             TPattern::Paren(p) => p.demote_skolems(demote),
-            TPattern::As(_, p) => p.demote_skolems(demote),
+            TPattern::As(_, p) | TPattern::Bang(p) => p.demote_skolems(demote),
             TPattern::Tuple(ps) => { for p in ps.iter_mut() { p.demote_skolems(demote); } }
             TPattern::LitPat(_, ty) => *ty = ty.demote_skolems(demote),
             // Minted by the monomorphizer, after every checker demotion.
@@ -1011,6 +1017,12 @@ pub enum TPattern {
     /// while also matching the inner pattern against it. Forces exactly
     /// when the inner pattern forces (the name alone binds lazily).
     As(String, Box<TPattern>),
+    /// Bang pattern `!p` (GHC's BangPatterns): matching evaluates the
+    /// scrutinee to weak head normal form, then matches the inner pattern
+    /// against it. It forces its scrutinee whatever the inner pattern is
+    /// (`forces_scrutinee`) and can fail exactly when the inner pattern
+    /// can; `!x` binds the evaluated value.
+    Bang(Box<TPattern>),
 }
 
 impl TPattern {
@@ -1035,7 +1047,7 @@ impl TPattern {
             TPattern::Paren(inner) => inner.forces_scrutinee(),
             TPattern::As(_, inner) => inner.forces_scrutinee(),
             TPattern::Constructor { .. } | TPattern::LitPat(..) | TPattern::LitEq { .. }
-            | TPattern::Tuple(_) => true,
+            | TPattern::Tuple(_) | TPattern::Bang(_) => true,
         }
     }
 
@@ -1046,7 +1058,9 @@ impl TPattern {
         match self {
             TPattern::Var(n, _) => Some(n),
             TPattern::As(n, _) => Some(n),
-            TPattern::Paren(inner) => inner.top_binder(),
+            // `!x` names the whole value like `x` (and forces it, which
+            // `forces_scrutinee` answers).
+            TPattern::Paren(inner) | TPattern::Bang(inner) => inner.top_binder(),
             _ => None,
         }
     }
@@ -1065,7 +1079,7 @@ impl TPattern {
             TPattern::Constructor { args, .. } => {
                 for a in args { a.for_each_var(f); }
             }
-            TPattern::Paren(inner) => inner.for_each_var(f),
+            TPattern::Paren(inner) | TPattern::Bang(inner) => inner.for_each_var(f),
             TPattern::Tuple(elems) => {
                 for e in elems { e.for_each_var(f); }
             }

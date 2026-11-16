@@ -425,7 +425,10 @@ impl Checker {
         };
         loop {
             match p {
-                Pattern::Paren(inner) | Pattern::As(_, inner) => p = inner.as_ref(),
+                Pattern::Paren(inner) | Pattern::As(_, inner) | Pattern::Bang(inner) => {
+                    p = inner.as_ref()
+                }
+                Pattern::Lazy { .. } => unreachable!("the parser lowers every lazy pattern"),
                 Pattern::Var(_) | Pattern::Wildcard => return Head::Wild,
                 Pattern::Constructor { name, args } => {
                     // An unregistered name is an error reported
@@ -594,6 +597,19 @@ fn literal_witness_text(l: &Literal) -> String {
     }
 }
 
+/// The context line of a diagnostic inside a `where` binding. The
+/// binding the parser writes for a lazy pattern that binds no variable
+/// (`~(_, _)`: `Parser::take_lazy`) has a name of the compiler's own,
+/// which is no name of the program's: the context then names what the
+/// binding is.
+fn where_binding_context(name: &str, ctx: &str) -> String {
+    if name.starts_with(crate::ast::LAZY_PATTERN_PREFIX) {
+        format!("the match of a lazy pattern ({ctx})")
+    } else {
+        format!("the where-binding '{name}' ({ctx})")
+    }
+}
+
 /// Does this pattern (recursively) contain a literal the matrix treats as
 /// an open domain (non-Bool, non-Unit)? The cheap gate for the warning
 /// posture: without one, the warning pass cannot differ from the hard
@@ -602,7 +618,10 @@ fn has_open_literal(p: &Pattern) -> bool {
     match p {
         Pattern::LitPat(Literal::Bool(_) | Literal::Unit) => false,
         Pattern::LitPat(_) => true,
-        Pattern::Paren(inner) | Pattern::As(_, inner) => has_open_literal(inner),
+        Pattern::Paren(inner) | Pattern::As(_, inner) | Pattern::Bang(inner) => {
+            has_open_literal(inner)
+        }
+        Pattern::Lazy { .. } => unreachable!("the parser lowers every lazy pattern"),
         Pattern::Constructor { args, .. } => args.iter().any(has_open_literal),
         Pattern::Tuple(ps) => ps.iter().any(has_open_literal),
         Pattern::Var(_) | Pattern::Wildcard => false,
@@ -1333,7 +1352,7 @@ impl Checker {
                 Err(e) => {
                     self.push_error_span(
                         e,
-                        format!("the where-binding '{}' ({})", ld.name, ctx),
+                        where_binding_context(&ld.name, ctx),
                         clause.span,
                     );
                     None
@@ -1564,7 +1583,7 @@ impl Checker {
             self.lit_pat_eq_wanted.truncate(lit_pat_before);
             self.push_error_span(
                 e,
-                format!("the where-binding '{}' ({})", ld.name, ctx),
+                where_binding_context(&ld.name, ctx),
                 clause_span,
             );
             binding_errored = true;
@@ -1609,7 +1628,7 @@ impl Checker {
                 Err(e) => {
                     self.push_error_span(
                         e,
-                        format!("the where-binding '{}' ({})", ld.name, ctx),
+                        where_binding_context(&ld.name, ctx),
                         clause_span,
                     );
                     binding_errored = true;
@@ -1635,7 +1654,7 @@ impl Checker {
                 Err(e) => if !binding_errored {
                     self.push_error_span(
                         e,
-                        format!("the where-binding '{}' ({})", ld.name, ctx),
+                        where_binding_context(&ld.name, ctx),
                         clause_span,
                     );
                 }
@@ -2182,6 +2201,12 @@ impl Checker {
                 Ok((TPattern::Constructor { name: con_key, args: targs, skolems }, subst, givens))
             }
             Pattern::Paren(inner) => self.check_pattern(inner, expected, env),
+            // A bang changes when the value is evaluated, not its type.
+            Pattern::Bang(inner) => {
+                let (tinner, s, g) = self.check_pattern(inner, expected, env)?;
+                Ok((TPattern::Bang(Box::new(tinner)), s, g))
+            }
+            Pattern::Lazy { .. } => unreachable!("the parser lowers every lazy pattern"),
             Pattern::Tuple(pats) => {
                 // Expect a Tuple type with matching arity
                 let elem_types: Vec<Ty> = pats.iter().map(|_| self.fresh_var("_t")).collect();

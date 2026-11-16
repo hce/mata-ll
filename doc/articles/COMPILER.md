@@ -22,7 +22,7 @@ Everything is orchestrated by `mllc/src/lib.rs:compile`. The stages, in order:
 | 3 | Resolve imports | `modules::ModuleLoader::resolve_imports` | module → module (imported decls merged, every reference bound to a canonical name — the program's in its module's scope, the compiler's own to their Prelude entities —, operator chains grouped; see §9) |
 | 4 | Prepend prelude | `parse_prelude` + merge in `compile` | → single `ast::Module` |
 | 5 | Desugar do-notation | `desugar::desugar_module` | AST → AST |
-| 6 | Type check | `typechecker::Checker::check_module_with_local_start` | AST → **TIR** (`tir::TModule`) |
+| 6 | Type check | `typechecker::Checker::check_module_with_local_start` | AST → **TIR** (`tir::TModule`); its last step, `strict_fields::lower`, writes the evaluation of strict constructor fields into the TIR (below) |
 | 7 | Monomorphize | `mono::Monomorphizer::run` | TIR → TIR (specialized) |
 | 8 | Verify | `mono::Monomorphizer::verify` (→ `verify::check`) | TIR → TIR (unchanged; errors if an invariant is violated) |
 | 9 | Constant fold | `fold::fold_module` | TIR → TIR |
@@ -149,6 +149,92 @@ Two ordering facts that are easy to get wrong and matter:
   the right-hand side, each selector re-matches the pattern), which
   needs no signature because local bindings are inferred. Both are lazy
   by construction: nothing matches until a selector is demanded.
+
+- **Strictness annotations are three mechanisms, each in one place.**
+  A program says when a value is evaluated with a lazy pattern `~p`, a
+  bang pattern `!p` (and the strict binding `let !x = e`), or a strict
+  constructor field `!T`.
+
+  *The lexer decides what a `!` or `~` is* (`lexer::prefix_occurrence`,
+  GHC's operator-whitespace rule): a PREFIX occurrence — not preceded by
+  a closing token, directly followed by an opening one — is
+  `Token::Bang` / `Token::Tilde`, every other occurrence the operator
+  `Operator("!")` / `Operator("~")` as before. The parser never looks at
+  spacing: the pattern grammar takes the two tokens as atom prefixes
+  (`parse_pattern_atom_inner`), a data declaration takes `Bang` in front
+  of a field type (`strictness_flag`; a GADT signature's arrows collect
+  the flags through `Parser::gadt_strict`), and an expression that meets
+  either reports GHC's "Bang pattern in expression context"
+  (`annotation_in_expression`).
+
+  *A lazy pattern exists only inside the parser.* `Pattern::Lazy` is
+  built by the pattern parser and removed by the construct that binds
+  the pattern, through one function, `take_lazy_patterns`: the node
+  becomes a fresh variable (`ast::LAZY_PATTERN_PREFIX`) and the
+  variables of `p` become lazy selectors over it (`pattern_selectors` —
+  the same `case v of p -> x` bindings a local pattern binding's
+  variables are, and Haskell 2010 §3.17.3's own definition of `~p`).
+  Each construct puts that group in the scope its pattern variables
+  have: an equation prepends it to its `where` group (`under_patterns`;
+  the `where` group scopes over guards and bodies, and a `where` binding
+  of the same name shadows the pattern's variable, whose selector is
+  dropped), a lambda and an unguarded alternative wrap the body in a
+  `let`, a guarded alternative gets the group as a `let` qualifier in
+  front of every guard (`guards_under_lazy`, which makes the chain one
+  the pattern-guard lowering handles), a `<-` statement, a generator and
+  a pattern guard are followed by a `let`, and a pattern binding adds
+  the selectors to its own group. Because the position is a plain
+  variable afterwards, nothing downstream has a lazy-pattern case and
+  nothing can get it wrong: a variable forces nothing, cannot fail, and
+  is irrefutable to the exhaustiveness check, the do-bind `MonadFail`
+  decision, the entry-force rule and the clause-column forcing. (A lazy
+  pattern that binds no variable keeps one binding nothing demands, so
+  the type checker still sees the match.)
+
+  *A bang pattern is a pattern node all the way down*
+  (`ast::Pattern::Bang`, `tir::TPattern::Bang`), because its evaluation
+  has a POSITION in the left-to-right, top-to-bottom match that no
+  rewrite into guards or `seq` preserves (`f !x 0 = 1; f x n = 2` must
+  evaluate `x` although the first equation then fails on its second
+  column). It answers the one forcing predicate, `forces_scrutinee`,
+  with yes, so every decision built on that predicate — the demand row,
+  the entry force and its site-forced upgrade, `match_scrutinee`,
+  `field_path`, the `case` scrutinee's entry force — treats `!x` like a
+  constructor pattern; `pattern_cannot_fail` and the exhaustiveness
+  check look through it. The match emitter adds one thing
+  (`push_bang_cond`): when the inner pattern does not force by itself
+  (`!x`, `!_`), the bang contributes the forced scrutinee as a conjunct
+  of the clause condition, at its position. Unlike a tuple's or
+  record's force conjunct its value may be any value — `false` and
+  `nil` are `False`, `Nothing` and `[]` — so it is emitted as
+  `(__force(p) or true)` (`Cond::Force::truthy`). A strict BINDING is
+  not a pattern matter: `LocalDef::strict` marks it, and the one place a
+  binding group meets its scope (`ast::Expr::let_in`, used by the
+  parser's `let_in` and by `desugar.rs` for a do-`let`) wraps the scope
+  in `seq` per strict binding — GHC's translation; an equation that
+  keeps its guards as guards gets the `seq` in its body or its first
+  guard's condition (`force_strict_where`). `let !p = e` with a
+  non-variable pattern adds a strict binding that performs the match
+  (`local_pattern_binding`).
+
+  *A strict field is written into the TIR as the report defines it.*
+  `strict_fields.rs` runs as the last step of type checking, over user
+  code and every derived instance, and rewrites each expression
+  occurrence of a strict constructor (`TConstructor::strict`) — a
+  saturated or partial application spine, the bare constructor, a
+  record update of a strict field — into `seq`s over let-bound
+  arguments around the raw constructor application (§4.2.1's ``P x = x
+  `seq` P' x``; a partial application becomes a lambda over the missing
+  fields, with the given arguments let-bound outside it). From there on
+  the program contains only lazy constructors and ordinary `seq`s. This
+  is deliberately not a codegen property: the backend's analyses treat
+  a constructor application as a value that is cheap to build and
+  already in WHNF (`is_cheap`, `expr_yields_whnf`, the folder's
+  known-constructor matches, the inliner), and each of them would have
+  needed the exception; the demand analysis reads the `seq` instead and
+  evaluates a cheap argument in place. Not yet used: that a field READ
+  from a strict constructor is evaluated — a match still reads it
+  through `__force`.
 
 - **"Declared twice" is decided in the parser, per source file.** Stages 3
   and 4 merge the Prelude, every import and the user's file into ONE
@@ -846,7 +932,10 @@ the forced scrutinee, and a tuple, a single-constructor record or a
 LuaDict record that tests nothing beneath it contributes the forced
 scrutinee itself as an always-true conjunct (`Cond::Force`,
 `push_force_cond` — its value is the table the pattern destructures), at
-the pattern's left-to-right position. The `and` chain alone therefore
+the pattern's left-to-right position. A bang pattern over a variable or
+wildcard (`!x`, `!_`) contributes the same kind of conjunct
+(`push_bang_cond`), spelled `(__force(p) or true)` because the value it
+forces may be `false` or `nil`. The `and` chain alone therefore
 reproduces GHC's match order: `(_, _)` under a `Just` diverges on ⊥, and a
 tuple column left of a failing column is forced before that column is
 tried. An integer literal pattern's test is Haskell 2010 §3.17.2's

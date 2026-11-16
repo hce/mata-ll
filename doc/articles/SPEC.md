@@ -1296,6 +1296,37 @@ binding (`lo, hi :: Int`), and the signature has no class context (GHC:
 "Overloaded signature conflicts with monomorphism restriction"). Class
 and instance bodies take no pattern bindings.
 
+A LAZY PATTERN `~p` (Haskell 2010 §3.17.2) matches without looking:
+the match always succeeds, the variables of `p` are bound to what
+matching `p` would give, and `p` is matched when one of them is first
+demanded. `f ~(a, _) = 5` is `5` for `f undefined`; `g ~(Just x) n = if
+n > 0 then x else 0` is `0` for `g Nothing 0` and raises
+`Non-exhaustive patterns in Just x` for `g Nothing 1`. It is an atomic
+pattern and stands wherever a pattern does — parameters, lambdas, case
+alternatives, `<-` statements, generators, pattern guards, inside other
+patterns, and at the root of a pattern binding, where it changes
+nothing (a pattern binding is lazy already). A lazy pattern is typed
+like any other, and it cannot match a `%1` argument.
+
+A BANG PATTERN `!p` (GHC's BangPatterns, on in its default language)
+evaluates the value to weak head normal form and then matches `p`: `f
+!x = …` is strict in `x` whether or not the body uses it, `k !_ y = y`
+evaluates what it ignores. The evaluation happens at the pattern's
+position in the left-to-right, top-to-bottom match — `f !x 0 = 1; f x n
+= 2` evaluates `x` before the second column is looked at. A bang at
+the head of a `let` or `where` binding makes the binding strict: `let
+!x = e in b` evaluates `e` before `b`, a `where !x = e` before the
+equation's first guard, a do block's `let !x = e` before the statements
+after it; with a pattern (`let !(a, b) = e`) the match itself is
+performed there. A strict binding is not allowed at the top level.
+
+`!` and `~` have these meanings only as a prefix — set off from what
+precedes them and glued to what follows, GHC's rule: `f !x`, `(!a,
+b)`, `P !Int`. With a space after it, or glued on both sides, `!` is
+the operator of that name (`xs ! 0`, `xs!0`, `(xs !)`), which a
+program may define, and so is `~`. The prefix spelling in an expression
+is an error ("Bang pattern in expression context: !y").
+
 Non-exhaustive function definitions and case expressions are rejected
 at compile time (the type checker performs exhaustiveness checking).
 
@@ -2424,6 +2455,20 @@ forces it" proof are:
 Everything else is thunked. A bare variable or nullary constructor in a
 lazy position is passed as its raw thunk-or-value reference rather than
 re-wrapped, so no redundant thunk is allocated.
+
+A constructor field declared with a strictness flag — `data P = P !Int
+Int`, `R { rx :: !Int, ry :: Int }`, `MkG :: !Int -> G` (Haskell 2010
+§4.2.1) — is evaluated to WHNF whenever the constructor is applied:
+`P` is the function ``\a b -> a `seq` P' a b`` over the lazy constructor
+`P'`. That holds however the constructor is applied — saturated,
+partially (the partial application itself evaluates nothing), as a
+first-class value, by record construction, by a record update of the
+field, inside a derived instance — and it is written into the program
+as that `seq` before any analysis runs (`strict_fields.rs`), so a
+strict field's argument is evaluated in place when it is cheap and
+forced when it is not, like any other `seq`. A newtype takes no flag.
+The pragma `{-# UNPACK #-}` is ignored with a warning, like every
+pragma; the field stays strict.
 
 `seq :: a -> b -> b` forces its first argument to WHNF, then yields the
 second (the value of `seq a b` is the value of `b`; the second argument

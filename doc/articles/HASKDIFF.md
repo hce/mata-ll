@@ -618,10 +618,11 @@ instances are GHC's: `[]` drops the element, `Maybe` yields `Nothing`,
 at compile time ("No instance for 'MonadFail (Either String)'", with a
 note explaining the rule); bind the value to a variable and `case` on
 it, or write the instance. A pattern that cannot fail — a variable, `_`,
-a tuple, `()`, an as-pattern or parentheses over such, a constructor
-pattern of a single-constructor type or a newtype whose arguments are
-irrefutable — asks nothing of the monad, exactly as GHC's
-`isIrrefutableHsPat` decides.
+a tuple, `()`, an as-pattern, a bang pattern or parentheses over such, a
+lazy pattern `~p` whatever `p` is, a constructor pattern of a
+single-constructor type or a newtype whose arguments are irrefutable —
+asks nothing of the monad, exactly as GHC's `isIrrefutableHsPat`
+decides.
 
 What differs is the exception, because error handling is string-based
 (above): GHC's `fail` in IO throws an `IOException` (`userError`), which
@@ -753,6 +754,37 @@ the prefix `(:+:) f g`), grouping by the fixity declared for the type the operat
 using module's scope (as for value operators). This exists chiefly for the generic
 representation combinators (`:+:`, `:*:`). Non-`:` type operators (a
 `TypeOperators`-style `data a + b`) are not supported.
+
+## Strictness annotations: `~p`, `!p` and `!T` as in GHC; `UNPACK` and `StrictData` are not
+
+Lazy patterns (`~p`, Haskell 2010 §3.17), strict constructor fields
+(`!T`, §4.2.1, in positional, record and GADT-syntax declarations) and
+bang patterns (`!p`, which GHC's default language GHC2021 enables) have
+GHC's meaning, and `!`/`~` are told from the operators of the same
+spelling by GHC's whitespace rule (a prefix occurrence is the
+annotation; `a ! b` and `a!b` are the operator). What is narrower:
+
+- `{-# UNPACK #-}` on a strict field is ignored with the warning every
+  pragma gets. Why: it asks for a representation (the field's contents
+  stored inline in the constructor), and a mata-ll value's
+  representation is the host's — a Lua table of fields; the field stays
+  strict, which is all a program can observe.
+- The extensions `StrictData` and `Strict` do not exist, so a field is
+  lazy unless flagged and `~T` on a field is rejected, as GHC rejects it
+  without `StrictData` ("Lazy field annotations (~) are disabled").
+- A failed lazy match raises GHC's text, `Non-exhaustive patterns in
+  Just x`, without the source span GHC puts in front (the convention of
+  every match failure here, see "Error handling is string-based").
+- That a field is strict is not yet used when it is READ: matching `P a
+  b` still reads `a` through the general force (which returns an
+  evaluated value as it is). Results are the same; a strict field saves
+  the thunk at construction, not the check at the match.
+
+A lazy pattern in a loop keeps what GHC keeps — a chain of unevaluated
+selectors when each iteration passes the lazily matched parts on (`go
+~(a, b) n = go (a, b) (n - 1)`) — and such a chain meets the fixed Lua
+stack sooner than GHC's growable one ("Deep thunk chains crash sooner",
+above).
 
 ## Operators cannot begin with `@`; `do`/`where` have no explicit-brace layout
 

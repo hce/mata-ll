@@ -179,8 +179,13 @@ impl Desugar<'_> {
                         sig: b.sig,
                         fixity: b.fixity,
                         operand_cons: b.operand_cons,
+                        strict: b.strict,
                     }).collect();
-                    Expr::Let { binds, body: Box::new(result) }
+                    // A strict binding of the group (`let !x = e`) is
+                    // evaluated before the statements after it — GHC reads
+                    // `do { let !x = e; stmts }` as `let !x = e in do
+                    // { stmts }`.
+                    Expr::let_in(binds, result, WiredIn::Seq.name())
                 }
                 DoStmt::PatternBind { pattern, expr, span, end } => {
                     // pat <- expr  =>  expr >>= \__pat -> case __pat of
@@ -253,7 +258,10 @@ impl Desugar<'_> {
             Pattern::Var(_) | Pattern::Wildcard => true,
             Pattern::LitPat(Literal::Unit) => true,
             Pattern::LitPat(_) => false,
-            Pattern::Paren(inner) | Pattern::As(_, inner) => self.pattern_irrefutable(inner),
+            Pattern::Paren(inner) | Pattern::As(_, inner) | Pattern::Bang(inner) => {
+                self.pattern_irrefutable(inner)
+            }
+            Pattern::Lazy { .. } => unreachable!("the parser lowers every lazy pattern"),
             Pattern::Tuple(ps) => ps.iter().all(|q| self.pattern_irrefutable(q)),
             Pattern::Constructor { name, args } => {
                 self.irrefutable_cons.contains(name)

@@ -2428,6 +2428,7 @@ impl Checker {
                 TConstructor {
                     name: c.name.clone(),
                     tag: self.con_tag(c),
+                    strict: c.strict.clone(),
                     fields: if c.gadt_type.is_some() {
                         // GADT: field types come from the registered ConInfo
                         let con_info = self.constructors.get(&c.name).unwrap();
@@ -2641,7 +2642,11 @@ impl Checker {
 
         let source_names = self.resolution.source_names.clone();
 
-        TModule { data_defs, dropped_data_defs: vec![], functions, instance_fns, has_main, exports, source_names, record_accessors, newtypes, newtype_types, passes_run: vec![] }
+        // Constructor strictness becomes explicit evaluation here, on the
+        // complete checked module — user code and every derived instance
+        // alike — so no later stage has to know that a constructor can be
+        // strict (see strict_fields.rs).
+        crate::strict_fields::lower(TModule { data_defs, dropped_data_defs: vec![], functions, instance_fns, has_main, exports, source_names, record_accessors, newtypes, newtype_types, passes_run: vec![] })
     }
 
     /// Register type families and aliases and lower the families to `Ty`
@@ -3141,6 +3146,7 @@ impl Checker {
                                 gadt_type: None,
                                 existential_vars: vec![],
                                 existential_constraints: vec![],
+                                strict: vec![],
                             };
                             let derived = self.derive_instance(
                                 class, name, type_vars, std::slice::from_ref(&con));

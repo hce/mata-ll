@@ -99,6 +99,9 @@ fn erase_pattern(ctors: &HashSet<String>, pat: TPattern) -> TPattern {
         },
         TPattern::Paren(inner) => TPattern::Paren(Box::new(erase_pattern(ctors, *inner))),
         TPattern::As(n, inner) => TPattern::As(n, Box::new(erase_pattern(ctors, *inner))),
+        // `!(N p)` is `!p`: the bang evaluates the value, which for a
+        // newtype IS the wrapped value.
+        TPattern::Bang(inner) => TPattern::Bang(Box::new(erase_pattern(ctors, *inner))),
         TPattern::Tuple(ps) => TPattern::Tuple(ps.into_iter().map(|p| erase_pattern(ctors, p)).collect()),
         other => other,
     }

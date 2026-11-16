@@ -127,6 +127,14 @@ pub enum Token {
     At,          // @
     Bind,        // <-
     Tick,        // ' (DataKinds promoted constructor prefix)
+    /// A PREFIX occurrence of `!` (`f !x`, `P !Int`, `(!a, b)`): the bang
+    /// of a bang pattern or of a strict constructor field. Any other
+    /// occurrence of `!` is the operator `Operator("!")`; the lexer
+    /// decides by the surrounding characters (`prefix_occurrence`).
+    Bang,
+    /// A PREFIX occurrence of `~` (`f ~(a, b)`): the tilde of a lazy
+    /// pattern. Any other occurrence is the operator `Operator("~")`.
+    Tilde,
 
     // Layout
     Indent(usize),  // indentation level at start of line
@@ -196,6 +204,8 @@ impl fmt::Display for Token {
             Token::At => "@",
             Token::Bind => "<-",
             Token::Tick => "'",
+            Token::Bang => "!",
+            Token::Tilde => "~",
             Token::Indent(n) => {
                 return write!(f, "start of a new line (indentation {})", n)
             }
@@ -682,6 +692,8 @@ pub fn lex_with_pragmas(
                     "=" => Token::Eq,
                     "|" => Token::Pipe,
                     "<-" => Token::Bind,
+                    "!" if prefix_occurrence(&chars, start, pos) => Token::Bang,
+                    "~" if prefix_occurrence(&chars, start, pos) => Token::Tilde,
                     _ => Token::Operator(op),
                 };
                 tokens.push(Located {
@@ -770,6 +782,45 @@ fn is_line_comment_start(chars: &[char], pos: usize) -> bool {
         j += 1;
     }
     j >= chars.len() || !is_operator_char(chars[j])
+}
+
+/// Is the symbol spelled by `chars[start..end]` a PREFIX occurrence — not
+/// preceded by a closing token and directly followed by an opening one?
+/// This is GHC's rule for telling a bang pattern from the operator `!`
+/// and a lazy pattern from the operator `~` (the "operator whitespace"
+/// rule of GHC proposal 229, on in every GHC since 9.0), character for
+/// character as GHC's lexer states it (`precededByClosingToken`,
+/// `followedByOpeningToken`):
+///
+/// ```text
+/// f !x     prefix        the bang of a bang pattern
+/// a ! b    loose infix   the operator
+/// a!b      tight infix   the operator
+/// a! b     suffix        the operator
+/// ```
+///
+/// A closing token ends in an identifier character, a quote, or a closing
+/// bracket (a `}` that closes a `-}` comment is whitespace, not a
+/// bracket); an opening token starts with an identifier character, a
+/// quote, or an opening bracket (a `{` that opens a `{-` comment is not
+/// one). The start of the file and of a line count as whitespace. The
+/// rule is purely lexical, so it reads the same in a pattern, an
+/// expression and a type: `xs !0` in an expression is a bang where an
+/// operator was meant, and the parser reports it in GHC's words.
+fn prefix_occurrence(chars: &[char], start: usize, end: usize) -> bool {
+    let preceded_by_closing = match start.checked_sub(1).map(|i| chars[i]) {
+        None => false,
+        Some('}') => !(start >= 2 && chars[start - 2] == '-'),
+        Some(')' | ']' | '"' | '\'' | '_') => true,
+        Some(c) => c.is_alphanumeric(),
+    };
+    let followed_by_opening = match chars.get(end).copied() {
+        None => false,
+        Some('{') => chars.get(end + 1) != Some(&'-'),
+        Some('(' | '[' | '"' | '\'' | '_') => true,
+        Some(c) => c.is_alphanumeric(),
+    };
+    !preceded_by_closing && followed_by_opening
 }
 
 /// ASCII only. Generated names rely on it: `ast::MINT` (`·`) must be a
@@ -1257,6 +1308,43 @@ mod tests {
         assert_eq!(tokens_of("x.field"), vec![id("x"), op("."), id("field")]);
         assert_eq!(tokens_of("[1..3]"), vec![Token::LeftBracket, Token::IntLit(1), op(".."), Token::IntLit(3), Token::RightBracket]);
         assert_eq!(tokens_of("1.5"), vec![Token::NumLit(1.5)]);
+    }
+
+    /// GHC's operator-whitespace rule for `!` and `~`: a prefix occurrence
+    /// (whitespace or an opening bracket before, an opening token right
+    /// after) is the bang of a bang pattern or strict field and the tilde
+    /// of a lazy pattern; every other occurrence is the operator.
+    #[test]
+    fn bang_and_tilde_are_prefix_occurrences_only() {
+        assert_eq!(tokens_of("f !x"), vec![id("f"), Token::Bang, id("x")]);
+        assert_eq!(tokens_of("a ! b"), vec![id("a"), op("!"), id("b")]);
+        assert_eq!(tokens_of("a!b"), vec![id("a"), op("!"), id("b")]);
+        assert_eq!(tokens_of("a! b"), vec![id("a"), op("!"), id("b")]);
+        assert_eq!(tokens_of("(!a, !_)"), vec![
+            Token::LeftParen, Token::Bang, id("a"), Token::Comma, Token::Bang,
+            Token::Underscore, Token::RightParen,
+        ]);
+        assert_eq!(tokens_of("(!)"), vec![Token::LeftParen, op("!"), Token::RightParen]);
+        assert_eq!(tokens_of("(! 1)"), vec![Token::LeftParen, op("!"), Token::IntLit(1), Token::RightParen]);
+        assert_eq!(tokens_of("xs !0"), vec![id("xs"), Token::Bang, Token::IntLit(0)]);
+        assert_eq!(tokens_of("P !Int ![a]"), vec![
+            up("P"), Token::Bang, up("Int"), Token::Bang, Token::LeftBracket, id("a"),
+            Token::RightBracket,
+        ]);
+        assert_eq!(tokens_of("f ~(a, b)"), vec![
+            id("f"), Token::Tilde, Token::LeftParen, id("a"), Token::Comma, id("b"),
+            Token::RightParen,
+        ]);
+        assert_eq!(tokens_of("a ~ b"), vec![id("a"), op("~"), id("b")]);
+        assert_eq!(tokens_of("a~b"), vec![id("a"), op("~"), id("b")]);
+        // A longer symbol run is one operator, whatever surrounds it.
+        assert_eq!(tokens_of("xs !!n"), vec![id("xs"), op("!!"), id("n")]);
+        assert_eq!(tokens_of("a !~b"), vec![id("a"), op("!~"), id("b")]);
+        // A comment is whitespace on either side.
+        assert_eq!(tokens_of("{- c -}!x"), vec![Token::Bang, id("x")]);
+        assert_eq!(tokens_of("a !{- c -} b"), vec![id("a"), op("!"), id("b")]);
+        // A line start is whitespace.
+        assert_eq!(tokens_of("!x"), vec![Token::Bang, id("x")]);
     }
 
     /// A qualified lexeme's `end_col` is its source end, like every other

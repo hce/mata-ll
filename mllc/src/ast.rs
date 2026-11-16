@@ -142,6 +142,8 @@ pub enum WiredIn {
     /// The fall-through of a failable pattern bind in a `do` block: the
     /// block's monad decides what a mismatch means (`MonadFail`).
     Fail,
+    /// The evaluation a strict binding (`let !x = e`) asks for.
+    Seq,
 }
 
 /// What a `WiredIn::reference` spelling starts with. `<` and the space
@@ -218,7 +220,7 @@ pub fn shown(name: &str) -> std::borrow::Cow<'_, str> {
 }
 
 impl WiredIn {
-    pub const ALL: [WiredIn; 9] = [
+    pub const ALL: [WiredIn; 10] = [
         WiredIn::ConcatMap,
         WiredIn::EnumFrom,
         WiredIn::EnumFromThen,
@@ -228,6 +230,7 @@ impl WiredIn {
         WiredIn::And,
         WiredIn::Bind,
         WiredIn::Fail,
+        WiredIn::Seq,
     ];
 
     /// The entity's canonical name: the name the Prelude declares it under.
@@ -242,6 +245,7 @@ impl WiredIn {
             WiredIn::And => "&&",
             WiredIn::Bind => ">>=",
             WiredIn::Fail => "fail",
+            WiredIn::Seq => "seq",
         }
     }
 
@@ -544,6 +548,16 @@ pub struct LocalDef {
     pub fixity: Option<(Assoc, u8)>,
     /// As `Clause::operand_cons`, for a local equation with an infix head.
     pub operand_cons: Vec<HeadOperand>,
+    /// The binding is STRICT — written with a bang, `let !x = e` (GHC's
+    /// BangPatterns): its value is evaluated to weak head normal form when
+    /// the scope of its group is entered, before the group's body (for a
+    /// `where` group: before the guards). The flag is read where a group
+    /// meets its scope and by nothing else: `Expr::let_in` wraps the body
+    /// in a `seq` per strict binding, which is GHC's own translation
+    /// (`let !x = e in b` is `let x = e in x \`seq\` b`), and the parser
+    /// does the same for the guards of an equation with a `where` group.
+    /// No stage after `desugar.rs` reads it.
+    pub strict: bool,
 }
 
 /// The name prefix of a pattern-guard JOIN POINT: the lazily `let`-bound
@@ -557,11 +571,61 @@ pub struct LocalDef {
 /// GADT refinement across the join.
 pub const JOIN_POINT_PREFIX: &str = "__pgj_";
 
+/// The name prefix of the variable the parser puts where a lazy pattern
+/// `~p` stood (`Parser::take_lazy_patterns`); the variables of `p` are
+/// selectors over it. In the compiler's reserved `__` namespace, so the
+/// prefix identifies such a variable: the linearity checker reads it to
+/// say that a lazy pattern cannot match a `%1` argument, in those words.
+pub const LAZY_PATTERN_PREFIX: &str = "__pglz_";
+
+impl Expr {
+    /// `let binds in body` for a binding group as the program wrote it:
+    /// the strict bindings of the group (`LocalDef::strict`, `let !x = e`)
+    /// are evaluated, in source order, before the body —
+    /// `let x = e in x \`seq\` body`, GHC's translation of a banged
+    /// binding. The bindings stay ordinary lazy bindings of one recursive
+    /// group, so a strict binding may refer to any other; what the bang
+    /// adds is the demand. `seq` is the spelling of the Prelude's `seq`
+    /// at the caller's stage (`WiredIn::Seq`: `reference()` in the parser,
+    /// `name()` after import resolution). The flags are cleared: a group
+    /// meets its scope once.
+    pub fn let_in(mut binds: Vec<LocalDef>, body: Expr, seq: &str) -> Expr {
+        let body = Expr::force_strict(&mut binds, body, seq);
+        Expr::Let { binds, body: Box::new(body) }
+    }
+
+    /// `body` behind the evaluation of every strict binding of `binds`
+    /// (see `let_in`), clearing the flags.
+    pub fn force_strict(binds: &mut [LocalDef], body: Expr, seq: &str) -> Expr {
+        let mut forced = body;
+        for ld in binds.iter_mut().rev() {
+            if std::mem::take(&mut ld.strict) {
+                forced = Expr::App(
+                    Box::new(Expr::App(
+                        Box::new(Expr::Var(seq.to_string())),
+                        Box::new(Expr::Var(ld.name.clone())),
+                    )),
+                    Box::new(forced),
+                );
+            }
+        }
+        forced
+    }
+}
+
 impl LocalDef {
     /// A binding as an equation alone gives it: no signature, no fixity
     /// declaration, nothing left to check about its head.
     pub fn new(name: String, patterns: Vec<Pattern>, body: Expr) -> Self {
-        LocalDef { name, patterns, body, sig: None, fixity: None, operand_cons: Vec::new() }
+        LocalDef {
+            name,
+            patterns,
+            body,
+            sig: None,
+            fixity: None,
+            operand_cons: Vec::new(),
+            strict: false,
+        }
     }
 
     /// Is this binding a pattern-guard join point (see `JOIN_POINT_PREFIX`)?
@@ -606,6 +670,21 @@ pub enum Pattern {
     /// As-pattern: `xs@(x : rest)` — binds `xs` to the whole value while
     /// also matching the inner pattern against it.
     As(String, Box<Pattern>),
+    /// Bang pattern: `!p` — matching evaluates the value to weak head
+    /// normal form first and then matches `p` against it (GHC's
+    /// BangPatterns, on in its default language GHC2021). `!x` and `!_`
+    /// therefore force where `x` and `_` do not; on a pattern that
+    /// inspects its value anyway (`!(Just y)`) the bang changes nothing.
+    Bang(Box<Pattern>),
+    /// Lazy pattern: `~p` (Haskell 2010 §3.17.2 — matching always
+    /// succeeds, and `p` is matched when one of its variables is first
+    /// demanded). `text` is `p` as written, for the message of a match
+    /// that fails then. Exists only inside the parser: every construct
+    /// that binds a pattern replaces the node by a fresh variable and
+    /// binds the variables of `p` to selectors over it, the lowering a
+    /// pattern binding has (`Parser::take_lazy_patterns`). No stage after
+    /// the parser sees one.
+    Lazy { inner: Box<Pattern>, text: String },
 }
 
 impl Pattern {
@@ -622,7 +701,9 @@ impl Pattern {
                     a.for_each_var(f);
                 }
             }
-            Pattern::Paren(inner) => inner.for_each_var(f),
+            Pattern::Paren(inner) | Pattern::Bang(inner) | Pattern::Lazy { inner, .. } => {
+                inner.for_each_var(f)
+            }
             Pattern::Tuple(elems) => {
                 for e in elems {
                     e.for_each_var(f);
@@ -846,6 +927,7 @@ impl Expr {
                     sig: ld.sig,
                     fixity: ld.fixity,
                     operand_cons: ld.operand_cons,
+                    strict: ld.strict,
                 }).collect(),
                 body: Box::new(f(*body)),
             },
@@ -860,6 +942,7 @@ impl Expr {
                         sig: ld.sig,
                         fixity: ld.fixity,
                         operand_cons: ld.operand_cons,
+                        strict: ld.strict,
                     }).collect(),
                 },
                 DoStmt::PatternBind { pattern, expr, span, end } =>
@@ -1112,6 +1195,19 @@ pub struct Constructor {
     pub existential_vars: Vec<String>,
     /// Constraints on existential type variables: `forall a. Show a => MkShowBox a`
     pub existential_constraints: Vec<Constraint>,
+    /// Which fields carry a strictness flag (`P !Int Int`, `R { rx ::
+    /// !Int }`; Haskell 2010 §4.2.1), parallel to `fields`: a constructor
+    /// application evaluates each such field to weak head normal form
+    /// before the value exists. Empty for a constructor without strict
+    /// fields.
+    pub strict: Vec<bool>,
+}
+
+impl Constructor {
+    /// Is field `i` (0-based, declaration order) declared strict?
+    pub fn field_is_strict(&self, i: usize) -> bool {
+        self.strict.get(i).copied().unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -1100,3 +1100,266 @@ fn pattern_binding_failure_is_raised_where_a_variable_is_demanded() {
         assert_eq!(lines.last().map(String::as_str), Some("before"), "in:\n{source}");
     }
 }
+
+/// Compile and run each program; it must print "before" first, then raise
+/// a runtime error containing the given message, and never print "after".
+/// For the tests below, where WHEN something is evaluated is the
+/// behaviour: the program's first statement is `putStrLn "before"`, and a
+/// later one evaluates what must fail.
+fn expect_raise_after_before(cases: &[(&str, &str)]) {
+    for (source, message) in cases {
+        let lua_code = compile(source, Path::new("."), &[])
+            .unwrap_or_else(|e| panic!("should compile:\n{source}\n{e}"))
+            .lua_code;
+        let lua = mlua::Lua::new();
+        let printed = lua.create_table().unwrap();
+        let sink = printed.clone();
+        let print_fn = lua
+            .create_function(move |_, line: String| sink.raw_set(sink.raw_len() + 1, line))
+            .unwrap();
+        lua.globals().set("print", print_fn).unwrap();
+        match lua.load(&lua_code).set_name("raise_after_before").exec() {
+            Err(e) => {
+                let msg = format!("{e}");
+                assert!(msg.contains(message), "expected '{message}', got: {msg}\nin:\n{source}");
+            }
+            Ok(()) => panic!("expected a runtime error from:\n{source}"),
+        }
+        let lines: Vec<String> =
+            printed.sequence_values::<String>().collect::<mlua::Result<_>>().unwrap();
+        assert!(
+            lines.first().map(String::as_str) == Some("before")
+                && lines.iter().all(|l| l != "after"),
+            "printed {lines:?} in:\n{source}"
+        );
+    }
+}
+
+// A bang pattern `!p` evaluates the value it matches to weak head normal
+// form, whatever `p` is and whether or not anything uses it (GHC's
+// BangPatterns, on in its default language GHC2021). Each program hands a
+// bang an `error` that only the bang can reach; GHC raises it for
+// every one of them. The accepting side is bang_patterns.mll.
+#[test]
+fn bang_pattern_evaluates_what_it_matches() {
+    expect_raise_after_before(&[
+        // a banged wildcard evaluates the argument the body never uses
+        (
+            "k :: Int -> Int -> Int\nk !_ y = y\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (k (error \"was evaluated\") 1)\n",
+            "was evaluated",
+        ),
+        // the bang is evaluated in the FIRST equation, before the column that makes it fail — a guard on the body would evaluate nothing
+        (
+            "two :: Int -> Int -> Int\ntwo !x 0 = 1\ntwo x n = 2\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (two (error \"was evaluated\") 1)\n",
+            "was evaluated",
+        ),
+        // `let !x = e in b` evaluates `e` before `b`
+        (
+            "main :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (let !x = (error \"was evaluated\" :: Int) in (5 :: Int))\n",
+            "was evaluated",
+        ),
+        // a do block's `let !x = e` evaluates `e` before the statements after it
+        (
+            "main :: IO ()\nmain = do\n  putStrLn \"before\"\n  let !x = (error \"was evaluated\" :: Int)\n  putStrLn \"after\"\n",
+            "was evaluated",
+        ),
+        // a lambda parameter
+        (
+            "main :: IO ()\nmain = do\n  putStrLn \"before\"\n  print ((\\ !a -> 1 :: Int) (error \"was evaluated\" :: Int))\n",
+            "was evaluated",
+        ),
+        // a case alternative
+        (
+            "main :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (case (error \"was evaluated\" :: Int) of !_ -> 1 :: Int)\n",
+            "was evaluated",
+        ),
+        // inside a tuple pattern
+        (
+            "inTuple :: (Int, Int) -> Int\ninTuple (!a, _) = 1\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (inTuple (error \"was evaluated\", 2))\n",
+            "was evaluated",
+        ),
+        // on a cons cell's tail, which no other pattern there would evaluate
+        (
+            "inner :: [Int] -> Int\ninner (_ : !_) = 1\ninner [] = 0\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (inner (1 : error \"was evaluated\"))\n",
+            "was evaluated",
+        ),
+        // `where !z = e` is evaluated before the first guard
+        (
+            "f :: Int -> Int\nf x\n  | x > 0 = 1\n  | otherwise = 2\n  where !z = (error \"was evaluated\" :: Int)\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (f 1)\n",
+            "was evaluated",
+        ),
+        // `where !z = e` without guards
+        (
+            "f :: Int -> Int\nf x = 1\n  where !z = (error \"was evaluated\" :: Int)\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (f 1)\n",
+            "was evaluated",
+        ),
+        // a strict pattern binding performs its match: the failure is raised at the `let`
+        (
+            "main :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (let !(Just y) = (Nothing :: Maybe Int) in (5 :: Int))\n",
+            "Non-exhaustive patterns in Just y",
+        ),
+        // a do bind
+        (
+            "main :: IO ()\nmain = do\n  putStrLn \"before\"\n  !m <- return (error \"was evaluated\" :: Int)\n  putStrLn \"after\"\n",
+            "was evaluated",
+        ),
+        // a where-local function, first equation
+        (
+            "h :: Int -> Int\nh v = go (error \"was evaluated\") v\n  where\n    go :: Int -> Int -> Int\n    go !s 0 = 1\n    go s n = go s (n - 1)\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (h 3)\n",
+            "was evaluated",
+        ),
+        // a bang INSIDE a lazy pattern binding is evaluated when the binding is matched
+        (
+            "main :: IO ()\nmain = do\n  putStrLn \"before\"\n  let (!c, d) = (error \"was evaluated\" :: Int, 6 :: Int)\n  print d\n",
+            "was evaluated",
+        ),
+        // an instance method
+        (
+            "class C a where\n  m :: a -> Int -> Int\ninstance C Bool where\n  m !_ n = n\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (m (error \"was evaluated\" :: Bool) 1)\n",
+            "was evaluated",
+        ),
+        // a comprehension generator
+        (
+            "main :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (length [1 :: Int | !y <- [error \"was evaluated\" :: Int]])\n",
+            "was evaluated",
+        ),
+        // on a newtype pattern the bang evaluates the wrapped value
+        (
+            "newtype N = N Int\nnt :: N -> Int\nnt !(N _) = 1\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (nt (N (error \"was evaluated\")))\n",
+            "was evaluated",
+        ),
+        // a pattern guard
+        (
+            "g :: Int -> Int\ng n\n  | !y <- (error \"was evaluated\" :: Int) = 1\n  | otherwise = 2\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (g 1)\n",
+            "was evaluated",
+        ),
+        // a bang right of a column that matched
+        (
+            "f :: Bool -> Int -> Int\nf True !x = 1\nf False _ = 2\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (f True (error \"was evaluated\"))\n",
+            "was evaluated",
+        ),
+        // `let !_ = e`
+        (
+            "main :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (let !_ = (error \"was evaluated\" :: Int) in (5 :: Int))\n",
+            "was evaluated",
+        ),
+        // a strict binding next to a lazy one in a let expression
+        (
+            "f :: Int -> Int\nf x = let !y = (error \"was evaluated\" :: Int)\n          z = 1\n      in z\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (f 1)\n",
+            "was evaluated",
+        ),
+    ]);
+}
+
+// A strict field (Haskell 2010 §4.2.1) is evaluated when its constructor
+// is applied — by every way of applying it — although the match that
+// follows ignores the field. Each program builds a value whose strict
+// field is an `error` and reads a DIFFERENT field; GHC raises it for
+// every one of them. The accepting side, with the lazy fields and the
+// partial applications that evaluate nothing, is strict_fields.mll.
+#[test]
+fn strict_field_is_evaluated_by_every_construction() {
+    expect_raise_after_before(&[
+        // saturated
+        (
+            "data P = P !Int !Int\nsndP :: P -> Int\nsndP (P _ b) = b\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (sndP (P (error \"was evaluated\") 2))\n",
+            "was evaluated",
+        ),
+        // partial application, saturated later by `map`
+        (
+            "data P = P !Int !Int\nsndP :: P -> Int\nsndP (P _ b) = b\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (map sndP (map (P (error \"was evaluated\")) [1]))\n",
+            "was evaluated",
+        ),
+        // first-class, applied by `zipWith`
+        (
+            "data P = P !Int !Int\nsndP :: P -> Int\nsndP (P _ b) = b\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (map sndP (zipWith P [error \"was evaluated\"] [1]))\n",
+            "was evaluated",
+        ),
+        // record construction
+        (
+            "data R = R { rx :: !Int, ry :: Int }\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (ry (R { rx = error \"was evaluated\", ry = 2 }))\n",
+            "was evaluated",
+        ),
+        // record update
+        (
+            "data R = R { rx :: !Int, ry :: Int }\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  let r = R { rx = 1, ry = 2 }\n  print (ry (r { rx = error \"was evaluated\" }))\n",
+            "was evaluated",
+        ),
+        // the value a derived `fmap` rebuilds
+        (
+            "data F a = F !a Int deriving Functor\nsndF :: F a -> Int\nsndF (F _ b) = b\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (sndF (fmap (\\_ -> (error \"was evaluated\" :: Int)) (F (1 :: Int) 2)))\n",
+            "was evaluated",
+        ),
+        // a GADT-syntax constructor
+        (
+            "{-# LANGUAGE GADTs #-}\ndata G where\n  MkG :: !Int -> Int -> G\ngsnd :: G -> Int\ngsnd (MkG _ b) = b\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (gsnd (MkG (error \"was evaluated\") 2))\n",
+            "was evaluated",
+        ),
+        // an existential constructor
+        (
+            "data Shape = forall a. Show a => Shape !a Int\nshapeN :: Shape -> Int\nshapeN (Shape _ n) = n\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (shapeN (Shape (error \"was evaluated\" :: Int) 3))\n",
+            "was evaluated",
+        ),
+        // a recursive type
+        (
+            "data Tree a = Leaf | Node !(Tree a) a !(Tree a)\nval :: Tree Int -> Int\nval (Node _ v _) = v\nval Leaf = 0\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (val (Node (error \"was evaluated\") 1 Leaf))\n",
+            "was evaluated",
+        ),
+        // record update of a field strict in the constructor the record has (and lazy in the other)
+        (
+            "data M = MA { mv :: !Int, mw :: Int, pad :: Int } | MB { mv :: Int, mw :: Int, pad :: Int }\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  let m1 = MA { mv = 1, mw = 2, pad = 0 }\n  print (mw (m1 { mv = error \"was evaluated\" }))\n",
+            "was evaluated",
+        ),
+        // applied through `$`
+        (
+            "data P = P !Int !Int\nsndP :: P -> Int\nsndP (P _ b) = b\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (sndP (P (error \"was evaluated\") $ 2))\n",
+            "was evaluated",
+        ),
+        // passed as an argument and applied there
+        (
+            "data P = P !Int !Int\nsndP :: P -> Int\nsndP (P _ b) = b\nmk :: (Int -> Int -> P) -> Int -> P\nmk f n = f (error \"was evaluated\") n\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (sndP (mk P 2))\n",
+            "was evaluated",
+        ),
+        // a polymorphic field
+        (
+            "data Q a = Q !a [a]\nlenQ :: Q a -> Int\nlenQ (Q _ xs) = length xs\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (lenQ (Q (error \"was evaluated\" :: String) []))\n",
+            "was evaluated",
+        ),
+        // a strict field holding a value with strict fields: both levels are evaluated
+        (
+            "data P = P !Int !Int deriving Show\ndata W = W { wp :: !P, wn :: Int }\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (wn (W { wp = P 1 (error \"was evaluated\"), wn = 2 }))\n",
+            "was evaluated",
+        ),
+    ]);
+}
+
+// A lazy pattern `~p` (Haskell 2010 §3.17.2) is matched when one of its
+// variables is demanded, and a match that fails then raises GHC's error
+// for an irrefutable pattern, "Non-exhaustive patterns in <p>" — the
+// message a failed pattern binding has (above), `p` named without its
+// tilde and outer parentheses. The accepting side is lazy_patterns.mll.
+#[test]
+fn lazy_pattern_failure_is_raised_where_a_variable_is_demanded() {
+    expect_raise_after_before(&[
+        // a function parameter: the undemanded call is fine, the demanded one fails
+        (
+            "g :: Maybe Int -> Int -> Int\ng ~(Just x) n = if n > 0 then x else 0\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (g Nothing 0)\n  print (g Nothing 1)\n",
+            "Non-exhaustive patterns in Just x",
+        ),
+        // a case alternative
+        (
+            "main :: IO ()\nmain = do\n  putStrLn \"before\"\n  print (case (Nothing :: Maybe Int) of ~(Just x) -> x + 1)\n",
+            "Non-exhaustive patterns in Just x",
+        ),
+        // a lambda
+        (
+            "main :: IO ()\nmain = do\n  putStrLn \"before\"\n  print ((\\ ~(x : _) -> x + (1 :: Int)) [])\n",
+            "Non-exhaustive patterns in x : _",
+        ),
+        // nested in a let pattern binding: the outer variable is fine
+        (
+            "main :: IO ()\nmain = do\n  putStrLn \"before\"\n  let (a, ~[b]) = (1 :: Int, [] :: [Int])\n  print a\n  print b\n",
+            "Non-exhaustive patterns in [b]",
+        ),
+    ]);
+}

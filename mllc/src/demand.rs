@@ -2185,6 +2185,10 @@ fn pattern_demand(pat: &TPattern, body: &DemandMap) -> Option<Demand> {
         TPattern::Wildcard => None,
         TPattern::LitPat(..) | TPattern::LitEq { .. } => Some(Demand::Head),
         TPattern::Paren(inner) => pattern_demand(inner, body),
+        // A bang pattern evaluates the value to WHNF whatever the inner
+        // pattern asks: at least `Head`, and the inner pattern's demand
+        // when it proves more (every demand implies `Head`).
+        TPattern::Bang(inner) => pattern_demand(inner, body).or(Some(Demand::Head)),
         TPattern::Tuple(ps) => Some(Demand::Fields(
             ps.iter().map(|p| pattern_demand(p, body)).collect(),
         )),
@@ -2657,7 +2661,7 @@ fn seed_param(clauses: &[&TLocalDefLike], i: usize) -> Option<Demand> {
             // recursion it proves for the plain spelling (a sound
             // under-claim, but a needless parity gap between spellings).
             let mut p = p;
-            while let TPattern::As(_, inner) | TPattern::Paren(inner) = p {
+            while let TPattern::As(_, inner) | TPattern::Paren(inner) | TPattern::Bang(inner) = p {
                 p = inner.as_ref();
             }
             match p {

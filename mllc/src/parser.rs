@@ -289,6 +289,15 @@ struct Parser {
     /// parser's own desugars (pattern lambdas, pattern bindings, pattern
     /// guards, comprehensions) spread one list over several AST nodes.
     pattern_binders: Vec<usize>,
+    /// The strictness flags of the GADT constructor signature being
+    /// parsed, one per argument read so far (`MkT :: !Int -> Bool -> T`
+    /// gives `[true, false]`) — `Some` only while the type parser stands
+    /// on the signature's own arrow spine. `parse_type_inner` and
+    /// `parse_type_arrow_inner` take it away while they read anything
+    /// that is not that spine (a context, an argument's own type), so a
+    /// `!` anywhere else in a type finds no collector and is the parse
+    /// error it is in every other type.
+    gadt_strict: Option<Vec<bool>>,
     /// The declaration table: every top-level name this module's source
     /// declares, in source order. Filled as the declarations are parsed
     /// (`declare`), checked once at the end of the module
@@ -325,6 +334,7 @@ impl Parser {
             top_patterns: Vec::new(),
             let_in_pending: 0,
             pattern_binders: Vec::new(),
+            gadt_strict: None,
             declared: Vec::new(),
         }
     }
@@ -1078,7 +1088,8 @@ impl Parser {
             | Token::Ident(_) | Token::LeftParen
             | Token::UpperIdent(_) | Token::QualUpperIdent(_) | Token::LeftBracket
             | Token::Underscore | Token::IntLit(_) | Token::BigIntLit(_)
-            | Token::NumLit(_) | Token::StrLit(_))
+            | Token::NumLit(_) | Token::StrLit(_)
+            | Token::Bang | Token::Tilde)
     }
 
     /// After a declaration fails to parse, skip forward to the next plausible
@@ -1180,7 +1191,14 @@ impl Parser {
                         }
                         let con_name = p.expect_upper_ident()?;
                         p.expect(&Token::DblColon)?;
-                        let ty = p.parse_type()?;
+                        // The arguments of a constructor signature may
+                        // carry strictness flags (`MkT :: !Int -> T`);
+                        // the arrow parser collects them along the
+                        // signature's own arrows (`gadt_strict`).
+                        p.gadt_strict = Some(Vec::new());
+                        let ty = p.parse_type();
+                        let strict = p.gadt_strict.take().unwrap_or_default();
+                        let ty = ty?;
                         constructors.push(Constructor {
                             name: con_name,
                             external_name: None,
@@ -1188,6 +1206,7 @@ impl Parser {
                             gadt_type: Some(ty),
                             existential_vars: vec![],
                             existential_constraints: vec![],
+                            strict,
                         });
                     }
                     Ok(())
@@ -1274,6 +1293,7 @@ impl Parser {
         if self.at(&Token::LeftBrace) {
             self.advance();
             let mut fields: Vec<crate::ast::RecordField> = Vec::new();
+            let mut strict: Vec<bool> = Vec::new();
             // The name token of each field, parallel to `fields`.
             let mut field_toks: Vec<usize> = Vec::new();
             loop {
@@ -1323,7 +1343,33 @@ impl Parser {
                     None
                 };
                 self.expect(&Token::DblColon)?;
-                let field_type = self.parse_type()?;
+                // `field :: !T` (Haskell 2010 §4.2.1 `fielddecl → vars ::
+                // (type | ! atype)`): the flag takes an atomic type.
+                let field_strict = self.strictness_flag()?;
+                let field_type = if field_strict {
+                    let ty = self.parse_type_atom()?;
+                    if !matches!(self.peek(), Token::Comma | Token::RightBrace) {
+                        let mut diag = self.err_here(format!(
+                            "Unexpected strictness (!) annotation in the type of field '{}': \
+                             the flag applies to the one type atom after it, and the type \
+                             continues with {}",
+                            field_name,
+                            self.peek(),
+                        ));
+                        diag.notes.push(format!(
+                            "a strict field is '{} :: !T' with T a type name, a type variable \
+                             or a type in parentheses or brackets; put a compound type in \
+                             parentheses, '!(Maybe Int)' (GHC rejects the unparenthesised \
+                             form the same way).",
+                            field_name,
+                        ));
+                        return Err(diag);
+                    }
+                    ty
+                } else {
+                    self.parse_type()?
+                };
+                strict.push(field_strict);
                 fields.push(crate::ast::RecordField { name: field_name, external_key, ty: field_type });
                 if self.at(&Token::Comma) {
                     self.advance();
@@ -1340,6 +1386,7 @@ impl Parser {
                 gadt_type: None,
                 existential_vars,
                 existential_constraints,
+                strict,
             });
         }
 
@@ -1350,8 +1397,18 @@ impl Parser {
         // field types. A type VARIABLE named `as` is still fine anywhere it
         // is not a whole bare field: `MkF (Maybe as)` parses as before.
         let mut fields = Vec::new();
-        while self.is_type_atom_start() && !matches!(self.peek(), Token::Ident(s) if s == "as") {
+        let mut strict = Vec::new();
+        loop {
+            // `Con !T1 T2` (Haskell 2010 §4.2.1 `constr → con [!] atype1 …`).
+            let field_strict = self.strictness_flag()?;
+            if !field_strict
+                && !(self.is_type_atom_start()
+                    && !matches!(self.peek(), Token::Ident(s) if s == "as"))
+            {
+                break;
+            }
             fields.push(self.parse_type_atom()?);
+            strict.push(field_strict);
         }
 
         let external_name = self.parse_constructor_external_name(&name)?;
@@ -1362,7 +1419,55 @@ impl Parser {
             gadt_type: None,
             existential_vars,
             existential_constraints,
+            strict,
         })
+    }
+
+    /// The strictness flag in front of a constructor field's type, if one
+    /// stands here: consumes the `!` and answers whether the field is
+    /// strict. The flag is a PREFIX `!` (`P !Int`), which is what the
+    /// lexer hands over as `Token::Bang`; the other two spellings a field
+    /// can begin with are GHC's errors and reported as such — a `!` set
+    /// off by a space is the operator (GHC then reads `P ! Int` as an
+    /// infix constructor declaration: "Not a data constructor: '!'"), and
+    /// `~T` is the laziness flag of GHC's StrictData extension, which
+    /// neither GHC's default language nor mata-ll has.
+    fn strictness_flag(&mut self) -> PResult<bool> {
+        match self.peek() {
+            Token::Bang => {
+                self.advance();
+                Ok(true)
+            }
+            Token::Operator(op) if op == "!" => {
+                let mut diag = self.err_here(
+                    "parse error on input '!': a strictness flag stands directly in front \
+                     of the field type it marks, with no space between them"
+                        .to_string(),
+                );
+                diag.notes.push(
+                    "write 'P !Int' for a strict field. With a space on both sides, or \
+                     glued to what precedes it, '!' is the operator of that name (GHC \
+                     decides by the same whitespace rule and then rejects this \
+                     declaration: \"Not a data constructor: '!'\")."
+                        .to_string(),
+                );
+                Err(diag)
+            }
+            Token::Tilde => {
+                let mut diag =
+                    self.err_here("Lazy field annotations (~) are disabled".to_string());
+                diag.notes.push(
+                    "a constructor field is lazy unless it is marked strict with '!', so \
+                     there is nothing for '~' to switch off: remove it. (In GHC the \
+                     annotation belongs to the StrictData extension, which makes fields \
+                     strict by default; mata-ll does not have that extension, and GHC \
+                     rejects the annotation without it.)"
+                        .to_string(),
+                );
+                Err(diag)
+            }
+            _ => Ok(false),
+        }
     }
 
     /// Parse the optional trailing external-name rename of a data
@@ -1463,6 +1568,7 @@ impl Parser {
                 let sel = self.expect_ident()?;
                 self.declare(&sel, DeclaredAs::Field(name.clone()), sel_tok);
                 self.expect(&Token::DblColon)?;
+                self.newtype_strictness_error(&name)?;
                 inner = self.parse_type()?;
                 if self.at(&Token::Comma) {
                     return Err(self.err_here(format!(
@@ -1475,11 +1581,16 @@ impl Parser {
                 self.expect(&Token::RightBrace)?;
                 field = Some(sel);
             } else {
+                self.newtype_strictness_error(&name)?;
                 inner = self.parse_type()?;
             }
         } else {
+            self.newtype_strictness_error(&name)?;
             inner = self.parse_type()?;
         }
+        // `newtype Rad = MkRad !Double`: the freely named constructor was
+        // read as the head of a type; the flag stands behind it.
+        self.newtype_strictness_error(&name)?;
         let deriving = self.parse_deriving()?;
 
         Ok(Decl::NewtypeDef {
@@ -1490,6 +1601,29 @@ impl Parser {
             inner,
             deriving,
         })
+    }
+
+    /// A strictness flag on a newtype's field (`newtype N = N !Int`). A
+    /// newtype has no constructor at run time — its value IS the wrapped
+    /// value — so there is no construction that could evaluate anything
+    /// (Haskell 2010 §4.2.3; GHC: "A newtype constructor must not have a
+    /// strictness annotation").
+    fn newtype_strictness_error(&self, name: &str) -> PResult<()> {
+        if !self.at(&Token::Bang) {
+            return Ok(());
+        }
+        let mut diag = self.err_here(format!(
+            "A newtype constructor must not have a strictness annotation: in the \
+             newtype declaration for '{name}'"
+        ));
+        diag.notes.push(format!(
+            "a newtype is its wrapped type under another name: constructing a '{name}' \
+             builds nothing, so there is no moment at which a field could be evaluated, \
+             and a '{name}' is evaluated exactly when the value inside it is. Remove \
+             the '!'; for a constructor that evaluates its field, declare the type \
+             with 'data'."
+        ));
+        Err(diag)
     }
 
     fn parse_import_decl(&mut self) -> PResult<Decl> {
@@ -1935,8 +2069,10 @@ impl Parser {
             }
             out.push_str(&text);
             in_backticks ^= backtick;
-            glue = matches!(loc.token, Token::LeftParen | Token::LeftBracket | Token::At)
-                || (backtick && in_backticks);
+            glue = matches!(
+                loc.token,
+                Token::LeftParen | Token::LeftBracket | Token::At | Token::Bang | Token::Tilde
+            ) || (backtick && in_backticks);
         }
         out
     }
@@ -2579,31 +2715,37 @@ impl Parser {
     /// follows a function of its own name directly — `f x = 1` and then
     /// `(f, g) = …` are two definitions of `f`, reported as such.
     fn top_pattern_binding(&mut self, pattern: Pattern, head_tok: usize) -> PResult<Vec<Decl>> {
-        let text = self.source_text(head_tok, self.cur());
+        let text = self.pattern_text(head_tok, self.cur(), &pattern);
         let span = self.span_of(head_tok);
         self.expect_pattern_binding_rhs(head_tok)?;
         self.check_linear(head_tok, "a pattern binding")?;
+        // A module's bindings are evaluated on demand and in no order, so
+        // there is no point at which a strict one could be evaluated:
+        // GHC's "Top-level strict bindings aren't allowed".
+        if matches!(pattern, Pattern::Bang(_)) {
+            let mut diag = Diagnostic::parse_at(
+                format!(
+                    "Top-level strict bindings aren't allowed: {} = …",
+                    self.source_text(head_tok, self.cur())
+                ),
+                span,
+            );
+            diag.notes.push(
+                "a bang at the head of a binding ('!x = e') asks for the value to be \
+                 evaluated when the binding's scope is entered — the body of a 'let', \
+                 the right-hand side an equation's 'where' belongs to. A module's \
+                 top-level bindings have no such moment: each is evaluated when it is \
+                 first used. Remove the bang, or force the value where it is used \
+                 ('seq', a bang on a function parameter)."
+                    .to_string(),
+            );
+            return Err(Box::new(diag));
+        }
         let (rhs, where_binds) = self.parse_rhs(false)?;
         let rhs = self.rhs_expr(rhs, where_binds);
-        self.pat_fresh += 1;
-        let fresh = format!("__pat_{}", self.pat_fresh);
-        let vars = pattern.var_names();
-
-        let matched = match vars.as_slice() {
-            [] => Expr::Lit(Literal::Unit),
-            [v] => Expr::Var(v.clone()),
-            vs => Expr::Tuple(vs.iter().cloned().map(Expr::Var).collect()),
-        };
-        let mut branches = Vec::new();
-        let refutable = !Self::pg_irrefutable(&pattern);
-        branches.push(CaseBranch { pattern, guards: vec![], body: Some(matched) });
-        if refutable {
-            branches.push(CaseBranch {
-                pattern: Pattern::Wildcard,
-                guards: vec![],
-                body: Some(Self::pg_error(&format!("Non-exhaustive patterns in {text}"))),
-            });
-        }
+        // `~p = e` is `p = e` (a pattern binding is lazy already), and a
+        // variable under the tilde is a plain value binding.
+        let (_, mut pattern) = Self::binding_root(pattern);
         let value = |name: String, body: Expr| Decl::FunDef {
             name,
             clauses: vec![Clause {
@@ -2616,6 +2758,44 @@ impl Parser {
                 operand_cons: Vec::new(),
             }],
         };
+        {
+            let mut bare = &pattern;
+            while let Pattern::Paren(inner) = bare {
+                bare = inner;
+            }
+            if let Pattern::Var(name) = bare {
+                return Ok(vec![value(name.clone(), rhs)]);
+            }
+        }
+        // The variables of a lazy sub-pattern are selected inside the
+        // match's alternative, over the variable that stands for the
+        // sub-pattern there, and leave it in the tuple like the others.
+        let lazy = self.take_lazy_patterns(std::slice::from_mut(&mut pattern));
+        self.pat_fresh += 1;
+        let fresh = format!("__pat_{}", self.pat_fresh);
+        let vars: Vec<String> = pattern
+            .var_names()
+            .into_iter()
+            .filter(|v| !v.starts_with("__"))
+            .chain(Self::user_names(&lazy).map(str::to_string))
+            .collect();
+
+        let matched = match vars.as_slice() {
+            [] => Expr::Lit(Literal::Unit),
+            [v] => Expr::Var(v.clone()),
+            vs => Expr::Tuple(vs.iter().cloned().map(Expr::Var).collect()),
+        };
+        let matched = Self::let_in(lazy, matched);
+        let mut branches = Vec::new();
+        let refutable = !Self::pg_irrefutable(&pattern);
+        branches.push(CaseBranch { pattern, guards: vec![], body: Some(matched) });
+        if refutable {
+            branches.push(CaseBranch {
+                pattern: Pattern::Wildcard,
+                guards: vec![],
+                body: Some(Self::pg_error(&format!("Non-exhaustive patterns in {text}"))),
+            });
+        }
         let mut decls =
             vec![value(fresh.clone(), Expr::Case { scrutinee: Box::new(rhs), branches })];
         for (i, v) in vars.iter().enumerate() {
@@ -2739,9 +2919,12 @@ impl Parser {
     /// equation is an item of the enclosing block (the module's
     /// declarations, a class or instance body), whose layout context is
     /// already in force.
-    fn finish_clause(&mut self, lhs: FunLhs, binders_from: usize) -> PResult<Clause> {
+    fn finish_clause(&mut self, mut lhs: FunLhs, binders_from: usize) -> PResult<Clause> {
         self.check_linear(binders_from, &format!("an equation for '{}'", lhs.name))?;
+        let lazy = self.take_lazy_patterns(&mut lhs.patterns);
         let (rhs, where_binds) = self.parse_rhs(false)?;
+        let mut where_binds = Self::under_patterns(lazy, where_binds);
+        let rhs = Self::force_strict_where(&mut where_binds, rhs);
         // A guarded clause has no single body: the guard chain IS the
         // body. A chain with binding qualifiers is held raw: its
         // fall-through target is the NEXT clause, which is not parsed yet.
@@ -2819,10 +3002,11 @@ impl Parser {
             // Haskell 2010 §3.13: a guard is a comma-separated qualifier
             // list; the guard succeeds when every qualifier holds, checked
             // left to right.
-            let mut quals = vec![self.parse_guard_qualifier()?];
+            let mut quals = Vec::new();
+            self.parse_guard_qualifier(&mut quals)?;
             while self.at(&Token::Comma) {
                 self.advance();
-                quals.push(self.parse_guard_qualifier()?);
+                self.parse_guard_qualifier(&mut quals)?;
             }
             if quals.iter().any(|q| !matches!(q, GuardQual::Bool(_))) {
                 any_binding = true;
@@ -2861,26 +3045,37 @@ impl Parser {
     /// pattern guard `pat <- expr` (tried first, backtracking to an
     /// expression exactly like a list-comprehension generator), or a
     /// boolean expression.
-    fn parse_guard_qualifier(&mut self) -> PResult<GuardQual> {
+    ///
+    /// Appended to `quals`. A pattern guard with lazy sub-patterns is two
+    /// qualifiers: the guard, and a `let` of the sub-patterns' selectors
+    /// (`take_lazy_patterns`) for the qualifiers and the body after it.
+    fn parse_guard_qualifier(&mut self, quals: &mut Vec<GuardQual>) -> PResult<()> {
         if self.at(&Token::Let) {
             self.advance();
             let binds = self.parse_let_binds()?;
-            return Ok(GuardQual::Let(binds));
+            quals.push(GuardQual::Let(binds));
+            return Ok(());
         }
         let save = self.checkpoint();
         if self.is_pattern_start() {
-            if let Ok(pat) = self.parse_pattern()
+            if let Ok(mut pat) = self.parse_pattern()
                 && self.at(&Token::Bind)
             {
                 self.check_linear(save.pos, "a pattern guard")?;
+                let lazy = self.take_lazy_patterns(std::slice::from_mut(&mut pat));
                 self.advance();
                 let expr = self.parse_expr()?;
-                return Ok(GuardQual::Pat(pat, expr));
+                quals.push(GuardQual::Pat(pat, expr));
+                if !lazy.is_empty() {
+                    quals.push(GuardQual::Let(lazy));
+                }
+                return Ok(());
             }
             // Not a pattern guard — backtrack and parse as a boolean.
             self.rewind(save);
         }
-        Ok(GuardQual::Bool(self.parse_expr()?))
+        quals.push(GuardQual::Bool(self.parse_expr()?));
+        Ok(())
     }
 
     /// Does an equation of `name` continue the function binding whose first
@@ -3067,7 +3262,123 @@ impl Parser {
         if where_binds.is_empty() {
             body
         } else {
-            Expr::Let { binds: where_binds, body: Box::new(body) }
+            Self::let_in(where_binds, body)
+        }
+    }
+
+    /// The pattern of a pattern binding without the annotation at its
+    /// root, and whether that annotation makes the binding strict. `!p =
+    /// e` is a strict binding (GHC: "a bang at the top of a binding");
+    /// `~p = e` is `p = e`, a pattern binding being lazy already. A bang
+    /// or tilde anywhere deeper is part of the pattern.
+    fn binding_root(pattern: Pattern) -> (bool, Pattern) {
+        match pattern {
+            Pattern::Bang(inner) => (true, *inner),
+            Pattern::Lazy { inner, .. } => (false, *inner),
+            other => (false, other),
+        }
+    }
+
+    /// The bindings of a local pattern binding whose root annotation
+    /// `binding_root` has taken off and whose lazy sub-patterns
+    /// `take_lazy_patterns` has (their selectors are `lazy`): the group
+    /// `pattern_binding_defs` gives, or the one value binding when the
+    /// pattern is a variable after all (`!x = e`, `~x = e`).
+    ///
+    /// A strict binding follows GHC's translation of `let !p = e in body`
+    /// (users guide, "Bang patterns and Strict Haskell", rule FORCE): the
+    /// match itself is evaluated before the body — `e` to weak head normal
+    /// form, the pattern against it, raising the failed match's error
+    /// there — while the variables of `p` stay as lazy as the pattern
+    /// leaves them. For a variable that is the binding itself, marked
+    /// strict; for any other pattern it is one more binding of the group,
+    /// `case scrutinee of !p -> ()`, marked strict (the bang makes `!_ =
+    /// e` and `!(a, b) = e` evaluate `e` although `_` and a tuple of
+    /// variables demand nothing of their own accord beyond the tuple).
+    fn local_pattern_binding(
+        pattern: Pattern,
+        rhs: Expr,
+        fresh: String,
+        text: &str,
+        strict: bool,
+        lazy: Vec<LocalDef>,
+    ) -> Vec<LocalDef> {
+        let mut bare = &pattern;
+        while let Pattern::Paren(inner) = bare {
+            bare = inner;
+        }
+        if let Pattern::Var(name) = bare {
+            // (`lazy` is not empty when the variable stands for a lazy
+            // pattern in parentheses, `(~(a, b)) = e`: its selectors read
+            // this very binding.)
+            let mut defs = vec![LocalDef { strict, ..LocalDef::new(name.clone(), vec![], rhs) }];
+            defs.extend(lazy);
+            return defs;
+        }
+        let mut defs = Self::pattern_binding_defs(pattern.clone(), rhs, fresh.clone(), text);
+        if strict {
+            let matched = Self::match_once(
+                &Pattern::Bang(Box::new(pattern)),
+                &fresh,
+                Expr::Lit(Literal::Unit),
+                text,
+            );
+            defs.push(LocalDef {
+                strict: true,
+                ..LocalDef::new(format!("{fresh}_m"), vec![], matched)
+            });
+        }
+        defs.extend(lazy);
+        defs
+    }
+
+    /// The `where` group of an equation whose parameter patterns had lazy
+    /// sub-patterns: the selectors `lazy` (`take_lazy_patterns`) join the
+    /// group, since a pattern's variables scope over the equation's
+    /// guards, its `where` bindings and its body — exactly the scope of
+    /// the `where` group. A `where` binding of the same name shadows the
+    /// pattern's variable in all of that scope, so that variable's
+    /// selector is dropped: nothing can refer to it.
+    fn under_patterns(lazy: Vec<LocalDef>, where_binds: Vec<LocalDef>) -> Vec<LocalDef> {
+        if lazy.is_empty() {
+            return where_binds;
+        }
+        let mut group: Vec<LocalDef> = lazy
+            .into_iter()
+            .filter(|l| !where_binds.iter().any(|w| w.name == l.name))
+            .collect();
+        group.extend(where_binds);
+        group
+    }
+
+    /// The right-hand side of an equation behind the evaluation of its
+    /// `where` group's strict bindings (`where !y = e`): GHC evaluates
+    /// them when the equation's patterns have matched, before the first
+    /// guard is tried. The body, or the first guard's condition — which is
+    /// evaluated whenever the patterns match — is put behind a `seq` per
+    /// strict binding (`ast::Expr::force_strict`). Only an equation that
+    /// keeps its guards as guards needs this (a top-level function's, a
+    /// method's); wherever a `where` group becomes a `let` around the
+    /// right-hand side, `let_in` does the same.
+    fn force_strict_where(where_binds: &mut [LocalDef], rhs: Rhs) -> Rhs {
+        if !where_binds.iter().any(|w| w.strict) {
+            return rhs;
+        }
+        let seq = WiredIn::Seq.reference();
+        match rhs {
+            Rhs::Body(body) => Rhs::Body(Expr::force_strict(where_binds, body, &seq)),
+            Rhs::Guards(GuardChain::Plain(mut guards)) => {
+                let first = guards.remove(0);
+                let condition = Expr::force_strict(where_binds, first.condition, &seq);
+                guards.insert(0, Guard { condition, body: first.body });
+                Rhs::Guards(GuardChain::Plain(guards))
+            }
+            Rhs::Guards(GuardChain::Raw(mut raws)) => {
+                let forced =
+                    Expr::force_strict(where_binds, Expr::Lit(Literal::Bool(true)), &seq);
+                raws[0].quals.insert(0, GuardQual::Bool(forced));
+                Rhs::Guards(GuardChain::Raw(raws))
+            }
         }
     }
 
@@ -3089,28 +3400,148 @@ impl Parser {
     /// pattern as written. A pattern of variables, wildcards and tuples
     /// cannot fail and gets none.
     fn pattern_binding_defs(pat: Pattern, rhs: Expr, fresh: String, text: &str) -> Vec<LocalDef> {
-        let refutable = !Self::pg_irrefutable(&pat);
         let mut defs = vec![LocalDef::new(fresh.clone(), vec![], rhs)];
-        for v in pat.var_names() {
-            let mut branches = vec![CaseBranch {
-                pattern: pat.clone(),
-                guards: vec![],
-                body: Some(Expr::Var(v.clone())),
-            }];
-            if refutable {
-                branches.push(CaseBranch {
-                    pattern: Pattern::Wildcard,
-                    guards: vec![],
-                    body: Some(Self::pg_error(&format!("Non-exhaustive patterns in {text}"))),
-                });
-            }
-            defs.push(LocalDef::new(
-                v,
-                vec![],
-                Expr::Case { scrutinee: Box::new(Expr::Var(fresh.clone())), branches },
-            ));
-        }
+        defs.extend(Self::pattern_selectors(&pat, &fresh, text));
         defs
+    }
+
+    /// One lazy selector binding per variable of `pat`, each matching the
+    /// pattern against the variable `scrutinee` when it is first demanded:
+    /// `a = case scrutinee of pat -> a`, with GHC's "Non-exhaustive
+    /// patterns in <text>" alternative for a pattern that can fail. THE
+    /// lazy match — what a pattern binding's variables are
+    /// (`pattern_binding_defs`) and what the variables of a lazy pattern
+    /// `~pat` are (`take_lazy_patterns`), which Haskell 2010 §3.17.3
+    /// defines by this very translation.
+    fn pattern_selectors(pat: &Pattern, scrutinee: &str, text: &str) -> Vec<LocalDef> {
+        pat.var_names()
+            .into_iter()
+            .map(|v| {
+                let body = Self::match_once(pat, scrutinee, Expr::Var(v.clone()), text);
+                LocalDef::new(v, vec![], body)
+            })
+            .collect()
+    }
+
+    /// `case scrutinee of pat -> result`, with the alternative that raises
+    /// GHC's error for a failed irrefutable match when `pat` can fail.
+    fn match_once(pat: &Pattern, scrutinee: &str, result: Expr, text: &str) -> Expr {
+        let mut branches =
+            vec![CaseBranch { pattern: pat.clone(), guards: vec![], body: Some(result) }];
+        if !Self::pg_irrefutable(pat) {
+            branches.push(CaseBranch {
+                pattern: Pattern::Wildcard,
+                guards: vec![],
+                body: Some(Self::pg_error(&format!("Non-exhaustive patterns in {text}"))),
+            });
+        }
+        Expr::Case { scrutinee: Box::new(Expr::Var(scrutinee.to_string())), branches }
+    }
+
+    /// Replace every lazy pattern `~p` in `pats` by a fresh variable and
+    /// return the bindings that give the variables of `p` their meaning:
+    /// one lazy selector each over that variable (`pattern_selectors`).
+    /// Haskell 2010 §3.17.2 — matching `~p` always succeeds, the
+    /// variables of `p` are bound to what the match would give, and the
+    /// match happens when one of them is demanded — is exactly a pattern
+    /// binding `p = v` in the scope of the pattern, and §3.17.3 defines it
+    /// so (`case v of { ~p -> e }` = `(\x1 … xn -> e) (case v of p ->
+    /// x1) …`). Every construct that binds patterns calls this once its
+    /// pattern list is complete and puts the returned group in scope of
+    /// everything the patterns' variables scope over (an equation's
+    /// guards, `where` group and body; a lambda's or alternative's body;
+    /// the statements after a `<-`). After it the patterns hold no
+    /// `Pattern::Lazy`: to every later stage the position is a variable,
+    /// which is what makes each analysis of what a pattern forces or
+    /// refutes right about it without knowing the construct — a variable
+    /// forces nothing and cannot fail.
+    ///
+    /// `~x` and `~_` are `x` and `_`. A lazy pattern that binds no
+    /// variable (`~(_, _)`) still constrains the type of what it matches;
+    /// it gets one binding nothing demands, so the type checker sees the
+    /// match and nothing ever performs it. A nested lazy pattern
+    /// (`~(a, ~(b, c))`) becomes a variable of the enclosing one first,
+    /// and its selectors read that variable — all in the one group.
+    fn take_lazy_patterns(&mut self, pats: &mut [Pattern]) -> Vec<LocalDef> {
+        let mut out = Vec::new();
+        for p in pats {
+            self.take_lazy(p, &mut out);
+        }
+        out
+    }
+
+    fn take_lazy(&mut self, pat: &mut Pattern, out: &mut Vec<LocalDef>) {
+        match pat {
+            Pattern::Var(_) | Pattern::Wildcard | Pattern::LitPat(_) => {}
+            Pattern::Paren(inner) | Pattern::As(_, inner) | Pattern::Bang(inner) => {
+                self.take_lazy(inner, out)
+            }
+            Pattern::Constructor { args: ps, .. } | Pattern::Tuple(ps) => {
+                for p in ps {
+                    self.take_lazy(p, out);
+                }
+            }
+            Pattern::Lazy { inner, text } => {
+                self.take_lazy(inner, out);
+                let mut bare: &Pattern = inner;
+                while let Pattern::Paren(p) = bare {
+                    bare = p;
+                }
+                if matches!(bare, Pattern::Var(_) | Pattern::Wildcard) {
+                    *pat = bare.clone();
+                    return;
+                }
+                self.pg_fresh += 1;
+                let fresh = format!("{}{}", LAZY_PATTERN_PREFIX, self.pg_fresh);
+                let selectors = Self::pattern_selectors(inner, &fresh, text);
+                if selectors.is_empty() {
+                    let typed = Self::match_once(inner, &fresh, Expr::Lit(Literal::Unit), text);
+                    out.push(LocalDef::new(format!("{fresh}t"), vec![], typed));
+                } else {
+                    out.extend(selectors);
+                }
+                *pat = Pattern::Var(fresh);
+            }
+        }
+    }
+
+    /// `let binds in body`, the one place a parsed binding group meets its
+    /// scope (see `ast::Expr::let_in`: a strict binding of the group is
+    /// evaluated before the body). An empty group is the body.
+    fn let_in(binds: Vec<LocalDef>, body: Expr) -> Expr {
+        if binds.is_empty() {
+            return body;
+        }
+        Expr::let_in(binds, body, &WiredIn::Seq.reference())
+    }
+
+    /// The names a binding group binds for the program: every binding but
+    /// the compiler's own (scrutinees, lazy-pattern variables).
+    fn user_names(defs: &[LocalDef]) -> impl Iterator<Item = &str> {
+        defs.iter().map(|d| d.name.as_str()).filter(|n| !n.starts_with("__"))
+    }
+
+    /// The source text of `pat`, which the tokens `from..to` spell, as
+    /// GHC names a pattern in "Non-exhaustive patterns in …": without the
+    /// bangs and tildes in front of it and without the parentheses around
+    /// the whole of it (`!(Just x)` and `~(Just x)` are both `Just x`; a
+    /// tuple keeps its own).
+    fn pattern_text(&self, mut from: usize, mut to: usize, mut pat: &Pattern) -> String {
+        loop {
+            match pat {
+                Pattern::Bang(inner) | Pattern::Lazy { inner, .. } => {
+                    from += 1;
+                    pat = inner;
+                }
+                Pattern::Paren(inner) => {
+                    from += 1;
+                    to -= 1;
+                    pat = inner;
+                }
+                _ => break,
+            }
+        }
+        self.source_text(from, to)
     }
 
     /// Attach a binding group's signature lines to their bindings: every
@@ -3291,10 +3722,13 @@ impl Parser {
                             return Err(Self::signature_with_arguments_error(&lhs, span));
                         }
                         p.check_linear(head_tok, &format!("an equation for '{}'", lhs.name))?;
+                        let mut lhs = lhs;
+                        let lazy = p.take_lazy_patterns(&mut lhs.patterns);
                         // The guard chain is kept raw for
                         // `close_local_group`, which knows the next
                         // equation to fall through to.
                         let (rhs, where_binds) = p.parse_rhs(true)?;
+                        let where_binds = Self::under_patterns(lazy, where_binds);
                         entries.push(LocalEntry::Equation(LocalEquation {
                             name: lhs.name,
                             patterns: lhs.patterns,
@@ -3305,15 +3739,18 @@ impl Parser {
                         }));
                     }
                     DeclHead::Pattern(pattern) => {
-                        let text = p.source_text(head_tok, p.cur());
+                        let text = p.pattern_text(head_tok, p.cur(), &pattern);
                         p.expect_pattern_binding_rhs(head_tok)?;
                         p.check_linear(head_tok, "a pattern binding")?;
                         let (rhs, where_binds) = p.parse_rhs(true)?;
                         let body = p.rhs_expr(rhs, where_binds);
                         let fresh = format!("{fresh_prefix}{fresh_counter}");
                         fresh_counter += 1;
-                        let bound = pattern.var_names().into_iter().map(|v| (v, span)).collect();
-                        let defs = Self::pattern_binding_defs(pattern, body, fresh, &text);
+                        let (strict, mut pattern) = Self::binding_root(pattern);
+                        let lazy = p.take_lazy_patterns(std::slice::from_mut(&mut pattern));
+                        let defs = Self::local_pattern_binding(pattern, body, fresh, &text, strict, lazy);
+                        let bound =
+                            Self::user_names(&defs).map(|v| (v.to_string(), span)).collect();
                         entries.push(LocalEntry::Lowered { defs, bound });
                     }
                 }
@@ -3369,9 +3806,13 @@ impl Parser {
                 return Ok(ty);
             }
 
-        // Check for constraints: `Show a => ...`
+        // Check for constraints: `Show a => ...`. (A context is not
+        // part of a constructor signature's arrow spine: `gadt_strict`.)
         let save = self.checkpoint();
-        if let Ok(constraints) = self.try_parse_constraints()
+        let spine = self.gadt_strict.take();
+        let constraints = self.try_parse_constraints();
+        self.gadt_strict = spine;
+        if let Ok(constraints) = constraints
             && self.at(&Token::FatArrow) {
                 self.advance();
                 let ty = self.parse_type_arrow()?;
@@ -3413,7 +3854,41 @@ impl Parser {
     }
 
     fn parse_type_arrow_inner(&mut self) -> PResult<Type> {
-        let lhs = self.parse_type_op()?;
+        // On a GADT constructor signature's arrow spine an argument may
+        // be flagged strict (`!Int -> …`); see `gadt_strict`. The
+        // collector is set aside while the operand is read: arrows inside
+        // it are not the constructor's.
+        let spine = self.gadt_strict.take();
+        let flag_tok = self.cur();
+        let flagged = spine.is_some() && self.at(&Token::Bang);
+        if flagged {
+            self.advance();
+        }
+        let lhs = if flagged { self.parse_type_atom() } else { self.parse_type_op() };
+        self.gadt_strict = spine;
+        let lhs = lhs?;
+        let is_argument = matches!(self.peek(), Token::Arrow)
+            || matches!(self.peek(), Token::Operator(op) if op == "%");
+        if let Some(flags) = &mut self.gadt_strict {
+            if is_argument {
+                flags.push(flagged);
+            } else if flagged {
+                let mut diag = Diagnostic::parse_at(
+                    "Unexpected strictness (!) annotation: it can only appear on the \
+                     arguments of a data constructor type"
+                        .to_string(),
+                    self.span_of(flag_tok),
+                );
+                diag.notes.push(
+                    "in a constructor signature 'Con :: !A -> B -> T', a '!' marks an \
+                     argument — a type in front of an arrow — as a strict field, and \
+                     takes one type atom (put a compound type in parentheses). The \
+                     result type takes none."
+                        .to_string(),
+                );
+                return Err(Box::new(diag));
+            }
+        }
         // A multiplicity annotation before the arrow: `a %1 -> b` (the
         // argument is consumed exactly once) or the explicit unrestricted
         // spellings `a %Many -> b` / `a %'Many -> b`. `%` only ever means
@@ -3757,6 +4232,24 @@ impl Parser {
                 let sym = self.strlit_as_symbol(s, "a type-level Symbol")?;
                 Ok(Type::Con(format!("\"{}\"", sym)))
             }
+            // A strictness flag anywhere but in front of a constructor's
+            // field (those positions read it themselves: `strictness_flag`,
+            // `gadt_strict`).
+            Token::Bang => {
+                let mut diag = self.err_here(
+                    "Unexpected strictness (!) annotation: it can only appear on the \
+                     arguments of a data constructor type"
+                        .to_string(),
+                );
+                diag.notes.push(
+                    "a '!' in a type marks a constructor field as strict — 'data P = P \
+                     !Int', 'R { x :: !Int }', 'MkT :: !Int -> T' — and says when the \
+                     field is evaluated. A function's argument is made strict in its \
+                     definition instead, with a bang pattern ('f !x = …')."
+                        .to_string(),
+                );
+                Err(diag)
+            }
             _ => Err(self.err_expected("type")),
         }
     }
@@ -3850,6 +4343,9 @@ impl Parser {
                     let operand = self.parse_chain_operand()?;
                     rest.push((ChainOp { name: func, span }, operand));
                 }
+                // `xs !0`, `f ~x`: the symbol stands where an operator
+                // would, but spaced as a prefix it is none.
+                Token::Bang | Token::Tilde => return Err(self.annotation_in_expression()),
                 _ => break,
             }
         }
@@ -3858,6 +4354,37 @@ impl Parser {
             return Ok(first.expr);
         }
         Ok(Expr::OpChain(Box::new(OpChain { first, rest })))
+    }
+
+    /// A `!` or `~` in prefix position inside an expression. The lexer
+    /// classifies the two symbols by the characters around them
+    /// (`lexer::prefix_occurrence`, GHC's rule): with whitespace or an
+    /// opening bracket before and none after, `!` is the bang of a bang
+    /// pattern and `~` the tilde of a lazy pattern, and an expression has
+    /// neither. GHC's error, in its words.
+    fn annotation_in_expression(&self) -> Box<Diagnostic> {
+        let (sym, what) = match self.peek() {
+            Token::Bang => ("!", "Bang"),
+            _ => ("~", "Lazy"),
+        };
+        let operand = match &self.nth(1).token {
+            Token::LeftParen => "(…)".to_string(),
+            Token::LeftBracket => "[…]".to_string(),
+            Token::LeftBrace => "{…}".to_string(),
+            _ => self.source_text(self.pos + 1, self.pos + 2),
+        };
+        let mut diag = self.err_here(format!(
+            "{what} pattern in expression context: {sym}{operand}"
+        ));
+        diag.notes.push(format!(
+            "Did you mean to add a space after the '{sym}'? Written '{sym}{operand}' — \
+             set off on the left and glued to what follows — the symbol is the \
+             prefix of a pattern ('f {sym}x = …'), which an expression cannot hold. \
+             The operator '{sym}' is written with a space on both sides or on \
+             neither: 'a {sym} b', 'a{sym}b'. GHC reads the two spellings the same \
+             way and reports this error."
+        ));
+        diag
     }
 
     /// One operand of an infix chain: an application, optionally under a
@@ -3953,10 +4480,7 @@ impl Parser {
     /// `let … in e` statement is the same expression.
     fn let_expr_body(&mut self, binds: Vec<LocalDef>) -> PResult<Expr> {
         let body = self.parse_expr()?;
-        Ok(Expr::Let {
-            binds,
-            body: Box::new(body),
-        })
+        Ok(Self::let_in(binds, body))
     }
 
     /// Parse list comprehension qualifiers: `x <- xs, pred, y <- ys, …`.
@@ -3977,12 +4501,16 @@ impl Parser {
             // Try generator: pattern <- expr
             let save = self.checkpoint();
             if self.is_pattern_start() {
-                if let Ok(pat) = self.parse_pattern()
+                if let Ok(mut pat) = self.parse_pattern()
                     && self.at(&Token::Bind) {
                         self.check_linear(save.pos, "a list-comprehension generator")?;
+                        let lazy = self.take_lazy_patterns(std::slice::from_mut(&mut pat));
                         self.advance();
                         let expr = self.parse_expr()?;
                         quals.push(ListCompQual::Generator { pattern: pat, expr });
+                        if !lazy.is_empty() {
+                            quals.push(ListCompQual::Let(lazy));
+                        }
                         if self.at(&Token::Comma) { self.advance(); continue; }
                         break;
                     }
@@ -4075,10 +4603,7 @@ impl Parser {
             ListCompQual::Let(binds) => {
                 // let decls in [body | rest] — bindings scope over the rest.
                 let rest = self.desugar_list_comprehension(body, &quals[1..], counter);
-                Expr::Let {
-                    binds: binds.clone(),
-                    body: Box::new(rest),
-                }
+                Self::let_in(binds.clone(), rest)
             }
         }
     }
@@ -4561,9 +5086,9 @@ impl Parser {
             let mut branches = Vec::new();
             loop {
                 if self.at(&Token::RightBrace) { break; }
-                let pattern = self.parse_case_pattern()?;
+                let (pattern, lazy) = self.parse_case_pattern()?;
                 self.expect(&Token::Arrow)?;
-                let body = self.parse_stmt_expr()?;
+                let body = Self::let_in(lazy, self.parse_stmt_expr()?);
                 branches.push(CaseBranch { pattern, guards: vec![], body: Some(body) });
                 if self.at(&Token::Semicolon) { self.advance(); } else { break; }
             }
@@ -4600,7 +5125,7 @@ impl Parser {
                 if !p.is_case_alt_start() {
                     break;
                 }
-                let pattern = p.parse_case_pattern()?;
+                let (pattern, lazy) = p.parse_case_pattern()?;
 
                 // A guard chain may begin on the line after the pattern
                 // (`Just a\n    | a < 0 -> …`), indented past the
@@ -4609,7 +5134,8 @@ impl Parser {
                 // here (its line start is), and the `->` check reports it.
                 if p.at(&Token::Pipe) {
                     // Guards on case branch
-                    match p.parse_guard_chain(&Token::Arrow)? {
+                    let chain = p.parse_guard_chain(&Token::Arrow)?;
+                    match Self::guards_under_lazy(lazy, chain) {
                         GuardChain::Plain(guards) => branches.push(CaseBranch {
                             pattern,
                             guards,
@@ -4629,7 +5155,7 @@ impl Parser {
                     }
                 } else {
                     p.expect(&Token::Arrow)?;
-                    let body = p.parse_stmt_expr()?;
+                    let body = Self::let_in(lazy, p.parse_stmt_expr()?);
                     branches.push(CaseBranch {
                         pattern,
                         guards: vec![],
@@ -4647,12 +5173,42 @@ impl Parser {
         })
     }
 
-    /// The pattern of one case alternative — a binder list of its own.
-    fn parse_case_pattern(&mut self) -> PResult<Pattern> {
+    /// The pattern of one case alternative — a binder list of its own —
+    /// and the selectors of its lazy sub-patterns (`take_lazy_patterns`),
+    /// which the caller puts in scope of the alternative's guards and
+    /// body.
+    fn parse_case_pattern(&mut self) -> PResult<(Pattern, Vec<LocalDef>)> {
         let binders_from = self.cur();
-        let pattern = self.parse_pattern()?;
+        let mut pattern = self.parse_pattern()?;
         self.check_linear(binders_from, "a case alternative")?;
-        Ok(pattern)
+        let lazy = self.take_lazy_patterns(std::slice::from_mut(&mut pattern));
+        Ok((pattern, lazy))
+    }
+
+    /// The guard chain of a case alternative whose pattern had lazy
+    /// sub-patterns, with their selectors `lazy` in scope of every guard
+    /// and body. An alternative has no `where` group to hold them, so each
+    /// guard begins with them as a `let` qualifier — the form a binding
+    /// in scope of a guard and its body already has (§3.13); the chain is
+    /// then one with binding qualifiers, lowered with the alternatives it
+    /// falls through to (`desugar_pattern_guard_branches`). The bindings
+    /// are lazy and read one shared variable, so repeating the group per
+    /// guard repeats no evaluation of the matched value.
+    fn guards_under_lazy(lazy: Vec<LocalDef>, chain: GuardChain) -> GuardChain {
+        if lazy.is_empty() {
+            return chain;
+        }
+        let mut raws = match chain {
+            GuardChain::Raw(raws) => raws,
+            GuardChain::Plain(guards) => guards
+                .into_iter()
+                .map(|g| RawGuard { quals: vec![GuardQual::Bool(g.condition)], body: g.body })
+                .collect(),
+        };
+        for raw in &mut raws {
+            raw.quals.insert(0, GuardQual::Let(lazy.clone()));
+        }
+        GuardChain::Raw(raws)
     }
 
     /// A `do` block: layout-driven statement list with `let`, `pat <-`,
@@ -4772,7 +5328,7 @@ impl Parser {
                 if p.is_pattern_start() {
                     let bind_loc = p.peek_loc().clone();
                     let save_pat = p.checkpoint();
-                    if let Ok(pat) = p.parse_pattern()
+                    if let Ok(mut pat) = p.parse_pattern()
                         && p.at(&Token::Bind) {
                             // The pattern's last token: its end is the span's
                             // end (inclusive last column, as GHC prints it).
@@ -4781,6 +5337,11 @@ impl Parser {
                                 Span::new(last.line, last.end_col.saturating_sub(1))
                             };
                             p.check_linear(save_pat.pos, "a 'do' statement")?;
+                            // The variables of a lazy sub-pattern scope
+                            // over the statements after this one: their
+                            // selectors are a `let` statement right behind
+                            // the bind.
+                            let lazy = p.take_lazy_patterns(std::slice::from_mut(&mut pat));
                             p.advance();
                             let expr = p.parse_stmt_expr()?;
                             match pat {
@@ -4796,6 +5357,9 @@ impl Parser {
                                     span: Span::new(bind_loc.line, bind_loc.col),
                                     end: pat_end,
                                 }),
+                            }
+                            if !lazy.is_empty() {
+                                stmts.push(DoStmt::DoLet { binds: lazy });
                             }
                             continue;
                         }
@@ -4864,28 +5428,17 @@ impl Parser {
         self.advance();
         let binders_from = self.cur();
         let mut pats = Vec::new();
-        while matches!(
-            self.peek(),
-            Token::Ident(_)
-                | Token::Underscore
-                | Token::LeftParen
-                | Token::LeftBracket
-                | Token::UpperIdent(_)
-                | Token::QualUpperIdent(_)
-                | Token::QualIdent(_)
-                | Token::IntLit(_)
-                | Token::BigIntLit(_)
-                | Token::NumLit(_)
-                | Token::StrLit(_)
-        ) {
+        while self.is_pattern_atom_start() {
             pats.push(self.parse_pattern_atom()?);
         }
         if pats.is_empty() {
             return Err(self.err_here("Expected lambda parameter".to_string()));
         }
         self.check_linear(binders_from, "a lambda")?;
+        let lazy = self.take_lazy_patterns(&mut pats);
         self.expect(&Token::Arrow)?;
         let body = self.parse_expr()?;
+        let body = Self::let_in(lazy, body);
         Ok(Self::lambda_from_patterns(pats, body, "non-exhaustive lambda pattern"))
     }
 
@@ -4958,9 +5511,12 @@ impl Parser {
     fn pg_irrefutable(p: &Pattern) -> bool {
         match p {
             Pattern::Var(_) | Pattern::Wildcard => true,
-            Pattern::Paren(inner) | Pattern::As(_, inner) => Self::pg_irrefutable(inner),
+            Pattern::Paren(inner) | Pattern::As(_, inner) | Pattern::Bang(inner) => {
+                Self::pg_irrefutable(inner)
+            }
             Pattern::Tuple(ps) => ps.iter().all(Self::pg_irrefutable),
             Pattern::Constructor { .. } | Pattern::LitPat(_) => false,
+            Pattern::Lazy { .. } => true,
         }
     }
 
@@ -5019,7 +5575,7 @@ impl Parser {
                         }
                         Expr::Case { scrutinee: Box::new(e), branches: brs }
                     }
-                    GuardQual::Let(binds) => Expr::Let { binds, body: Box::new(inner) },
+                    GuardQual::Let(binds) => Self::let_in(binds, inner),
                 };
             }
             acc = Self::pg_wrap_join(bind, inner);
@@ -5319,6 +5875,7 @@ impl Parser {
             }
             Token::Do => self.parse_do_block(),
             Token::Backslash => self.parse_lambda(),
+            Token::Bang | Token::Tilde => Err(self.annotation_in_expression()),
             _ => Err(self.err_expected("expression")),
         }
     }
@@ -5408,6 +5965,11 @@ impl Parser {
                 // does ("Qualified name in binding position") instead of
                 // the pattern list ending in front of it.
                 | Token::QualIdent(_)
+                // `!p` and `~p` are atoms (GHC: `aexp → ! aexp | ~ aexp`);
+                // the lexer hands over these two tokens for a PREFIX
+                // occurrence only, so `a ! b` never starts a pattern here.
+                | Token::Bang
+                | Token::Tilde
         ) {
             return true;
         }
@@ -5535,6 +6097,24 @@ impl Parser {
             Token::UpperIdent(name) | Token::QualUpperIdent(name) => {
                 self.advance();
                 Ok(Pattern::Constructor { name, args: vec![] })
+            }
+            // Bang pattern `!apat`: evaluate, then match.
+            Token::Bang => {
+                self.advance();
+                let inner = self.parse_pattern_atom()?;
+                Ok(Pattern::Bang(Box::new(inner)))
+            }
+            // Lazy pattern `~apat` (Haskell 2010 §3.17.1). The node lives
+            // until the construct that binds this pattern is complete
+            // (`take_lazy_patterns`); the text is the inner pattern as
+            // GHC prints it in the message of a failed match — without
+            // the parentheses that make it an atom.
+            Token::Tilde => {
+                self.advance();
+                let from = self.cur();
+                let inner = self.parse_pattern_atom()?;
+                let text = self.pattern_text(from, self.pos, &inner);
+                Ok(Pattern::Lazy { inner: Box::new(inner), text })
             }
             // A pattern variable binds a name; a qualified one cannot.
             Token::QualIdent(name) => Err(self.qualified_binder_error(&name)),

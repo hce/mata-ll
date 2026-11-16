@@ -2088,6 +2088,8 @@ impl Rename<'_> {
             Pattern::Paren(inner) => Pattern::Paren(Box::new(self.pattern(inner))),
             Pattern::Tuple(elems) => Pattern::Tuple(elems.iter().map(|e| self.pattern(e)).collect()),
             Pattern::As(n, inner) => Pattern::As(self.local(n), Box::new(self.pattern(inner))),
+            Pattern::Bang(inner) => Pattern::Bang(Box::new(self.pattern(inner))),
+            Pattern::Lazy { .. } => unreachable!("the parser lowers every lazy pattern"),
             Pattern::Var(n) => Pattern::Var(self.local(n)),
             Pattern::Wildcard | Pattern::LitPat(_) => p.clone(),
         }
@@ -2214,6 +2216,7 @@ impl Rename<'_> {
             existential_vars: c.existential_vars.clone(),
             existential_constraints: c.existential_constraints.iter()
                 .map(|c| self.constraint(c)).collect(),
+            strict: c.strict.clone(),
         }
     }
 
@@ -2313,6 +2316,7 @@ impl Rename<'_> {
             // the head operands are checked above.
             fixity: None,
             operand_cons: Vec::new(),
+            strict: ld.strict,
         }
     }
 

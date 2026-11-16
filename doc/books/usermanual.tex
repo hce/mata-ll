@@ -338,6 +338,24 @@ area (Rectangle w h) = w * h
 area Point           = 0.0
 \end{lstlisting}
 
+A field is lazy: \texttt{Circle (expensive x)} stores the unevaluated
+expression.  A \texttt{!} directly in front of a field's type makes the
+field \emph{strict} --- the constructor evaluates it (to weak head
+normal form) whenever it is applied, as in Haskell:
+
+\begin{lstlisting}
+data Stats = Stats !Int !Int            -- count and sum, kept evaluated
+data Entry = Entry { key :: !String, payload :: [Int] }
+
+add :: Stats -> Int -> Stats
+add (Stats n s) x = Stats (n + 1) (s + x)   -- no thunks pile up
+\end{lstlisting}
+
+This holds for every way of applying the constructor (partially, as a
+function passed to \texttt{map}, by record construction or update, in a
+derived instance).  A \texttt{newtype} takes no \texttt{!}, and the pragma
+\texttt{\{-\# UNPACK \#-\}} is ignored with a warning.
+
 \subsection{Records}
 
 Named fields with accessor functions:
@@ -439,8 +457,8 @@ addPair :: (Int, Int) -> Int -> Int
 addPair = \(a, b) c -> a + b + c
 \end{lstlisting}
 
-As-patterns (\texttt{xs@(x:\_)}) are not supported; bind the whole
-value and match it with \texttt{case}.
+A parameter takes every pattern a function equation takes, as-patterns
+(\texttt{xs@(x:\_)}), lazy patterns and bang patterns included.
 
 \subsection{Operators}
 
@@ -620,6 +638,46 @@ as a second definition (``Multiple declarations'').  A pattern names
 each variable once: \texttt{same x x = True} is rejected
 (``Conflicting definitions''), it does not compare its arguments ---
 write \texttt{same x y | x == y = True}.
+
+\subsection{Lazy and Bang Patterns}
+
+Matching a constructor, tuple or literal pattern evaluates the value;
+a variable or \texttt{\_} does not.  Two annotations change that, with
+Haskell's meaning:
+
+\begin{lstlisting}
+-- ~p: do not match yet. The match always succeeds; p is matched
+-- when one of its variables is first used.
+firstOr :: (Int, Int) -> Bool -> Int
+firstOr ~(a, _) useIt = if useIt then a else 0
+-- firstOr undefined False == 0
+
+-- !p: evaluate the value now, then match p.
+sumTo :: Int -> Int -> Int
+sumTo !acc 0 = acc
+sumTo !acc n = sumTo (acc + n) (n - 1)
+
+mean :: [Int] -> Int
+mean xs = total `div` count
+    where !total = sum xs               -- evaluated before the body
+          count  = length xs
+\end{lstlisting}
+
+Both stand wherever a pattern does (parameters, lambdas, \texttt{case}
+alternatives, \texttt{<-}, generators, inside other patterns).  A bang
+at the head of a \texttt{let} or \texttt{where} binding makes the
+binding strict; it is not allowed on a top-level binding.  A lazy
+pattern whose match fails when a variable is used raises
+\texttt{Non-exhaustive patterns in Just x}.
+
+\begin{note}
+\texttt{!} and \texttt{\textasciitilde{}} are annotations only as a
+\emph{prefix}: set off from what precedes them and glued to what
+follows (\texttt{f !x}, \texttt{(!a, b)}, \texttt{P !Int}).  With a
+space on both sides or on neither, \texttt{!} is the operator of that
+name (\texttt{xs ! 0}, \texttt{xs!0}), which a program may define.  This
+is GHC's rule; \texttt{xs !0} is an error in both.
+\end{note}
 
 \subsection{Case Expressions}
 
@@ -873,6 +931,11 @@ strictSum = go 0
     where go acc []     = acc
           go acc (x:xs) = seq acc (go (acc + x) xs)
 \end{lstlisting}
+
+A bang pattern says the same in the pattern (\texttt{go !acc (x:xs) = go
+(acc + x) xs}), a strict binding in a \texttt{let} or \texttt{where}
+(\texttt{let !y = f x}), and a strict field in a data declaration
+(\texttt{data Stats = Stats !Int !Int}).
 
 \begin{note}
 The compiler avoids thunks where it can prove that is safe, under one
