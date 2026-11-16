@@ -9,16 +9,36 @@ use crate::types::Diagnostic;
 /// `Vec<Diagnostic>`.
 type PResult<T> = Result<T, Box<Diagnostic>>;
 
-/// List comprehension qualifier (internal to parser, desugared before AST)
-/// What a class/instance member line starts with (`parse_method_name`).
-enum MethodHead {
-    /// A method name: an identifier or a parenthesised operator (`(+)`).
-    Name(String),
-    /// A parenthesised PATTERN — the left operand of an infix definition
-    /// (`(K a) + (K b) = …`); the operator follows.
-    Infix(Pattern),
+/// What a declaration of a binding group begins with, as `parse_decl_head`
+/// reads it — the left-hand side of Haskell 2010 §4.4.3's
+/// `decl → gendecl | (funlhs | pat) rhs`, the same in every declaration
+/// group: the module's top level, a `where` or `let` group, a class body,
+/// an instance body.
+enum DeclHead {
+    /// `vars ::` — the names of a type signature (`f`, `(<+>)`, `a, b`),
+    /// each with the token that spells it; the `::` is the next token.
+    Signature(Vec<(String, usize)>),
+    /// A `funlhs`: the function being defined and its parameter patterns.
+    Function(FunLhs),
+    /// A `pat` that is no `funlhs`: the left-hand side of a pattern binding.
+    Pattern(Pattern),
 }
 
+/// A function left-hand side, Haskell 2010 §4.4.3:
+/// `funlhs → var apat {apat} | pat varop pat | ( funlhs ) apat {apat}`.
+/// All three forms define `name` over `patterns`; a variable binding
+/// (`x = e`) is the first form with no parameters.
+struct FunLhs {
+    name: String,
+    /// The position the equation is reported at: the first parameter (or
+    /// the `=`) of a prefix head, the left operand of an infix one.
+    span: Span,
+    patterns: Vec<Pattern>,
+    /// See `Clause::operand_cons`.
+    operand_cons: Vec<HeadOperand>,
+}
+
+/// List comprehension qualifier (internal to parser, desugared before AST)
 enum ListCompQual {
     Generator { pattern: Pattern, expr: Expr },
     Guard(Expr),
@@ -55,23 +75,39 @@ impl GuardChain {
 /// equations of one function are grouped by Haskell 2010 §4.4.3.1, and a
 /// guarded equation's fall-through target is the NEXT equation, which is
 /// not known while the equation itself is parsed.
-struct LocalEquation {
-    name: String,
-    patterns: Vec<Pattern>,
-    rhs: LocalRhs,
-    where_binds: Vec<LocalDef>,
+/// A top-level pattern binding, as `parse_module` remembers it until the
+/// module is read: the scrutinee binding it lowered to still needs its
+/// type signature (`top_pattern_signatures`).
+struct TopPattern {
+    /// The fresh name of the scrutinee binding.
+    scrutinee: String,
+    /// The variables the pattern binds, in source order.
+    vars: Vec<String>,
+    /// The pattern as written, and where.
+    text: String,
     span: Span,
 }
 
-/// The right-hand side of a local equation: `= body`, or a guard chain.
-enum LocalRhs {
+struct LocalEquation {
+    name: String,
+    patterns: Vec<Pattern>,
+    rhs: Rhs,
+    where_binds: Vec<LocalDef>,
+    span: Span,
+    /// See `Clause::operand_cons`.
+    operand_cons: Vec<HeadOperand>,
+}
+
+/// The right-hand side of a declaration (Haskell 2010 §4.4.3 `rhs`):
+/// `= body`, or a guard chain.
+enum Rhs {
     Body(Expr),
     Guards(GuardChain),
 }
 
 /// An entry of a local binding group in source order: an equation, or a
-/// pattern binding (`(a, b) = e`) already lowered to its scrutinee and
-/// selector bindings, with the names it binds (for the
+/// pattern binding (`(a, b) = e`, `Just k = e`) already lowered to its
+/// scrutinee and selector bindings, with the names it binds (for the
 /// conflicting-definitions check) and where it binds them.
 enum LocalEntry {
     Equation(LocalEquation),
@@ -228,6 +264,12 @@ struct Parser {
     /// points and parameters). One counter for the whole parse keeps every
     /// synthesized name unique across nested desugars.
     pg_fresh: usize,
+    /// Fresh-name counter for the scrutinee bindings of TOP-LEVEL pattern
+    /// bindings (`__pat_{n}`; see `top_pattern_binding`). A local group
+    /// numbers its own from zero: its names are scoped to the group.
+    pat_fresh: usize,
+    /// The module's top-level pattern bindings, in source order.
+    top_patterns: Vec<TopPattern>,
     /// How many let-EXPRESSIONS have parsed their bindings and now await
     /// their `in`. Decides what an `in` at a do block's statement column
     /// means after a `let` statement: with none pending it is the parse
@@ -244,7 +286,7 @@ struct Parser {
     /// list of patterns at once checks and removes its own entries once it
     /// has committed to them. So the log never holds a token twice, and it
     /// is the only stage that still knows the binder list AS WRITTEN: the
-    /// parser's own desugars (pattern lambdas, tuple bindings, pattern
+    /// parser's own desugars (pattern lambdas, pattern bindings, pattern
     /// guards, comprehensions) spread one list over several AST nodes.
     pattern_binders: Vec<usize>,
     /// The declaration table: every top-level name this module's source
@@ -279,6 +321,8 @@ impl Parser {
             brace_stack: Vec::new(),
             depth: 0,
             pg_fresh: 0,
+            pat_fresh: 0,
+            top_patterns: Vec::new(),
             let_in_pending: 0,
             pattern_binders: Vec::new(),
             declared: Vec::new(),
@@ -315,9 +359,8 @@ impl Parser {
 
     /// Record the identifier token at index `tok` as a pattern variable.
     /// Called wherever a pattern variable is born: the variable and
-    /// as-pattern arms of `parse_pattern_atom_inner`, and the infix
-    /// definition forms, whose left operand is read as a plain identifier
-    /// before the operator shows it to be a pattern.
+    /// as-pattern arms of `parse_pattern_atom_inner`, through which every
+    /// pattern is read — the operands of an infix definition included.
     fn bind_pattern_var(&mut self, tok: usize) {
         debug_assert!(self.pattern_binders.last().is_none_or(|&last| last < tok));
         self.pattern_binders.push(tok);
@@ -962,6 +1005,9 @@ impl Parser {
             return Err(redeclared);
         }
         let mut merged = decls;
+        // With every signature read, the scrutinee bindings of the
+        // top-level pattern bindings get theirs.
+        merged.extend(self.top_pattern_signatures(&merged)?);
 
         // Lower pattern-guard chains now that every clause group is
         // complete (§3.13 fall-through needs the following clauses) —
@@ -1026,7 +1072,13 @@ impl Parser {
             Token::Data | Token::Newtype | Token::Import | Token::Class
             | Token::Instance | Token::KwType | Token::Intrinsic | Token::Export
             | Token::Infixl | Token::Infixr | Token::Infix
-            | Token::Ident(_) | Token::LeftParen)
+            // What a signature, a function binding or a pattern binding
+            // begins with (`parse_binding_decl`): a variable, a
+            // parenthesis, or any other pattern.
+            | Token::Ident(_) | Token::LeftParen
+            | Token::UpperIdent(_) | Token::QualUpperIdent(_) | Token::LeftBracket
+            | Token::Underscore | Token::IntLit(_) | Token::BigIntLit(_)
+            | Token::NumLit(_) | Token::StrLit(_))
     }
 
     /// After a declaration fails to parse, skip forward to the next plausible
@@ -1061,8 +1113,6 @@ impl Parser {
             Token::Intrinsic => self.parse_intrinsic_decl(),
             Token::Export => self.parse_export_decl(),
             Token::Infixl | Token::Infixr | Token::Infix => self.parse_fixity_decl(),
-            Token::Ident(_) => self.parse_value_decl(),
-            Token::LeftParen => self.parse_operator_decl(),
             // `O.plus a b = …` binds nothing (see `qualified_binder_error`);
             // `O.plus :: T` is GHC's "Invalid qualified name in type
             // signature" — a signature names a declaration of this module.
@@ -1080,6 +1130,10 @@ impl Parser {
                 }
                 Err(self.qualified_binder_error(&name))
             }
+            // Everything else that is a declaration is `gendecl | (funlhs |
+            // pat) rhs` — a signature, a function binding or a pattern
+            // binding — and begins like a pattern.
+            _ if self.starts_binding() => self.parse_binding_decl(),
             // A token no declaration begins with — or a line indented LESS
             // than the module's declarations, the block's `}` with nothing
             // outside it to take the line.
@@ -1562,72 +1616,394 @@ impl Parser {
         })
     }
 
-    /// Parse a method name at the start of a class/instance member line: a
-    /// plain identifier, or an operator in parentheses (`(+)`). Returns
-    /// `Ok(None)` when the line starts with neither — the member block ends
-    /// there. `what` names the construct for the error when the parentheses
-    /// hold something other than an operator.
-    fn parse_method_name(&mut self, what: &str) -> PResult<Option<MethodHead>> {
-        if self.at(&Token::LeftParen) {
-            // `(+)`: the operator being defined, prefix form. Anything else
-            // in the parentheses is the LEFT OPERAND PATTERN of an infix
-            // definition — `(K a) + (K b) = …`, the common spelling of a
-            // wrapper type's Num/Semigroup instance — so parse it as a
-            // pattern and let the caller take the infix branch. (This used
-            // to fail with "Expected operator in instance method".)
-            let cp = self.checkpoint();
-            self.advance();
-            if let Token::Operator(op) = self.peek().clone() {
-                self.advance();
-                self.expect(&Token::RightParen)?;
-                return Ok(Some(MethodHead::Name(op)));
-            }
-            self.rewind(cp);
-            let left = self.parse_pattern_atom()?;
-            if !matches!(self.peek(), Token::Operator(_) | Token::Backtick) {
-                return Err(self.err_here(format!(
-                    "Expected operator in {} (a parenthesised pattern here must be the \
-                     left operand of an infix definition, `(K a) + (K b) = …`)", what)));
-            }
-            Ok(Some(MethodHead::Infix(left)))
-        } else if let Token::Ident(name) = self.peek().clone() {
-            self.advance();
-            Ok(Some(MethodHead::Name(name)))
-        } else {
-            Ok(None)
+    /// The left-hand side of one declaration of a binding group, Haskell
+    /// 2010 §4.4.3: `decl → gendecl | (funlhs | pat) rhs`. THE reader of a
+    /// declaration's head — the module's top level, `where` and `let`
+    /// groups, class bodies and instance bodies all call it, so the forms
+    /// a declaration can take are the same wherever one stands (they used
+    /// to be five hand-written subsets: an infix definition took a pattern
+    /// operand only in a class or instance body and only in parentheses, a
+    /// `where` group knew no operator at all, and a pattern binding was a
+    /// tuple in a `let` or `where` and nothing anywhere else). The caller
+    /// has dealt with a fixity declaration (the keyword says so) and reads
+    /// what follows the head: `:: type` after a signature's names, the
+    /// `rhs` (`parse_rhs`) after a function head or a pattern.
+    fn parse_decl_head(&mut self) -> PResult<DeclHead> {
+        if let Some(names) = self.signature_names() {
+            return Ok(DeclHead::Signature(names));
         }
+        self.parse_lhs()
     }
 
-    /// The infix method-definition tail: the already-consumed identifier
-    /// was the LEFT OPERAND (`x <> y = …` or ``x `op` y = …``) and the
-    /// operator is the method actually being defined. Mirrors
-    /// parse_value_decl's top-level infix branch; class and instance
-    /// bodies used to lack it, so the spelling the top level accepts died
-    /// there with "Expected '='". `binders_from` is the token the left
-    /// operand began at — the start of the equation's binder list.
-    fn parse_infix_method_clause(
-        &mut self,
-        left: Pattern,
-        binders_from: usize,
-    ) -> PResult<(String, Clause)> {
-        let loc = self.peek_loc();
-        let span = Span::new(loc.line, loc.col);
-        let op = match self.peek().clone() {
+    /// The names of a type signature, if one starts here: `vars ::` with
+    /// `vars → var {, var}` and a `var` an identifier or a parenthesised
+    /// operator (Haskell 2010 §4.4.1 `gendecl → vars :: type`). Consumes
+    /// the names and stops in front of the `::`; anything else is left
+    /// unread — `(a, b) = e` and `f x = e` begin the same way.
+    fn signature_names(&mut self) -> Option<Vec<(String, usize)>> {
+        let save = self.checkpoint();
+        let mut names = Vec::new();
+        loop {
+            match self.peek().clone() {
+                Token::Ident(name) => {
+                    names.push((name, self.cur()));
+                    self.advance();
+                }
+                Token::LeftParen => {
+                    self.advance();
+                    let tok = self.cur();
+                    let Token::Operator(op) = self.peek().clone() else { break };
+                    self.advance();
+                    if !self.at(&Token::RightParen) {
+                        break;
+                    }
+                    self.advance();
+                    names.push((op, tok));
+                }
+                _ => break,
+            }
+            if self.at(&Token::DblColon) {
+                return Some(names);
+            }
+            if !self.at(&Token::Comma) {
+                break;
+            }
+            self.advance();
+        }
+        self.rewind(save);
+        None
+    }
+
+    // Depth-guard wrapper: the grammar rule itself is in `parse_lhs_inner`
+    // (a parenthesised head nests).
+    fn parse_lhs(&mut self) -> PResult<DeclHead> {
+        self.guarded("pattern", Self::parse_lhs_inner)
+    }
+
+    /// `funlhs | pat` (Haskell 2010 §4.4.3):
+    ///
+    /// ```text
+    /// funlhs → var apat {apat}            f x y      x      (<+>) a b
+    ///        | pat varop pat              V a b |+| V c d      l `has` x
+    ///        | ( funlhs ) apat {apat}     (x `op` y) z      (f . g) a
+    /// ```
+    ///
+    /// and anything else that is a pattern is the left-hand side of a
+    /// pattern binding (`(lo, hi)`, `Just k`, `x : xs`). The operands of an
+    /// infix head are read by THE pattern parser (`parse_pattern`), so
+    /// they are whatever a pattern is — a constructor application groups
+    /// before the operator, a `:` chain belongs to the operand — and the
+    /// one operator the pattern parser does not take is the name being
+    /// defined. GHC decides the same way (`isFunLhs`): the head is a
+    /// function binding when a variable operator stands at its root, and a
+    /// pattern otherwise.
+    fn parse_lhs_inner(&mut self) -> PResult<DeclHead> {
+        let start = self.checkpoint();
+        let start_tok = self.cur();
+        match self.peek().clone() {
+            // `var apat {apat}`, unless the variable turns out to be the
+            // left operand of an infix head or the head of a pattern
+            // (`x : xs`, `xs@(x : _)`): those are read below, as patterns.
+            Token::Ident(name) if self.nth(1).token != Token::At => {
+                self.advance();
+                if !matches!(self.peek(), Token::Operator(_) | Token::QualOperator(_) | Token::Backtick) {
+                    let span = self.span_of(self.cur());
+                    let patterns = self.parse_apats()?;
+                    return Ok(DeclHead::Function(FunLhs { name, span, patterns, operand_cons: Vec::new() }));
+                }
+                self.rewind(start);
+            }
+            Token::LeftParen => {
+                // `(op) apat {apat}`: a `var` is an identifier or an
+                // operator in parentheses.
+                if let Token::Operator(op) = self.nth(1).token.clone()
+                    && self.nth(2).token == Token::RightParen
+                {
+                    self.advance();
+                    Self::definable_operator(&op).map_err(|msg| self.err_here(msg))?;
+                    self.advance();
+                    self.advance();
+                    let span = self.span_of(self.cur());
+                    let patterns = self.parse_apats()?;
+                    return Ok(DeclHead::Function(FunLhs { name: op, span, patterns, operand_cons: Vec::new() }));
+                }
+                // `( funlhs ) apat {apat}`: a head in parentheses that
+                // takes further arguments. Speculative — the parenthesis
+                // may as well open a pattern (`(a, b) = e`, `(Just x) <+>
+                // y = e`), which is read below.
+                self.advance();
+                if let Ok(DeclHead::Function(mut lhs)) = self.parse_lhs()
+                    && self.at(&Token::RightParen)
+                {
+                    self.advance();
+                    if self.is_pattern_atom_start() {
+                        lhs.patterns.extend(self.parse_apats()?);
+                        return Ok(DeclHead::Function(lhs));
+                    }
+                    // `(f x) = e`, ``(x `op` y) = e``: the grammar gives a
+                    // parenthesised head at least one further argument,
+                    // and what stands in the parentheses is no pattern
+                    // either (GHC: "Parse error in pattern: f x").
+                    if !lhs.patterns.is_empty() {
+                        let mut diag = Diagnostic::parse_at(
+                            format!(
+                                "Parse error in pattern: {}",
+                                self.source_text(start_tok + 1, self.pos - 1)
+                            ),
+                            self.span_of(start_tok),
+                        );
+                        diag.notes.push(format!(
+                            "a function head in parentheses takes at least one more argument \
+                             after the parenthesis — '({}) z = …' defines '{}' with one \
+                             argument more; without one, write the head without the \
+                             parentheses",
+                            self.source_text(start_tok + 1, self.pos - 1),
+                            lhs.name,
+                        ));
+                        return Err(Box::new(diag));
+                    }
+                }
+                self.rewind(start);
+            }
+            _ => {}
+        }
+
+        // `pat varop pat`, or `pat` alone.
+        let left = self.parse_pattern()?;
+        let op_tok = self.cur();
+        let name = match self.peek().clone() {
             Token::Operator(op) => {
+                Self::definable_operator(&op).map_err(|msg| self.err_here(msg))?;
                 self.advance();
                 op
             }
+            // `a O.<+> b = …`: the operator being defined is qualified, and
+            // a definition cannot bind an imported module's operator.
+            Token::QualOperator(op) => return Err(self.qualified_binder_error(&op)),
             Token::Backtick => {
                 self.advance();
                 let f = self.expect_ident()?;
                 self.expect(&Token::Backtick)?;
                 f
             }
-            _ => unreachable!("caller checked for Operator/Backtick"),
+            // No operator: a pattern. A variable in parentheses is still
+            // the variable (`(x) = e` binds `x`, as `x = e` does).
+            _ => {
+                let mut bare = &left;
+                while let Pattern::Paren(inner) = bare {
+                    bare = inner;
+                }
+                return Ok(match bare {
+                    Pattern::Var(name) => DeclHead::Function(FunLhs {
+                        name: name.clone(),
+                        span: self.span_of(self.cur()),
+                        patterns: Vec::new(),
+                        operand_cons: Vec::new(),
+                    }),
+                    _ => DeclHead::Pattern(left),
+                });
+            }
         };
-        let right = self.parse_pattern_atom()?;
-        let clause = self.finish_clause(&op, vec![left, right], span, binders_from)?;
-        Ok((op, clause))
+        let right_tok = self.cur();
+        let right = self.parse_pattern()?;
+        // A second variable operator: one of the two would have to be part
+        // of a pattern, and a pattern's operators are constructors (GHC:
+        // "Parse error in pattern: a +++ b").
+        if matches!(self.peek(), Token::Operator(_) | Token::QualOperator(_) | Token::Backtick) {
+            let mut diag = Diagnostic::parse_at(
+                format!("Parse error in pattern: {}", self.source_text(start_tok, self.pos)),
+                self.span_of(start_tok),
+            );
+            diag.notes.push(format!(
+                "the head of an infix definition is 'pattern operator pattern': ONE \
+                 operator is being defined — here {} — and its operands are patterns, \
+                 whose only operators are constructor operators (':'). The further \
+                 operator {} leaves this head no reading.",
+                crate::fixity::op_display(&name),
+                self.peek(),
+            ));
+            return Err(Box::new(diag));
+        }
+        let operand_cons = [
+            self.root_con_operator(start_tok, op_tok, false),
+            self.root_con_operator(right_tok, self.pos, true),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        Ok(DeclHead::Function(FunLhs {
+            name,
+            span: self.span_of(start_tok),
+            patterns: vec![left, right],
+            operand_cons,
+        }))
+    }
+
+    /// The parameter patterns of a prefix function head: `{apat}`. A
+    /// constructor here is nullary (`M.Just` included) — what follows it
+    /// is the head's next parameter, not its argument.
+    fn parse_apats(&mut self) -> PResult<Vec<Pattern>> {
+        let mut patterns = Vec::new();
+        while self.is_pattern_atom_start() {
+            patterns.push(self.parse_pattern_atom()?);
+        }
+        Ok(patterns)
+    }
+
+    /// Can a definition bind the operator `op`? Haskell 2010 §4.4.3 defines
+    /// a `varop`; an operator that starts with a colon is a constructor
+    /// (`:` itself, and every `:+`), which a `data` declaration introduces
+    /// and a pattern matches — never a function a binding defines. (GHC
+    /// reads `(:) a b = e` and `a :+ b = e` as pattern bindings; mata-ll's
+    /// patterns have no prefix `(:)` and no infix constructor but `:`,
+    /// which the pattern parser has taken before this is asked.) `..` is
+    /// reserved syntax (§2.4 `reservedop`).
+    fn definable_operator(op: &str) -> Result<(), String> {
+        if op.starts_with(':') {
+            return Err(format!(
+                "'{op}' cannot be defined by an equation: an operator that starts with \
+                 ':' is a data constructor — a 'data' declaration introduces it and a \
+                 pattern matches it (GHC reads this head as a pattern). A function \
+                 operator starts with any other symbol character."
+            ));
+        }
+        if op == ".." {
+            return Err("'..' is reserved syntax and cannot be defined as an operator".to_string());
+        }
+        Ok(())
+    }
+
+    /// The constructor operator at the root of the head operand spelled by
+    /// the tokens `from..to`, if the operand is an infix-constructor
+    /// pattern written WITHOUT parentheses (see `ast::HeadOperand`). The
+    /// pattern parser has taken exactly these tokens as one pattern, so an
+    /// operator among them outside every bracket is a constructor
+    /// operator of that pattern, and the first such is its root: pattern
+    /// operators nest to the right.
+    fn root_con_operator(&self, from: usize, to: usize, right: bool) -> Option<HeadOperand> {
+        let mut depth = 0usize;
+        for i in from..to {
+            match &self.tokens[i].token {
+                Token::LeftParen | Token::LeftBracket | Token::LeftBrace => depth += 1,
+                Token::RightParen | Token::RightBracket | Token::RightBrace => {
+                    depth = depth.saturating_sub(1)
+                }
+                Token::Operator(op) if depth == 0 && op.starts_with(':') => {
+                    return Some(HeadOperand { con: op.clone(), span: self.span_of(i), right });
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The source text of the tokens `from..to`, spaced as GHC prints a
+    /// pattern (`Just k`, `(a, b)`, `[p, q]`, `x : xs`) — for the messages
+    /// that quote a pattern as written.
+    fn source_text(&self, from: usize, to: usize) -> String {
+        let mut out = String::new();
+        // No space after an opening bracket or backtick, nor before a
+        // closing one or a comma.
+        let mut glue = true;
+        let mut in_backticks = false;
+        for loc in &self.tokens[from..to.min(self.tokens.len())] {
+            let text = match &loc.token {
+                Token::Indent(_) => continue,
+                Token::Ident(s) | Token::UpperIdent(s) | Token::Operator(s)
+                | Token::QualIdent(s) | Token::QualUpperIdent(s) | Token::QualOperator(s)
+                | Token::BigIntLit(s) => s.clone(),
+                Token::IntLit(n) => n.to_string(),
+                Token::NumLit(x) => format!("{x:?}"),
+                Token::StrLit(bytes) => format!("{:?}", String::from_utf8_lossy(bytes)),
+                Token::Underscore => "_".to_string(),
+                Token::LeftParen => "(".to_string(),
+                Token::RightParen => ")".to_string(),
+                Token::LeftBracket => "[".to_string(),
+                Token::RightBracket => "]".to_string(),
+                Token::Comma => ",".to_string(),
+                Token::At => "@".to_string(),
+                Token::Backtick => "`".to_string(),
+                other => other.to_string().trim_matches('\'').to_string(),
+            };
+            let backtick = loc.token == Token::Backtick;
+            let closes = matches!(
+                loc.token,
+                Token::RightParen | Token::RightBracket | Token::Comma | Token::At
+            ) || (backtick && in_backticks);
+            if !glue && !closes {
+                out.push(' ');
+            }
+            out.push_str(&text);
+            in_backticks ^= backtick;
+            glue = matches!(loc.token, Token::LeftParen | Token::LeftBracket | Token::At)
+                || (backtick && in_backticks);
+        }
+        out
+    }
+
+    /// A declaration that began with the pattern spelled by the tokens
+    /// `head_tok..` continues with its right-hand side — `=` or a guard —
+    /// or it is no declaration: reported at the pattern, which is where
+    /// the line went wrong (the token after it is often the next line's).
+    fn expect_pattern_binding_rhs(&self, head_tok: usize) -> PResult<()> {
+        if matches!(self.peek(), Token::Eq | Token::Pipe) {
+            return Ok(());
+        }
+        let text = self.source_text(head_tok, self.cur());
+        let found = match self.peek() {
+            Token::Indent(_) => "the line ends".to_string(),
+            other => format!("found {other}"),
+        };
+        let mut diag = Diagnostic::parse_at(
+            format!(
+                "parse error on input {}: a declaration that begins with the pattern \
+                 '{text}' is a pattern binding and continues with '=', but {found}",
+                self.tokens[head_tok].token,
+            ),
+            self.span_of(head_tok),
+        );
+        diag.notes.push(
+            "a declaration is a type signature ('name :: T'), a function binding \
+             ('f x = e', 'x <+> y = e') or a pattern binding ('(a, b) = e', 'Just x = \
+             e'); this line is none of them."
+                .to_string(),
+        );
+        Err(Box::new(diag))
+    }
+
+    /// A pattern binding in a class or instance body. Haskell 2010 §4.3.1
+    /// and §4.3.2 give those bodies function and variable bindings only
+    /// (GHC: "Pattern bindings (except simple variables) not allowed in
+    /// instance declaration").
+    fn pattern_binding_in_body_error(&self, head_tok: usize, end_tok: usize, body: &str) -> Box<Diagnostic> {
+        let text = self.source_text(head_tok, end_tok);
+        let mut diag = Diagnostic::parse_at(
+            format!("Pattern bindings (except simple variables) not allowed in {body} declaration: {text}"),
+            self.span_of(head_tok),
+        );
+        diag.notes.push(format!(
+            "a class or instance body defines methods: 'name args = …', or \
+             an operator method between its two argument patterns ('K a <> K b = \
+             …'). '{text}' names no method — it is a pattern on its own."
+        ));
+        Box::new(diag)
+    }
+
+    /// Can the current token begin a member of a class or instance body —
+    /// a signature or a function head (a variable, a parenthesis, or the
+    /// pattern an infix head's left operand is)? A qualified variable
+    /// begins none: the body ends in front of it and the declaration loop
+    /// reports the token.
+    fn starts_member(&self) -> bool {
+        self.starts_binding() && !matches!(self.peek(), Token::QualIdent(_))
+    }
+
+    /// Can the current token begin a signature, a function binding or a
+    /// pattern binding? All three begin like a pattern (Haskell 2010
+    /// §3.17.1 `lpat`): an atomic pattern, a constructor, or the `-` of a
+    /// negative literal (`-1 |+| k = k`).
+    fn starts_binding(&self) -> bool {
+        self.is_case_alt_start()
     }
 
     fn parse_class_decl(&mut self) -> PResult<Vec<Decl>> {
@@ -1739,37 +2115,31 @@ impl Parser {
                     continue;
                 }
 
-                // Parse method name: a `name :: type` signature line or a
-                // default method clause. Could be an operator like (+) :: ...
-                let head_tok = p.cur();
                 // A token no member begins with closes the body (the
                 // parse-error(t) rule); the declaration loop reports it.
-                let Some(head) = p.parse_method_name("class method")? else { break };
-
-                // A `::` after a plain name makes it a type signature; an
-                // operator (or backtick) makes it the INFIX definition form
-                // (`x <> y = …` — the identifier was the left operand; a
-                // parenthesised pattern head, `(K a) <> (K b) = …`, is always
-                // this form); anything else is a prefix default method clause —
-                // `parse_clause` picks up right after the already-consumed name,
-                // exactly like a top-level function clause.
-                let (name, clause) = match head {
-                    MethodHead::Infix(left) => p.parse_infix_method_clause(left, head_tok)?,
-                    MethodHead::Name(name) => {
-                        if p.at(&Token::DblColon) {
-                            p.advance();
-                            let ty = p.parse_type()?;
-                            p.declare(&name, DeclaredAs::Method(class_name.clone()), head_tok);
-                            methods.push(ClassMethod { name, ty, default_clauses: None });
-                            open_default = None;
-                            continue;
+                if !p.starts_member() {
+                    break;
+                }
+                // A member is a declaration like any other (Haskell 2010
+                // §4.3.1 `cdecl → gendecl | (funlhs | var) rhs`): a
+                // signature line declares methods, a function head defines
+                // a method's default, prefix or infix alike.
+                let head_tok = p.cur();
+                let (name, clause) = match p.parse_decl_head()? {
+                    DeclHead::Signature(names) => {
+                        p.expect(&Token::DblColon)?;
+                        let ty = p.parse_type()?;
+                        for (i, (name, tok)) in names.into_iter().enumerate() {
+                            let at = if i == 0 { head_tok } else { tok };
+                            p.declare(&name, DeclaredAs::Method(class_name.clone()), at);
+                            methods.push(ClassMethod { name, ty: ty.clone(), default_clauses: None });
                         }
-                        if matches!(p.peek(), Token::Operator(_) | Token::Backtick) {
-                            p.bind_pattern_var(head_tok);
-                            p.parse_infix_method_clause(Pattern::Var(name), head_tok)?
-                        } else {
-                            (name.clone(), p.parse_clause(&name)?)
-                        }
+                        open_default = None;
+                        continue;
+                    }
+                    DeclHead::Function(lhs) => (lhs.name.clone(), p.finish_clause(lhs, head_tok)?),
+                    DeclHead::Pattern(_) => {
+                        return Err(p.pattern_binding_in_body_error(head_tok, p.cur(), "class"));
                     }
                 };
 
@@ -1854,25 +2224,37 @@ impl Parser {
                     break;
                 }
 
-                let head_tok = p.cur();
                 // A token no method begins with closes the body (the
                 // parse-error(t) rule); the declaration loop reports it.
-                let Some(head) = p.parse_method_name("instance method")? else { break };
-
-                // Collect all clauses for this method. An operator (or
-                // backtick) after the identifier is the INFIX definition form
-                // (`x <> y = …` — the identifier was the left operand); a
-                // parenthesised pattern head is always that form.
-                let (name, clause) = match head {
-                    MethodHead::Infix(left) => p.parse_infix_method_clause(left, head_tok)?,
-                    MethodHead::Name(name) => {
-                        if matches!(p.peek(), Token::Operator(_) | Token::Backtick) {
-                            p.bind_pattern_var(head_tok);
-                            p.parse_infix_method_clause(Pattern::Var(name), head_tok)?
-                        } else {
-                            let clause = p.parse_clause(&name)?;
-                            (name, clause)
-                        }
+                if !p.starts_member() {
+                    break;
+                }
+                // A method definition is a function binding like any other
+                // (Haskell 2010 §4.3.2 `idecl → (funlhs | var) rhs`), read
+                // by the one declaration-head parser: `show x = …`, `x <> y
+                // = …`, `V a b == V c d = …`, `A == A = True`.
+                let head_tok = p.cur();
+                let (name, clause) = match p.parse_decl_head()? {
+                    DeclHead::Function(lhs) => (lhs.name.clone(), p.finish_clause(lhs, head_tok)?),
+                    DeclHead::Signature(_) => {
+                        let mut diag = Diagnostic::parse_at(
+                            format!(
+                                "Illegal type signature in instance declaration: '{} :: …'",
+                                p.source_text(head_tok, p.cur())
+                            ),
+                            p.span_of(head_tok),
+                        );
+                        diag.notes.push(
+                            "a method's type is declared once, in its class; an instance \
+                             only defines it. Remove the signature line. (GHC accepts a \
+                             signature here under its InstanceSigs extension, which its \
+                             default language enables; mata-ll does not have it.)"
+                                .to_string(),
+                        );
+                        return Err(Box::new(diag));
+                    }
+                    DeclHead::Pattern(_) => {
+                        return Err(p.pattern_binding_in_body_error(head_tok, p.cur(), "instance"));
                     }
                 };
 
@@ -2055,12 +2437,29 @@ impl Parser {
         )))
     }
 
-    /// Parse a fixity declaration: `infixl 6 +`, `infixr 5 :`,
-    /// `infix 4 \`elem\``, or a comma list (`infixl 7 *, /`) — one
-    /// `Decl::FixityDecl` per operator. A declaration governs the whole
-    /// module, uses above it included; module resolution attaches it to
-    /// the operator this module declares under that name.
+    /// Parse a top-level (or class-body) fixity declaration: `infixl 6 +`,
+    /// `infixr 5 :`, `infix 4 \`elem\``, or a comma list (`infixl 7 *, /`)
+    /// — one `Decl::FixityDecl` per operator. Such a declaration governs
+    /// the whole module, uses above it included; module resolution
+    /// attaches it to the operator this module declares under that name.
+    /// (A `where` or `let` group's fixity declarations go to the group's
+    /// own bindings instead: `parse_local_decls`.)
     fn parse_fixity_decl(&mut self) -> PResult<Vec<Decl>> {
+        let (assoc, prec, ops) = self.parse_fixity_ops()?;
+        Ok(ops
+            .into_iter()
+            .map(|(op, op_tok)| {
+                self.declare(&op, DeclaredAs::Fixity, op_tok);
+                Decl::FixityDecl { assoc, prec, op, span: self.span_of(op_tok) }
+            })
+            .collect())
+    }
+
+    /// The text of a fixity declaration (Haskell 2010 §4.4.2 `fixity
+    /// [integer] ops`): the associativity, the precedence and the
+    /// operators it names, each with its token. Which binding group the
+    /// declaration belongs to is the caller's.
+    fn parse_fixity_ops(&mut self) -> PResult<(Assoc, u8, Vec<(String, usize)>)> {
         let assoc = match self.peek() {
             Token::Infixl => { self.advance(); Assoc::Left }
             Token::Infixr => { self.advance(); Assoc::Right }
@@ -2080,7 +2479,7 @@ impl Parser {
             }
             _ => return Err(self.err_here("Expected precedence level (0-9) after infixl/infixr/infix".to_string())),
         };
-        let mut decls = Vec::new();
+        let mut ops = Vec::new();
         loop {
             let mut op_tok = self.cur();
             let op = match self.peek().clone() {
@@ -2113,174 +2512,290 @@ impl Parser {
                 }
                 _ => return Err(self.err_here("Expected operator after fixity precedence".to_string())),
             };
-            self.declare(&op, DeclaredAs::Fixity, op_tok);
-            decls.push(Decl::FixityDecl { assoc, prec, op, span: self.span_of(op_tok) });
+            ops.push((op, op_tok));
             if self.at(&Token::Comma) {
                 self.advance();
             } else {
                 break;
             }
         }
+        Ok((assoc, prec, ops))
+    }
+
+    /// A signature, a function binding or a pattern binding at the top
+    /// level: `gendecl | (funlhs | pat) rhs` (`parse_decl_head`).
+    fn parse_binding_decl(&mut self) -> PResult<Vec<Decl>> {
+        let head_tok = self.cur();
+        match self.parse_decl_head()? {
+            DeclHead::Signature(names) => {
+                self.expect(&Token::DblColon)?;
+                let ty = self.parse_type()?;
+                Ok(names
+                    .into_iter()
+                    .map(|(name, tok)| {
+                        self.declare(&name, DeclaredAs::Signature, tok);
+                        Decl::TypeSig { name, ty: ty.clone() }
+                    })
+                    .collect())
+            }
+            DeclHead::Function(lhs) => {
+                let name = lhs.name.clone();
+                let clause = self.finish_clause(lhs, head_tok)?;
+                Ok(vec![Decl::FunDef { name, clauses: vec![clause] }])
+            }
+            DeclHead::Pattern(pattern) => self.top_pattern_binding(pattern, head_tok),
+        }
+    }
+
+    /// A top-level pattern binding `pat rhs` (Haskell 2010 §4.4.3.2), the
+    /// pattern already read from token `head_tok` on. It becomes top-level
+    /// value bindings, which are evaluated on first use like every other,
+    /// so the binding is as lazy as the report makes it — the match
+    /// happens when a variable of the pattern is first demanded, all of it
+    /// at once, and never if none is:
+    ///
+    /// ```text
+    /// (lo, Just hi) = e      __pat_1 = case e of (lo, Just hi) -> (lo, hi)
+    ///                                           _ -> error "Non-exhaustive patterns in …"
+    ///                        lo = case __pat_1 of (__pv, _) -> __pv
+    ///                        hi = case __pat_1 of (_, __pv) -> __pv
+    /// ```
+    ///
+    /// The scrutinee binding holds the MATCH — the pattern's variables as
+    /// a tuple (the variable itself when there is one, `()` when there is
+    /// none) — rather than the right-hand side as a local pattern binding's
+    /// does (`pattern_binding_defs`), because a top-level binding is
+    /// checked against a type signature (HASKDIFF, "All top-level bindings
+    /// require type signatures") and the match has one that follows from
+    /// the signatures of the variables: `(T_lo, T_hi)`. `parse_module`
+    /// writes it once the whole module is read (`top_pattern_signatures`),
+    /// a signature may stand below its binding. Checking the match
+    /// against it is what types the pattern and the right-hand side from
+    /// the variables' declared types, as GHC does.
+    ///
+    /// The scrutinee comes FIRST in the returned list, which is what keeps
+    /// the selectors out of `push_decl`'s equation grouping: a selector is
+    /// a parameterless binding, so nothing can continue it, and it never
+    /// follows a function of its own name directly — `f x = 1` and then
+    /// `(f, g) = …` are two definitions of `f`, reported as such.
+    fn top_pattern_binding(&mut self, pattern: Pattern, head_tok: usize) -> PResult<Vec<Decl>> {
+        let text = self.source_text(head_tok, self.cur());
+        let span = self.span_of(head_tok);
+        self.expect_pattern_binding_rhs(head_tok)?;
+        self.check_linear(head_tok, "a pattern binding")?;
+        let (rhs, where_binds) = self.parse_rhs(false)?;
+        let rhs = self.rhs_expr(rhs, where_binds);
+        self.pat_fresh += 1;
+        let fresh = format!("__pat_{}", self.pat_fresh);
+        let vars = pattern.var_names();
+
+        let matched = match vars.as_slice() {
+            [] => Expr::Lit(Literal::Unit),
+            [v] => Expr::Var(v.clone()),
+            vs => Expr::Tuple(vs.iter().cloned().map(Expr::Var).collect()),
+        };
+        let mut branches = Vec::new();
+        let refutable = !Self::pg_irrefutable(&pattern);
+        branches.push(CaseBranch { pattern, guards: vec![], body: Some(matched) });
+        if refutable {
+            branches.push(CaseBranch {
+                pattern: Pattern::Wildcard,
+                guards: vec![],
+                body: Some(Self::pg_error(&format!("Non-exhaustive patterns in {text}"))),
+            });
+        }
+        let value = |name: String, body: Expr| Decl::FunDef {
+            name,
+            clauses: vec![Clause {
+                patterns: Vec::new(),
+                guards: Vec::new(),
+                body: Some(body),
+                where_binds: Vec::new(),
+                span,
+                raw_guards: None,
+                operand_cons: Vec::new(),
+            }],
+        };
+        let mut decls =
+            vec![value(fresh.clone(), Expr::Case { scrutinee: Box::new(rhs), branches })];
+        for (i, v) in vars.iter().enumerate() {
+            // The selected component is bound under a name of the
+            // compiler's reserved namespace, like every binder the parser
+            // writes itself.
+            let picked = "__pv".to_string();
+            let select = if vars.len() == 1 {
+                Expr::Var(fresh.clone())
+            } else {
+                let slots = (0..vars.len())
+                    .map(|j| if i == j { Pattern::Var(picked.clone()) } else { Pattern::Wildcard })
+                    .collect();
+                Expr::Case {
+                    scrutinee: Box::new(Expr::Var(fresh.clone())),
+                    branches: vec![CaseBranch {
+                        pattern: Pattern::Tuple(slots),
+                        guards: vec![],
+                        body: Some(Expr::Var(picked)),
+                    }],
+                }
+            };
+            decls.push(value(v.clone(), select));
+        }
+        self.top_patterns.push(TopPattern { scrutinee: fresh, vars, text, span });
         Ok(decls)
     }
 
-    /// Parse a value declaration (type signature or function definition).
-    fn parse_value_decl(&mut self) -> PResult<Vec<Decl>> {
-        let loc = self.peek_loc();
-        let (def_line, def_col) = (loc.line, loc.col);
-        let name_tok = self.cur();
-        let name = self.expect_ident()?;
-
-        // Type signature: `name :: type`
-        if self.at(&Token::DblColon) {
-            self.advance();
-            let ty = self.parse_type()?;
-            self.declare(&name, DeclaredAs::Signature, name_tok);
-            return Ok(vec![Decl::TypeSig { name, ty }]);
+    /// The type signatures of the scrutinee bindings of the module's
+    /// top-level pattern bindings (see `top_pattern_binding`), built from
+    /// the signatures `decls` holds for the variables each one binds: the
+    /// tuple of the variables' types. A variable without a signature is
+    /// the error it is for every top-level binding; a variable whose
+    /// signature has a class context is GHC's "Overloaded signature
+    /// conflicts with monomorphism restriction" — a pattern binding is
+    /// one value, matched once, and cannot be one value per instance.
+    fn top_pattern_signatures(&self, decls: &[Decl]) -> Result<Vec<Decl>, Vec<Diagnostic>> {
+        let mut sigs: HashMap<&str, &Type> = HashMap::new();
+        for d in decls {
+            if let Decl::TypeSig { name, ty } | Decl::ExportSig { name, ty } = d {
+                sigs.entry(name.as_str()).or_insert(ty);
+            }
         }
-
-        // `a O.<+> b = …`: the operator being defined is qualified, and a
-        // definition cannot bind an imported module's operator.
-        if let Token::QualOperator(op) = self.peek().clone() {
-            return Err(self.qualified_binder_error(&op));
-        }
-
-        // Infix definition: `lhs <op> rhs = ...` or ``lhs `f` rhs = ...``.
-        // The leading identifier is the first operand (a var pattern), the
-        // operator (or backtick'd name) is the function being defined, and the
-        // following pattern is the second operand.
-        if matches!(self.peek(), Token::Operator(_) | Token::Backtick) {
-            let span = Span::new(def_line, def_col);
-
-            self.bind_pattern_var(name_tok);
-            let left = Pattern::Var(name);
-            let op = match self.peek().clone() {
-                Token::Operator(op) => {
-                    self.advance();
-                    op
+        let mut out = Vec::new();
+        let mut errors = Vec::new();
+        for tp in &self.top_patterns {
+            let mut quantified: Vec<String> = Vec::new();
+            let mut types = Vec::new();
+            for v in &tp.vars {
+                let Some(mut ty) = sigs.get(v.as_str()).copied() else {
+                    let mut diag = Diagnostic::parse_at(
+                        format!("Missing type signature for '{v}'"),
+                        tp.span,
+                    );
+                    diag.notes.push(format!(
+                        "the pattern binding '{} = …' defines '{v}' at the top level, \
+                         and mata-ll requires a type signature for every top-level \
+                         binding (GHC infers one): add '{v} :: T' — the variables of one \
+                         pattern can share a line, 'a, b :: T'.",
+                        tp.text,
+                    ));
+                    errors.push(diag);
+                    continue;
+                };
+                // An explicit `forall` of a variable's signature
+                // quantifies the scrutinee's signature too.
+                loop {
+                    match ty {
+                        Type::Forall { var, inner } => {
+                            if !quantified.contains(var) {
+                                quantified.push(var.clone());
+                            }
+                            ty = inner;
+                        }
+                        Type::Paren(inner) => ty = inner,
+                        _ => break,
+                    }
                 }
-                Token::Backtick => {
-                    self.advance();
-                    let f = self.expect_ident()?;
-                    self.expect(&Token::Backtick)?;
-                    f
+                if matches!(ty, Type::Constrained { .. }) {
+                    let mut diag = Diagnostic::parse_at(
+                        format!(
+                            "Overloaded signature conflicts with monomorphism restriction: \
+                             the signature of '{v}' has a class context, and '{v}' is bound \
+                             by the pattern binding '{} = …'",
+                            tp.text,
+                        ),
+                        tp.span,
+                    );
+                    diag.notes.push(format!(
+                        "a pattern binding is one value, matched once and shared by the \
+                         variables it binds; a class-constrained '{v}' would be a \
+                         different value at every instance. Give '{v}' a signature \
+                         without a context, or define it by an equation of its own (GHC \
+                         rejects this signature the same way)."
+                    ));
+                    errors.push(diag);
+                    continue;
                 }
-                _ => unreachable!(),
+                types.push(ty.clone());
+            }
+            if types.len() != tp.vars.len() {
+                continue;
+            }
+            let mut ty = match types.len() {
+                0 => Type::Unit,
+                1 => types.pop().expect("one type"),
+                _ => Type::Tuple(types),
             };
-            let right = self.parse_pattern_atom()?;
-            let clause = self.finish_clause(&op, vec![left, right], span, name_tok)?;
-            return Ok(vec![Decl::FunDef {
-                name: op,
-                clauses: vec![clause],
-            }]);
-        }
-
-        // Function definition: `name patterns = expr`
-        let clause = self.parse_clause(&name)?;
-
-        Ok(vec![Decl::FunDef {
-            name,
-            clauses: vec![clause],
-        }])
-    }
-
-    /// Parse an operator definition like `(+) a b = ...`
-    fn parse_operator_decl(&mut self) -> PResult<Vec<Decl>> {
-        self.expect(&Token::LeftParen)?;
-        let op_tok = self.cur();
-        let op = match self.peek().clone() {
-            Token::Operator(op) => {
-                self.advance();
-                op
+            for var in quantified.into_iter().rev() {
+                ty = Type::Forall { var, inner: Box::new(ty) };
             }
-            _ => {
-                return Err(self.err_here("Expected operator".to_string()));
-            }
-        };
-        self.expect(&Token::RightParen)?;
-
-        // Type signature: `(op) :: type`
-        if self.at(&Token::DblColon) {
-            self.advance();
-            let ty = self.parse_type()?;
-            self.declare(&op, DeclaredAs::Signature, op_tok);
-            return Ok(vec![Decl::TypeSig { name: op, ty }]);
+            out.push(Decl::TypeSig { name: tp.scrutinee.clone(), ty });
         }
-
-        let clause = self.parse_clause(&op)?;
-        Ok(vec![Decl::FunDef {
-            name: op,
-            clauses: vec![clause],
-        }])
+        if errors.is_empty() { Ok(out) } else { Err(errors) }
     }
 
-    /// One equation of `name`, from just after the name: its parameter
-    /// patterns, then `finish_clause`. The equation is an item of the
-    /// enclosing block (the module's declarations, a class or instance
-    /// body), whose layout context is already in force: a line indented
-    /// past the block's column continues the equation, a line at the
-    /// column is the next equation or declaration.
-    fn parse_clause(&mut self, name: &str) -> PResult<Clause> {
-        let binders_from = self.cur();
-        let loc = self.peek_loc();
-        let span = Span::new(loc.line, loc.col);
-
-        let mut patterns = Vec::new();
-        while self.is_pattern_atom_start() {
-            // A constructor at clause level (`M.Just` included) is nullary:
-            // what follows are the clause's further patterns, not its
-            // arguments — `parse_pattern_atom` reads it so.
-            patterns.push(self.parse_pattern_atom()?);
-        }
-
-        self.finish_clause(name, patterns, span, binders_from)
-    }
-
-    /// Parse the tail of a clause (guards or `= body`, then an optional `where`)
-    /// given its already-parsed parameter patterns. Shared by
-    /// the prefix form (`f a b = ...`) and the infix form (`a `op` b = ...`)
-    /// of top-level functions, class defaults and instance methods alike —
-    /// every equation with a clause passes through here, so this is where
-    /// its parameter list (which began at token `binders_from`) is checked
-    /// for a variable bound twice.
-    fn finish_clause(
-        &mut self,
-        name: &str,
-        patterns: Vec<Pattern>,
-        span: Span,
-        binders_from: usize,
-    ) -> PResult<Clause> {
-        self.check_linear(binders_from, &format!("an equation for '{}'", name))?;
-        // Guards (`| cond = body`, each part free to start a new line
-        // indented past the block's column)
-        let chain = self.parse_guard_chain(&Token::Eq)?;
-
-        // A guarded clause has no single body: the guard chain IS the body.
-        let body = if chain.is_empty() {
-            self.expect(&Token::Eq)?;
-            Some(self.parse_expr()?)
-        } else {
-            None
+    /// The rest of a function equation after its head: the `rhs`
+    /// (`parse_rhs`), with the head's parameter list — which began at
+    /// token `binders_from` — checked for a variable bound twice. Shared
+    /// by top-level functions, class defaults and instance methods; the
+    /// equation is an item of the enclosing block (the module's
+    /// declarations, a class or instance body), whose layout context is
+    /// already in force.
+    fn finish_clause(&mut self, lhs: FunLhs, binders_from: usize) -> PResult<Clause> {
+        self.check_linear(binders_from, &format!("an equation for '{}'", lhs.name))?;
+        let (rhs, where_binds) = self.parse_rhs(false)?;
+        // A guarded clause has no single body: the guard chain IS the
+        // body. A chain with binding qualifiers is held raw: its
+        // fall-through target is the NEXT clause, which is not parsed yet.
+        // The clause group is lowered at end of parse
+        // (desugar_pattern_guard_clauses).
+        let (guards, body, raw_guards) = match rhs {
+            Rhs::Body(body) => (Vec::new(), Some(body), None),
+            Rhs::Guards(GuardChain::Plain(g)) => (g, None, None),
+            Rhs::Guards(GuardChain::Raw(r)) => (Vec::new(), None, Some(r)),
         };
-        // A chain with binding qualifiers is held raw: its fall-through
-        // target is the NEXT clause, which is not parsed yet. The clause
-        // group is lowered at end of parse (desugar_pattern_guards).
-        let (guards, raw_guards) = match chain {
-            GuardChain::Plain(g) => (g, None),
-            GuardChain::Raw(r) => (Vec::new(), Some(r)),
-        };
-
-        // where clause
-        let where_binds = self.parse_where()?;
-
         Ok(Clause {
-            patterns,
+            patterns: lhs.patterns,
             guards,
             body,
             where_binds,
-            span,
+            span: lhs.span,
             raw_guards,
+            operand_cons: lhs.operand_cons,
         })
+    }
+
+    /// The right-hand side of a declaration and its `where` block (Haskell
+    /// 2010 §4.4.3 `rhs → = exp [where decls] | gdrhs [where decls]`),
+    /// from just after the head: a guard chain (`| cond = body`, each part
+    /// free to start a new line indented past the block's column) or `=
+    /// body`. `spanned` marks the body as a statement-boundary expression
+    /// (`parse_stmt_expr`), which the bindings of a local group are.
+    fn parse_rhs(&mut self, spanned: bool) -> PResult<(Rhs, Vec<LocalDef>)> {
+        let chain = self.parse_guard_chain(&Token::Eq)?;
+        let rhs = if chain.is_empty() {
+            self.expect(&Token::Eq)?;
+            Rhs::Body(if spanned { self.parse_stmt_expr()? } else { self.parse_expr()? })
+        } else {
+            Rhs::Guards(chain)
+        };
+        let where_binds = self.parse_where()?;
+        Ok((rhs, where_binds))
+    }
+
+    /// A right-hand side as ONE expression, for a binding that stands
+    /// alone (a pattern binding, an equation nothing follows): the guard
+    /// chain folded over the match-failure error, under the `where` block
+    /// that scopes over guards and bodies alike.
+    fn rhs_expr(&mut self, rhs: Rhs, where_binds: Vec<LocalDef>) -> Expr {
+        let fallback = Expr::App(
+            Box::new(WiredIn::Error.var()),
+            Box::new(Expr::Lit(Literal::Str(b"non-exhaustive guards".to_vec()))),
+        );
+        let body = match rhs {
+            Rhs::Body(body) => body,
+            Rhs::Guards(GuardChain::Plain(guards)) => Self::pg_plain_guards(guards, &fallback),
+            Rhs::Guards(GuardChain::Raw(raws)) => self.guard_chain_expr(raws, fallback),
+        };
+        Self::wrap_where(where_binds, body)
     }
 
     /// One `| cond <sep> body` guard chain, shared by function clauses
@@ -2368,20 +2883,6 @@ impl Parser {
         Ok(GuardQual::Bool(self.parse_expr()?))
     }
 
-    /// The head of one binding-group entry: `name [patterns]`. Shared by
-    /// where blocks, let-expression bindings, and do-`let` groups (the
-    /// caller has already established that an identifier starts the line).
-    fn parse_binding_head(&mut self) -> PResult<(String, Vec<Pattern>)> {
-        let name = self.expect_ident()?;
-        let binders_from = self.cur();
-        let mut patterns = Vec::new();
-        while self.is_pattern_start() {
-            patterns.push(self.parse_pattern_atom()?);
-        }
-        self.check_linear(binders_from, &format!("an equation for '{}'", name))?;
-        Ok((name, patterns))
-    }
-
     /// Does an equation of `name` continue the function binding whose first
     /// equation is `first`? Haskell 2010 §4.4.3.1 as GHC implements it: the
     /// equations of one function are adjacent, and only a first equation
@@ -2411,11 +2912,16 @@ impl Parser {
     ///    of one function take the same number of arguments;
     /// 3. each function's equations are lowered (`lower_local_equations`):
     ///    guards fall through to the next equation, and only past the last
-    ///    equation to the match-failure error.
+    ///    equation to the match-failure error;
+    /// 4. the group's signature and fixity declarations are attached to
+    ///    the bindings they name (`attach_local_sigs`,
+    ///    `attach_local_fixities`) — both belong to the group that binds
+    ///    the name, wherever in the group they stand.
     fn close_local_group(
         &mut self,
         entries: Vec<LocalEntry>,
         sigs: Vec<(String, Type, Span)>,
+        fixities: Vec<(String, (Assoc, u8), Span)>,
     ) -> PResult<Vec<LocalDef>> {
         enum Group {
             Function(Vec<LocalEquation>),
@@ -2496,6 +3002,7 @@ impl Parser {
             }
         }
         Self::attach_local_sigs(&mut binds, sigs)?;
+        Self::attach_local_fixities(&mut binds, fixities)?;
         Ok(binds)
     }
 
@@ -2514,46 +3021,42 @@ impl Parser {
         let n = eqs.len();
         let collapse_from = eqs
             .iter()
-            .position(|e| matches!(e.rhs, LocalRhs::Guards(_)))
+            .position(|e| matches!(e.rhs, Rhs::Guards(_)))
             .filter(|&k| k + 1 < n);
         let mut eqs = eqs;
         let tail = collapse_from.map(|k| eqs.split_off(k));
         let mut defs: Vec<LocalDef> = eqs
             .into_iter()
             .map(|eq| {
-                let fallback = Expr::App(
-                    Box::new(WiredIn::Error.var()),
-                    Box::new(Expr::Lit(Literal::Str(b"non-exhaustive guards".to_vec()))),
-                );
-                let body = match eq.rhs {
-                    LocalRhs::Body(body) => body,
-                    LocalRhs::Guards(GuardChain::Plain(guards)) => Self::pg_plain_guards(guards, &fallback),
-                    LocalRhs::Guards(GuardChain::Raw(raws)) => self.guard_chain_expr(raws, fallback),
-                };
-                let body = Self::wrap_where(eq.where_binds, body);
-                LocalDef { name: eq.name, patterns: eq.patterns, body, sig: None }
+                let body = self.rhs_expr(eq.rhs, eq.where_binds);
+                LocalDef {
+                    operand_cons: eq.operand_cons,
+                    ..LocalDef::new(eq.name, eq.patterns, body)
+                }
             })
             .collect();
-        if let Some(tail) = tail {
+        if let Some(mut tail) = tail {
             let arity = tail[0].patterns.len();
+            // The collapsed equation stands for every equation of the
+            // tail, so it carries the head operands of all of them.
+            let operand_cons =
+                tail.iter_mut().flat_map(|eq| std::mem::take(&mut eq.operand_cons)).collect();
             let rows = tail
                 .into_iter()
                 .map(|eq| MatchRow {
                     patterns: eq.patterns,
                     rhs: match eq.rhs {
-                        LocalRhs::Body(b) => RowRhs::Body(b),
-                        LocalRhs::Guards(GuardChain::Plain(g)) => RowRhs::Plain(g),
-                        LocalRhs::Guards(GuardChain::Raw(r)) => RowRhs::Raw(r),
+                        Rhs::Body(b) => RowRhs::Body(b),
+                        Rhs::Guards(GuardChain::Plain(g)) => RowRhs::Plain(g),
+                        Rhs::Guards(GuardChain::Raw(r)) => RowRhs::Raw(r),
                     },
                     where_binds: eq.where_binds,
                 })
                 .collect();
             let (params, body) = self.collapse_match_rows(&name, arity, rows);
             defs.push(LocalDef {
-                name,
-                patterns: params.into_iter().map(Pattern::Var).collect(),
-                body,
-                sig: None,
+                operand_cons,
+                ..LocalDef::new(name, params.into_iter().map(Pattern::Var).collect(), body)
             });
         }
         defs
@@ -2574,69 +3077,40 @@ impl Parser {
     /// (`a = case __tup of (a, b) -> a`), so — as in Haskell — the
     /// pattern's variables are in scope for the right-hand side itself and
     /// for sibling bindings, and the match happens on first demand (never
-    /// eagerly, the way wrapping the body in a case would).
-    fn pattern_binding_defs(pat: Pattern, rhs: Expr, fresh: String) -> Vec<LocalDef> {
-        let mut defs = vec![LocalDef { name: fresh.clone(), patterns: vec![], body: rhs, sig: None }];
+    /// eagerly, the way wrapping the body in a case would). That is the
+    /// laziness Haskell 2010 §4.4.3.2 gives every pattern binding — the
+    /// pattern is matched irrefutably, `let Just k = Nothing in 5` is `5`
+    /// — whatever the pattern and wherever the binding stands (a `let` or
+    /// `where` group, or the top level: `top_pattern_binding`).
+    ///
+    /// A pattern that can fail to match (a constructor, a literal) gives
+    /// each selector a second alternative raising GHC's error for the
+    /// failed binding, "Non-exhaustive patterns in Just k" — `text` is the
+    /// pattern as written. A pattern of variables, wildcards and tuples
+    /// cannot fail and gets none.
+    fn pattern_binding_defs(pat: Pattern, rhs: Expr, fresh: String, text: &str) -> Vec<LocalDef> {
+        let refutable = !Self::pg_irrefutable(&pat);
+        let mut defs = vec![LocalDef::new(fresh.clone(), vec![], rhs)];
         for v in pat.var_names() {
-            defs.push(LocalDef {
-                name: v.clone(),
-                patterns: vec![],
-                body: Expr::Case {
-                    scrutinee: Box::new(Expr::Var(fresh.clone())),
-                    branches: vec![CaseBranch {
-                        pattern: pat.clone(),
-                        guards: vec![],
-                        body: Some(Expr::Var(v)),
-                    }],
-                },
-                sig: None,
-            });
+            let mut branches = vec![CaseBranch {
+                pattern: pat.clone(),
+                guards: vec![],
+                body: Some(Expr::Var(v.clone())),
+            }];
+            if refutable {
+                branches.push(CaseBranch {
+                    pattern: Pattern::Wildcard,
+                    guards: vec![],
+                    body: Some(Self::pg_error(&format!("Non-exhaustive patterns in {text}"))),
+                });
+            }
+            defs.push(LocalDef::new(
+                v,
+                vec![],
+                Expr::Case { scrutinee: Box::new(Expr::Var(fresh.clone())), branches },
+            ));
         }
         defs
-    }
-
-    /// The tail of a binding-group SIGNATURE line, once `parse_binding_head`
-    /// has read `first` and the next token is `::` (or `,` — GHC's
-    /// `a, b :: Int` names several bindings at once): `[, name]* :: type`.
-    /// The signatures are collected and attached to their bindings when the
-    /// group closes (`attach_local_sigs`), so a signature may precede or
-    /// follow its equations, as at the top level.
-    fn parse_local_sig_tail(
-        &mut self,
-        first: String,
-        patterns: &[Pattern],
-        loc: &Located,
-        sigs: &mut Vec<(String, Type, Span)>,
-    ) -> PResult<()> {
-        let span = Span::new(loc.line, loc.col);
-        if !patterns.is_empty() {
-            let mut diag = Diagnostic::parse_at(
-                format!(
-                    "a type signature names the binding alone: '{} :: type' on its own line, \
-                     with the equations ('{} {} = …') separate",
-                    first, first,
-                    patterns.iter().map(|_| "…").collect::<Vec<_>>().join(" "),
-                ),
-                span,
-            );
-            diag.notes.push(
-                "as in Haskell, a signature declares a NAME's type; the argument patterns \
-                 belong to the equations that define it"
-                    .to_string(),
-            );
-            return Err(Box::new(diag));
-        }
-        let mut names = vec![first];
-        while self.at(&Token::Comma) {
-            self.advance();
-            names.push(self.expect_ident()?);
-        }
-        self.expect(&Token::DblColon)?;
-        let ty = self.parse_type()?;
-        for name in names {
-            sigs.push((name, ty.clone(), span));
-        }
-        Ok(())
     }
 
     /// Attach a binding group's signature lines to their bindings: every
@@ -2673,6 +3147,56 @@ impl Parser {
         Ok(())
     }
 
+    /// Attach a binding group's fixity declarations to their bindings
+    /// (Haskell 2010 §4.4.2: a fixity declaration stands in the
+    /// declaration group that binds its operator and governs that
+    /// binding's uses, like a type signature). Every LocalDef of the named
+    /// binding gets the fixity; module resolution groups the infix chains
+    /// in the binding's scope by it. A declaration for a name the group
+    /// does not bind, or a second one for a name, is GHC's error.
+    fn attach_local_fixities(
+        binds: &mut [LocalDef],
+        fixities: Vec<(String, (Assoc, u8), Span)>,
+    ) -> PResult<()> {
+        for (i, (name, fixity, span)) in fixities.iter().enumerate() {
+            let shown = crate::fixity::op_display(name);
+            if let Some((_, _, first)) = fixities[..i].iter().find(|(n, _, _)| n == name) {
+                let mut diag = Diagnostic::parse_at(
+                    format!("Multiple fixity declarations for {shown}: at {first} and again"),
+                    *span,
+                );
+                diag.notes.push(
+                    "an operator has one precedence and associativity in the group that \
+                     binds it, so it takes one fixity declaration; remove one of the two."
+                        .to_string(),
+                );
+                return Err(Box::new(diag));
+            }
+            let mut found = false;
+            for ld in binds.iter_mut().filter(|ld| ld.name == *name) {
+                ld.fixity = Some(*fixity);
+                found = true;
+            }
+            if !found {
+                let mut diag = Diagnostic::parse_at(
+                    format!("The fixity signature for {shown} lacks an accompanying binding"),
+                    *span,
+                );
+                diag.notes.push(format!(
+                    "a fixity declaration inside a 'where' or 'let' block sets the \
+                     precedence of an operator defined in that same block, for the uses \
+                     in the block's scope. An operator bound elsewhere — at the top \
+                     level, in an enclosing block, or imported — keeps the fixity \
+                     declared where it is bound. Define {shown} in this block, or move \
+                     the declaration next to its definition (GHC rejects this \
+                     declaration the same way)."
+                ));
+                return Err(Box::new(diag));
+            }
+        }
+        Ok(())
+    }
+
     /// The optional `where` block of an equation — a top-level or
     /// class/instance clause, or a LOCAL equation inside a `let` or `where`
     /// group. The keyword belongs to the equation when it stands on the
@@ -2693,87 +3217,130 @@ impl Parser {
             return Ok(Vec::new());
         };
 
+        self.parse_local_decls(where_col, "__wtup_")
+    }
+
+    /// The declarations of a local binding group — a `where` block or the
+    /// bindings of a `let` (Haskell 2010 §4.4.3 `decls`), whose implicit
+    /// block starts at column `col` — up to the token that ends the block.
+    /// Each is read by the one declaration-head parser (`parse_decl_head`),
+    /// so a local group takes every form the top level takes: signatures
+    /// (`h :: T`, `(<+>) :: T`, `a, b :: T`), fixity declarations,
+    /// function bindings with prefix, infix or parenthesised heads, and
+    /// pattern bindings. Signatures and fixities are collected and
+    /// attached when the group closes (`close_local_group`), so they may
+    /// precede or follow the bindings they name; both are scoped to this
+    /// group, whose operator shadows an outer one of the same name with
+    /// its own type and fixity. `fresh_prefix` names the scrutinee
+    /// bindings of the group's pattern bindings.
+    fn parse_local_decls(&mut self, col: usize, fresh_prefix: &str) -> PResult<Vec<LocalDef>> {
         let mut fresh_counter = 0usize;
         let mut sigs: Vec<(String, Type, Span)> = Vec::new();
+        let mut fixities: Vec<(String, (Assoc, u8), Span)> = Vec::new();
         let mut entries: Vec<LocalEntry> = Vec::new();
-        self.in_layout(Layout::Block(where_col), |p| {
+        self.in_layout(Layout::Block(col), |p| {
             loop {
                 p.skip_separators();
+                // `in` at the bindings' own column closes a let group by
+                // the parse-error(t) rule (it is in `at_block_closer`), as
+                // do a comprehension's `,` and `]`.
                 if p.at_block_end() || p.at_block_closer() {
                     break;
                 }
-                // Tuple pattern binding `(a, b) = expr` (pattern_binding_defs).
-                // A where block used to break out of its loop on the '(' and
-                // the binding died far away as "Expected operator".
-                if matches!(p.peek(), Token::LeftParen) {
-                    let save = p.checkpoint();
-                    let span = p.span_of(p.cur());
-                    match p.parse_pattern_atom() {
-                        Ok(pat @ Pattern::Tuple(_)) if p.at(&Token::Eq) => {
-                            p.check_linear(save.pos, "a pattern binding")?;
-                            p.advance(); // consume '='
-                            let rhs = p.parse_stmt_expr()?;
-                            let fresh = format!("__wtup_{}", fresh_counter);
-                            fresh_counter += 1;
-                            let bound = pat.var_names().into_iter().map(|v| (v, span)).collect();
-                            let defs = Self::pattern_binding_defs(pat, rhs, fresh);
-                            entries.push(LocalEntry::Lowered { defs, bound });
-                            continue;
-                        }
-                        _ => {
-                            p.rewind(save);
-                            break;
-                        }
-                    }
+                // Explicit `;` between bindings (`let a = 1; b = 2 in …`) —
+                // the Haskell 2010 separator, accepted alongside layout.
+                if p.at(&Token::Semicolon) {
+                    p.advance();
+                    continue;
                 }
-                // A qualified name begins no binding either, but nothing
-                // outside the block could take it: say why here.
+                if matches!(p.peek(), Token::Infixl | Token::Infixr | Token::Infix) {
+                    let (assoc, prec, ops) = p.parse_fixity_ops()?;
+                    for (op, tok) in ops {
+                        fixities.push((op, (assoc, prec), p.span_of(tok)));
+                    }
+                    continue;
+                }
+                // A qualified name begins no binding, and nothing outside
+                // the block could take it either: say why here.
                 if let Token::QualIdent(name) = p.peek().clone() {
                     return Err(p.qualified_binder_error(&name));
                 }
-                // A token no binding begins with closes the block (the
-                // parse-error(t) rule); the enclosing construct reads it
-                // next and reports it if nothing there takes it either.
-                if !matches!(p.peek(), Token::Ident(_)) {
+                // A token no declaration begins with closes the block (the
+                // parse-error(t) rule) — a guard's `=` or `->` right after
+                // a `let` qualifier's last binding (`| let d = v - n = …`),
+                // an operator at the bindings' column. The enclosing
+                // construct reads it next and reports it if nothing there
+                // takes it either.
+                if !p.starts_binding() {
                     break;
                 }
-                let head_loc = p.peek_loc().clone();
-                let (name, patterns) = p.parse_binding_head()?;
-                // A signature line, `h :: Bool -> String` (C6): recorded now,
-                // attached to h's equations when the block closes.
-                if p.at(&Token::DblColon) || (patterns.is_empty() && p.at(&Token::Comma)) {
-                    p.parse_local_sig_tail(name, &patterns, &head_loc, &mut sigs)?;
-                    continue;
+                let head_tok = p.cur();
+                let span = p.span_of(head_tok);
+                match p.parse_decl_head()? {
+                    // A signature line: recorded now, attached to its
+                    // equations when the block closes.
+                    DeclHead::Signature(names) => {
+                        p.expect(&Token::DblColon)?;
+                        let ty = p.parse_type()?;
+                        for (name, _) in names {
+                            sigs.push((name, ty.clone(), span));
+                        }
+                    }
+                    DeclHead::Function(lhs) => {
+                        if p.at(&Token::DblColon) {
+                            return Err(Self::signature_with_arguments_error(&lhs, span));
+                        }
+                        p.check_linear(head_tok, &format!("an equation for '{}'", lhs.name))?;
+                        // The guard chain is kept raw for
+                        // `close_local_group`, which knows the next
+                        // equation to fall through to.
+                        let (rhs, where_binds) = p.parse_rhs(true)?;
+                        entries.push(LocalEntry::Equation(LocalEquation {
+                            name: lhs.name,
+                            patterns: lhs.patterns,
+                            rhs,
+                            where_binds,
+                            span,
+                            operand_cons: lhs.operand_cons,
+                        }));
+                    }
+                    DeclHead::Pattern(pattern) => {
+                        let text = p.source_text(head_tok, p.cur());
+                        p.expect_pattern_binding_rhs(head_tok)?;
+                        p.check_linear(head_tok, "a pattern binding")?;
+                        let (rhs, where_binds) = p.parse_rhs(true)?;
+                        let body = p.rhs_expr(rhs, where_binds);
+                        let fresh = format!("{fresh_prefix}{fresh_counter}");
+                        fresh_counter += 1;
+                        let bound = pattern.var_names().into_iter().map(|v| (v, span)).collect();
+                        let defs = Self::pattern_binding_defs(pattern, body, fresh, &text);
+                        entries.push(LocalEntry::Lowered { defs, bound });
+                    }
                 }
-                entries.push(LocalEntry::Equation(
-                    p.parse_local_equation_tail(name, patterns, &head_loc)?,
-                ));
             }
             Ok(())
         })?;
-        self.close_local_group(entries, sigs)
+        self.close_local_group(entries, sigs, fixities)
     }
 
-    /// The rest of a local equation after its head: `= body` or a guard
-    /// chain (`go acc i | i <= 0 = acc | otherwise = …`), then the
-    /// equation's own optional `where` block. Shared by where blocks and
-    /// let groups; the guard chain is kept raw for `close_local_group`,
-    /// which knows the next equation to fall through to.
-    fn parse_local_equation_tail(
-        &mut self,
-        name: String,
-        patterns: Vec<Pattern>,
-        head_loc: &Located,
-    ) -> PResult<LocalEquation> {
-        let span = Span::new(head_loc.line, head_loc.col);
-        let rhs = if self.at(&Token::Pipe) {
-            LocalRhs::Guards(self.parse_guard_chain(&Token::Eq)?)
-        } else {
-            self.expect(&Token::Eq)?;
-            LocalRhs::Body(self.parse_stmt_expr()?)
-        };
-        let where_binds = self.parse_where()?;
-        Ok(LocalEquation { name, patterns, rhs, where_binds, span })
+    /// `h y :: Int -> Int` in a binding group: a signature written with
+    /// the equation's argument patterns.
+    fn signature_with_arguments_error(lhs: &FunLhs, span: Span) -> Box<Diagnostic> {
+        let mut diag = Diagnostic::parse_at(
+            format!(
+                "a type signature names the binding alone: '{} :: type' on its own line, \
+                 with the equations ('{} {} = …') separate",
+                lhs.name, lhs.name,
+                lhs.patterns.iter().map(|_| "…").collect::<Vec<_>>().join(" "),
+            ),
+            span,
+        );
+        diag.notes.push(
+            "as in Haskell, a signature declares a NAME's type; the argument patterns \
+             belong to the equations that define it"
+                .to_string(),
+        );
+        Box::new(diag)
     }
 
     // --- Type parsing ---
@@ -3361,11 +3928,9 @@ impl Parser {
     /// Parse the binding group after `let` — the `let` keyword already
     /// consumed — up to but NOT consuming the following `in` (a let-expression)
     /// or `,`/`]` (a list-comprehension `let` qualifier). Bindings are
-    /// layout-separated exactly as in a let-expression: simple `x = e`,
-    /// function `f x = e` (one or more equations, guards allowed), and
-    /// tuple-pattern `(a, b) = e` binds, all in one mutually recursive
-    /// group that closes through `close_local_group` exactly like a where
-    /// block. Shared by the let-expression atom, the do-`let` statement,
+    /// layout-separated exactly as in a let-expression and are the
+    /// declarations a where block takes (`parse_local_decls`), all in one
+    /// mutually recursive group. Shared by the let-expression atom, the do-`let` statement,
     /// the guard qualifier and the comprehension qualifier so they bind
     /// identically.
     fn parse_let_binds(&mut self) -> PResult<Vec<LocalDef>> {
@@ -3378,67 +3943,7 @@ impl Parser {
         let Some(let_col) = self.open_block() else {
             return Ok(Vec::new());
         };
-        let mut fresh_counter = 0usize;
-        let mut sigs: Vec<(String, Type, Span)> = Vec::new();
-        let mut entries: Vec<LocalEntry> = Vec::new();
-
-        self.in_layout(Layout::Block(let_col), |p| {
-            loop {
-                p.skip_separators();
-                // `in` at the bindings' own column closes the group by the
-                // parse-error(t) rule (it is in `at_block_closer`), as do a
-                // comprehension's `,` and `]`.
-                if p.at_block_end() || p.at_block_closer() {
-                    break;
-                }
-                // Explicit `;` between bindings (`let a = 1; b = 2 in …`) — the
-                // Haskell 2010 separator, accepted alongside layout.
-                if p.at(&Token::Semicolon) {
-                    p.advance();
-                    continue;
-                }
-                // Tuple pattern binding `(a, b) = expr` (pattern_binding_defs).
-                if matches!(p.peek(), Token::LeftParen) {
-                    let binders_from = p.cur();
-                    let span = p.span_of(binders_from);
-                    let pat = p.parse_pattern_atom()?;
-                    if matches!(pat, Pattern::Tuple(_)) {
-                        p.check_linear(binders_from, "a pattern binding")?;
-                        p.expect(&Token::Eq)?;
-                        let rhs = p.parse_expr()?;
-                        let fresh = format!("__tup_{}", fresh_counter);
-                        fresh_counter += 1;
-                        let bound = pat.var_names().into_iter().map(|v| (v, span)).collect();
-                        let defs = Self::pattern_binding_defs(pat, rhs, fresh);
-                        entries.push(LocalEntry::Lowered { defs, bound });
-                        continue;
-                    }
-                    return Err(p.err_here("Expected tuple pattern or identifier in let binding".to_string()));
-                }
-                // A token no binding begins with closes the group by the
-                // parse-error(t) rule — a guard's `=` or `->` right after
-                // a `let` qualifier's last binding (`| let d = v - n = …`),
-                // or the `in` of a let-expression at the bindings' column.
-                if let Token::QualIdent(name) = p.peek().clone() {
-                    return Err(p.qualified_binder_error(&name));
-                }
-                if !matches!(p.peek(), Token::Ident(_)) {
-                    break;
-                }
-                let head_loc = p.peek_loc().clone();
-                let (name, patterns) = p.parse_binding_head()?;
-                // A signature line (C6), as in a where block.
-                if p.at(&Token::DblColon) || (patterns.is_empty() && p.at(&Token::Comma)) {
-                    p.parse_local_sig_tail(name, &patterns, &head_loc, &mut sigs)?;
-                    continue;
-                }
-                entries.push(LocalEntry::Equation(
-                    p.parse_local_equation_tail(name, patterns, &head_loc)?,
-                ));
-            }
-            Ok(())
-        })?;
-        self.close_local_group(entries, sigs)
+        self.parse_local_decls(let_col, "__tup_")
     }
 
     /// The body of a let-expression, the `in` already consumed: `let binds
@@ -4189,8 +4694,8 @@ impl Parser {
                     break;
                 }
 
-                // `let` statement: one binding group — simple, function and
-                // tuple-pattern bindings, all in one mutually recursive scope —
+                // `let` statement: one binding group — variable, function and
+                // pattern bindings, all in one mutually recursive scope —
                 // parsed by the same layout rules as a let-expression's group.
                 // Haskell 2010 §3.14 has two statements that start with `let`:
                 // `let decls` alone is the let STATEMENT, and `let decls in e`
@@ -4476,7 +4981,7 @@ impl Parser {
         self.pg_fresh += 1;
         let name = format!("{}{}", JOIN_POINT_PREFIX, self.pg_fresh);
         (
-            Some(LocalDef { name: name.clone(), patterns: vec![], body: fail, sig: None }),
+            Some(LocalDef::new(name.clone(), vec![], fail)),
             Expr::Var(name),
         )
     }
@@ -4541,7 +5046,7 @@ impl Parser {
         match pat {
             Pattern::Wildcard => inner,
             Pattern::Var(x) => Expr::Let {
-                binds: vec![LocalDef { name: x, patterns: vec![], body: Expr::Var(param.to_string()), sig: None }],
+                binds: vec![LocalDef::new(x, vec![], Expr::Var(param.to_string()))],
                 body: Box::new(inner),
             },
             p => {
@@ -4611,8 +5116,12 @@ impl Parser {
             }
         }
         let span = clauses[k].span;
-        let rows = clauses
-            .split_off(k)
+        let mut tail = clauses.split_off(k);
+        // The collapsed clause stands for every clause of the tail, so it
+        // carries the head operands of all of them.
+        let operand_cons =
+            tail.iter_mut().flat_map(|c| std::mem::take(&mut c.operand_cons)).collect();
+        let rows = tail
             .into_iter()
             .map(|c| MatchRow {
                 patterns: c.patterns,
@@ -4634,6 +5143,7 @@ impl Parser {
             where_binds: vec![],
             span,
             raw_guards: None,
+            operand_cons,
         });
         Ok(())
     }
@@ -4864,8 +5374,9 @@ impl Parser {
     }
 
     /// Can the next token begin a case alternative's pattern? A pattern
-    /// start, or the `-` of a whole-pattern negative literal (`-1 -> …`,
-    /// the one place Haskell 2010 admits one outside parentheses).
+    /// start, or the `-` of a negative literal that begins the pattern
+    /// (`-1 -> …`; Haskell 2010's `lpat → - (integer | float)`, which a
+    /// declaration's head may begin with as well: `starts_binding`).
     fn is_case_alt_start(&self) -> bool {
         self.is_pattern_start()
             || (matches!(self.peek(), Token::Operator(op) if op == "-")

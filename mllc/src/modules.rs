@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::fs;
 
 use crate::ast::*;
-use crate::fixity::{self, Fixities};
+use crate::fixity::{self, Fixities, Fixity};
 use crate::lexer;
 use crate::parser;
 use crate::types::Diagnostic;
@@ -1715,6 +1715,50 @@ fn hidden_by_forms(forms: &[ImportItems], ns: Ns, n: &str, parent: Option<&str>)
     })
 }
 
+/// The local binders in scope at a point of a module's source: the names
+/// that shadow the module scope there, and the fixity of each one that has
+/// a fixity declaration in the `where`/`let` group that binds it (Haskell
+/// 2010 §4.4.2 — a local operator without one is `infixl 9`). A binder
+/// entering the scope shadows whatever the name meant outside, its fixity
+/// included: inside `where infixl 6 <+>`, a nested group that binds its
+/// own `<+>` without a fixity declaration has an `infixl 9` operator.
+#[derive(Clone, Default)]
+struct Scope {
+    names: HashSet<String>,
+    fixities: HashMap<String, Fixity>,
+}
+
+impl Scope {
+    fn contains(&self, name: &str) -> bool {
+        self.names.contains(name)
+    }
+
+    /// Bring a binder without a fixity declaration into scope: a
+    /// parameter, a pattern variable, a `<-`-bound name.
+    fn insert(&mut self, name: String) {
+        self.fixities.remove(&name);
+        self.names.insert(name);
+    }
+
+    /// Bring the bindings of one `where`/`let` group into scope, each
+    /// with the fixity its group declares for it.
+    fn bind_group(&mut self, binds: &[LocalDef]) {
+        for ld in binds {
+            self.insert(ld.name.clone());
+        }
+        for ld in binds {
+            if let Some(fixity) = ld.fixity {
+                self.fixities.insert(ld.name.clone(), fixity);
+            }
+        }
+    }
+
+    /// The fixity of the local binder `name`.
+    fn fixity(&self, name: &str) -> Fixity {
+        self.fixities.get(name).copied().unwrap_or(fixity::DEFAULT_FIXITY)
+    }
+}
+
 /// Rewrites one module's own declarations from source spelling to
 /// canonical spelling: declared names become their canonical names, and
 /// every reference is bound in the module's scope — scope-aware, so a
@@ -1811,7 +1855,7 @@ fn operand_is_call_free(e: &Expr) -> bool {
 }
 
 impl Rename<'_> {
-    fn v(&self, name: &str, bound: &HashSet<String>) -> String {
+    fn v(&self, name: &str, bound: &Scope) -> String {
         // A reference the compiler wrote. It denotes its Prelude entity
         // by definition: neither the binders in scope nor the module's
         // tables (an own or imported declaration of the same spelling, an
@@ -1887,7 +1931,7 @@ impl Rename<'_> {
     /// through exactly one alias (GHC selects any field in scope, and a
     /// local binder is no field). A label that names no field in scope
     /// is an ordinary reference.
-    fn field_selection(&self, label: &str, bound: &HashSet<String>) -> String {
+    fn field_selection(&self, label: &str, bound: &Scope) -> String {
         let bare = self.vals.get(label).map_or(label, String::as_str);
         if self.fields.contains(bare) {
             return bare.to_string();
@@ -1993,9 +2037,15 @@ impl Rename<'_> {
         crate::lexer::unqualified(name).chars().next().is_some_and(|c| c.is_uppercase() || c == ':')
     }
 
+    /// Is `name` spelled with symbol characters (`<+>`) rather than as an
+    /// identifier (`plus`, used in backticks)?
+    fn is_symbolic(name: &str) -> bool {
+        !name.starts_with(|c: char| c.is_alphanumeric() || c == '_')
+    }
+
     /// An operator-position reference (`a `op` b`, `(op)`), bound in the
     /// namespace its spelling selects.
-    fn op_ref(&self, name: &str, bound: &HashSet<String>) -> String {
+    fn op_ref(&self, name: &str, bound: &Scope) -> String {
         if Self::is_con_spelling(name) { self.c(name) } else { self.v(name, bound) }
     }
 
@@ -2048,10 +2098,13 @@ impl Rename<'_> {
             Decl::TypeSig { name, ty } => Decl::TypeSig {
                 name: self.dv(name), ty: self.ty(ty),
             },
-            Decl::FunDef { name, clauses } => Decl::FunDef {
-                name: self.dv(name),
-                clauses: clauses.iter().map(|c| self.clause(c)).collect(),
-            },
+            Decl::FunDef { name, clauses } => {
+                let canon = self.dv(name);
+                Decl::FunDef {
+                    clauses: clauses.iter().map(|c| self.clause(c, name, &canon)).collect(),
+                    name: canon,
+                }
+            }
             Decl::ExportSig { name, ty } => Decl::ExportSig {
                 name: self.dv(name), ty: self.ty(ty),
             },
@@ -2109,9 +2162,12 @@ impl Rename<'_> {
                 Decl::InstanceDecl {
                     target_type: self.ty(target_type),
                     context: context.iter().map(|c| self.constraint(c)).collect(),
-                    methods: methods.iter().map(|m| InstanceMethod {
-                        name: self.method_of(&class_name, &m.name),
-                        clauses: m.clauses.iter().map(|c| self.clause(c)).collect(),
+                    methods: methods.iter().map(|m| {
+                        let canon = self.method_of(&class_name, &m.name);
+                        InstanceMethod {
+                            clauses: m.clauses.iter().map(|c| self.clause(c, &m.name, &canon)).collect(),
+                            name: canon,
+                        }
                     }).collect(),
                     class_name,
                 }
@@ -2120,12 +2176,15 @@ impl Rename<'_> {
                 name: self.dt(name),
                 type_var: type_var.clone(),
                 superclasses: superclasses.iter().map(|c| self.t(c)).collect(),
-                methods: methods.iter().map(|m| ClassMethod {
-                    name: self.dv(&m.name),
-                    ty: self.ty(&m.ty),
-                    default_clauses: m.default_clauses.as_ref().map(|cs| {
-                        cs.iter().map(|c| self.clause(c)).collect()
-                    }),
+                methods: methods.iter().map(|m| {
+                    let canon = self.dv(&m.name);
+                    ClassMethod {
+                        ty: self.ty(&m.ty),
+                        default_clauses: m.default_clauses.as_ref().map(|cs| {
+                            cs.iter().map(|c| self.clause(c, &m.name, &canon)).collect()
+                        }),
+                        name: canon,
+                    }
                 }).collect(),
             },
             Decl::Import { .. } | Decl::FixityDecl { .. } => decl.clone(),
@@ -2158,12 +2217,18 @@ impl Rename<'_> {
         }
     }
 
-    fn clause(&self, c: &Clause) -> Clause {
+    /// One equation of the function whose canonical name is `owner` and
+    /// whose source spelling is `written`.
+    fn clause(&self, c: &Clause, written: &str, owner: &str) -> Clause {
+        if !c.operand_cons.is_empty() {
+            let fixity = self.fixities.vals.get(owner).copied().unwrap_or(fixity::DEFAULT_FIXITY);
+            self.check_head_operands(written, fixity, &c.operand_cons);
+        }
         // Clause parameters and where-bound names shadow module-level names,
         // so references to them must not be renamed.
-        let mut bound = HashSet::new();
+        let mut bound = Scope::default();
         for p in &c.patterns { collect_pattern_vars(p, &mut bound); }
-        for ld in &c.where_binds { bound.insert(ld.name.clone()); }
+        bound.bind_group(&c.where_binds);
         Clause {
             patterns: c.patterns.iter().map(|p| self.pattern(p)).collect(),
             guards: c.guards.iter().map(|g| Guard {
@@ -2176,10 +2241,64 @@ impl Rename<'_> {
             // The parser lowers every raw (binding-qualifier) guard chain
             // before returning; nothing reaches module resolution with one.
             raw_guards: { debug_assert!(c.raw_guards.is_none(), "raw guards survived parsing"); None },
+            // Checked above; nothing later reads them.
+            operand_cons: Vec::new(),
         }
     }
 
-    fn localdef(&self, ld: &LocalDef, outer: &HashSet<String>) -> LocalDef {
+    /// GHC's check on the head of an infix definition (`checkPrecMatch`):
+    /// an operand that is an unparenthesised infix-constructor pattern
+    /// must group as an OPERAND of the operator being defined — the
+    /// constructor operator binds tighter, or as tightly and in the
+    /// operand's direction (both `infixr` for the right operand, both
+    /// `infixl` for the left). Otherwise the head, read as the one infix
+    /// expression it is written as, has the constructor at its root — `x
+    /// : xs +++ ys` under the default `infixl 9 +++` is `x : (xs +++ ys)`
+    /// — and defines nothing: GHC's "Precedence parsing error". `written`
+    /// names the operator being defined, `(assoc, prec)` is its fixity.
+    fn check_head_operands(&self, written: &str, (assoc, prec): Fixity, operands: &[HeadOperand]) {
+        let keyword = |a: Assoc| match a {
+            Assoc::Left => "infixl",
+            Assoc::Right => "infixr",
+            Assoc::None => "infix",
+        };
+        for operand in operands {
+            let (con_assoc, con_prec) = self.fixities.vals.get(&self.c(&operand.con)).copied()
+                .unwrap_or(fixity::DEFAULT_FIXITY);
+            let direction = if operand.right { Assoc::Right } else { Assoc::Left };
+            if con_prec > prec || (con_prec == prec && con_assoc == direction && assoc == direction) {
+                continue;
+            }
+            let con = format!("'{}' [{} {}]", operand.con, keyword(con_assoc), con_prec);
+            let op = format!("{} [{} {}]", fixity::op_display(written), keyword(assoc), prec);
+            let (first, second) = if operand.right { (op, con) } else { (con, op) };
+            let mut diag = Diagnostic::parse_at(
+                format!(
+                    "Precedence parsing error: cannot mix {first} and {second} in the same \
+                     infix expression"
+                ),
+                operand.span,
+            );
+            diag.notes.push(format!(
+                "the head of an infix definition is read as one infix expression, and it \
+                 defines {shown} only if {shown} stands at its root: every constructor \
+                 operator in an operand must bind tighter than {shown}. Here '{con_op}' \
+                 does not, so the {side} operand is not the pattern it is meant to be. \
+                 Put the operand in parentheses — '(x {con_op} xs)' — or declare a fixity \
+                 for {shown} below precedence {con_prec} (GHC rejects this head the same \
+                 way).",
+                shown = fixity::op_display(written),
+                con_op = operand.con,
+                side = if operand.right { "right" } else { "left" },
+            ));
+            self.errors.borrow_mut().push(diag);
+        }
+    }
+
+    fn localdef(&self, ld: &LocalDef, outer: &Scope) -> LocalDef {
+        if !ld.operand_cons.is_empty() {
+            self.check_head_operands(&ld.name, ld.fixity.unwrap_or(fixity::DEFAULT_FIXITY), &ld.operand_cons);
+        }
         let mut bound = outer.clone();
         for p in &ld.patterns { collect_pattern_vars(p, &mut bound); }
         LocalDef {
@@ -2189,10 +2308,15 @@ impl Rename<'_> {
             // A local signature names types exactly as a top-level one does
             // (qualified type names included), so it takes the same rewrite.
             sig: ld.sig.as_ref().map(|t| self.ty(t)),
+            // Both have done their work here: the fixity is in the scope
+            // the group's chains were grouped under (`Scope::bind_group`),
+            // the head operands are checked above.
+            fixity: None,
+            operand_cons: Vec::new(),
         }
     }
 
-    fn expr(&self, e: &Expr, bound: &HashSet<String>) -> Expr {
+    fn expr(&self, e: &Expr, bound: &Scope) -> Expr {
         match e {
             // The rename decisions: a name is rewritten only when it refers
             // to a module-level binding, not a local one.
@@ -2218,10 +2342,13 @@ impl Rename<'_> {
             Expr::RecordUpdate { expr, updates } => Expr::RecordUpdate {
                 expr: Box::new(self.expr(expr, bound)),
                 updates: updates.iter()
-                    .map(|(f, e)| (self.v(f, &HashSet::new()), self.expr(e, bound)))
+                    .map(|(f, e)| (self.v(f, &Scope::default()), self.expr(e, bound)))
                     .collect(),
             },
             // Backtick sections `(`f`)` carry a plain function name here.
+            // A local symbolic operator as a value, `(<+>)`, is a reference
+            // to the variable (see `fixity::Op::apply`).
+            Expr::OpFunc(n) if bound.contains(n) && Self::is_symbolic(n) => Expr::Var(self.local(n)),
             Expr::OpFunc(n) => Expr::OpFunc(self.op_ref(n, bound)),
             // An InfixApp's op is a NAME too — a sibling operator (`a <+> b`)
             // or a sibling function used backtick-infix (`a `combine` b`).
@@ -2270,7 +2397,7 @@ impl Rename<'_> {
             },
             Expr::Let { binds, body } => {
                 let mut b = bound.clone();
-                for ld in binds { b.insert(ld.name.clone()); }
+                b.bind_group(binds);
                 Expr::Let {
                     binds: binds.iter().map(|ld| self.localdef(ld, &b)).collect(),
                     body: Box::new(self.expr(body, &b)),
@@ -2286,20 +2413,23 @@ impl Rename<'_> {
         }
     }
 
-    /// Bind an operator occurrence to its entity and that entity's fixity.
-    /// A local binder has no fixity declaration (infixl 9). `Err` carries
-    /// the placeholder of an operator that denotes nothing in scope.
-    fn operator(&self, op: &ChainOp, bound: &HashSet<String>) -> Result<fixity::Op, String> {
+    /// Bind an operator occurrence to its entity and that entity's fixity:
+    /// a local binder's is what the group that binds it declares (infixl 9
+    /// without a declaration), a module-level entity's what its module
+    /// declares. `Err` carries the placeholder of an operator that denotes
+    /// nothing in scope.
+    fn operator(&self, op: &ChainOp, bound: &Scope) -> Result<fixity::Op, String> {
         let name = self.op_ref(&op.name, bound);
         if Placeholders::is_placeholder(&name) {
             return Err(name);
         }
         let (assoc, prec) = if bound.contains(&op.name) {
-            fixity::DEFAULT_FIXITY
+            bound.fixity(&op.name)
         } else {
             self.fixities.vals.get(&name).copied().unwrap_or(fixity::DEFAULT_FIXITY)
         };
-        Ok(fixity::Op { written: op.name.clone(), name, span: op.span, assoc, prec })
+        let local_symbol = bound.contains(&op.name) && Self::is_symbolic(&op.name);
+        Ok(fixity::Op { written: op.name.clone(), name, span: op.span, assoc, prec, local_symbol })
     }
 
     /// Group an infix chain. Returns the grouped expression and what
@@ -2309,7 +2439,7 @@ impl Rename<'_> {
     /// ambiguous) has no fixity to group by: it is replaced by that
     /// operator's placeholder reference, so the type checker reports the
     /// scope error and no grouping is ever picked for it.
-    fn chain(&self, chain: &OpChain, bound: &HashSet<String>) -> (Expr, Option<fixity::Top>) {
+    fn chain(&self, chain: &OpChain, bound: &Scope) -> (Expr, Option<fixity::Top>) {
         let mut ops = Vec::with_capacity(chain.rest.len());
         for (op, _) in &chain.rest {
             match self.operator(op, bound) {
@@ -2345,7 +2475,7 @@ impl Rename<'_> {
     /// binder lives in the compiler's reserved `__` namespace. Partial
     /// applications share their captured arguments the same way, in
     /// codegen (`CodeGen::captured_arg_ast`).
-    fn section(&self, op: &ChainOp, side: SectionSide, operand: &Expr, bound: &HashSet<String>) -> Expr {
+    fn section(&self, op: &ChainOp, side: SectionSide, operand: &Expr, bound: &Scope) -> Expr {
         let op = match self.operator(op, bound) {
             Ok(op) => op,
             Err(placeholder) => return Expr::Var(placeholder),
@@ -2382,11 +2512,11 @@ impl Rename<'_> {
         };
         let lambda = Expr::Lambda {
             params: vec!["__sec".into()],
-            body: Box::new(Expr::InfixApp { op: op.name, lhs, rhs }),
+            body: Box::new(op.apply(*lhs, *rhs)),
         };
         match shared {
             Some(name) => Expr::Let {
-                binds: vec![LocalDef { name, patterns: Vec::new(), body: operand, sig: None }],
+                binds: vec![LocalDef::new(name, Vec::new(), operand)],
                 body: Box::new(lambda),
             },
             None => lambda,
@@ -2400,7 +2530,7 @@ impl Rename<'_> {
         Expr::Lit(Literal::Unit)
     }
 
-    fn dostmt(&self, s: &DoStmt, bound: &mut HashSet<String>) -> DoStmt {
+    fn dostmt(&self, s: &DoStmt, bound: &mut Scope) -> DoStmt {
         match s {
             DoStmt::Bind { name, expr } => {
                 let e = self.expr(expr, bound);
@@ -2411,7 +2541,7 @@ impl Rename<'_> {
             DoStmt::DoLet { binds } => {
                 // Recursive group: every name is in scope for every body and for
                 // the rest of the do-block, so bind them all before rewriting.
-                for ld in binds { bound.insert(ld.name.clone()); }
+                bound.bind_group(binds);
                 let binds = binds.iter().map(|ld| self.localdef(ld, bound)).collect();
                 DoStmt::DoLet { binds }
             }
@@ -2443,7 +2573,9 @@ impl Rename<'_> {
                     }
                     let (assoc, prec) = self.fixities.tys.get(&name).copied()
                         .unwrap_or(fixity::DEFAULT_FIXITY);
-                    let op = fixity::Op { written: op.name.clone(), name, span: op.span, assoc, prec };
+                    let op = fixity::Op {
+                        written: op.name.clone(), name, span: op.span, assoc, prec, local_symbol: false,
+                    };
                     ops.push((op, self.ty(operand)));
                 }
                 fixity::group_types(self.ty(first), ops)
@@ -2487,8 +2619,8 @@ impl Rename<'_> {
 }
 
 /// Collect the variable names bound by a pattern (for scope tracking).
-fn collect_pattern_vars(p: &Pattern, out: &mut HashSet<String>) {
-    p.for_each_var(&mut |v| { out.insert(v.to_string()); });
+fn collect_pattern_vars(p: &Pattern, out: &mut Scope) {
+    p.for_each_var(&mut |v| out.insert(v.to_string()));
 }
 
 /// A structural fingerprint of a type as written, with variable names

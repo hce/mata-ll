@@ -483,7 +483,29 @@ the operator, an imported operator keeps the fixity its defining module
 declared, and an operator of another module that is not in scope (private,
 hidden, or imported only \texttt{qualified}) has no influence on an
 operator of the same spelling. A local name used in backticks is
-\texttt{infixl 9}.
+\texttt{infixl 9}, unless the \texttt{where} or \texttt{let} group that
+binds it declares a fixity for it (see Where Clauses).
+
+An operator, or a function written in backticks, may be defined between
+its two operands, and the operands are patterns:
+
+\begin{lstlisting}
+data V = V Int Int deriving Show
+
+infixl 6 |+|
+(|+|) :: V -> V -> V
+V a b |+| V c d = V (a + c) (b + d)
+
+orElse :: Maybe Int -> Int -> Int
+Just x `orElse` _ = x
+Nothing `orElse` d = d
+
+instance Eq V where
+    V a b == V c d = a == c && b == d
+\end{lstlisting}
+
+A cons pattern as an operand needs parentheses unless the operator binds
+looser than \texttt{:} (\texttt{infixr 5}): \texttt{(x : xs) +++ ys = ...}.
 
 Operators declared \texttt{infix} are non-associative, so \texttt{a == b == c}
 is a parse error --- parenthesize one side, or chain comparisons with
@@ -542,6 +564,27 @@ bmi weight height
     | otherwise = "overweight"
     where b = weight / (height * height)
 \end{lstlisting}
+
+A \texttt{where} or \texttt{let} group takes the declarations the top level
+takes: functions, operators with their own type signature and fixity, and
+pattern bindings. An operator defined in a group belongs to that group and
+shadows an outer operator of the same name:
+
+\begin{lstlisting}
+norm :: Int -> Int -> Int
+norm a b = a <+> b + lo * hi
+    where
+        infixl 6 <+>
+        (<+>) :: Int -> Int -> Int
+        x <+> y = x * 10 + y
+        (lo, hi) = (min a b, max a b)
+\end{lstlisting}
+
+A pattern binding (\texttt{(lo, hi) = ...}, \texttt{Just k = ...},
+\texttt{x : xs = ...}) is lazy: the pattern is matched when one of its
+variables is first used, and not at all if none is. At the top level each
+variable of a pattern binding needs its type signature
+(\texttt{lo, hi :: Int}).
 
 \subsection{Let/In Expressions}
 

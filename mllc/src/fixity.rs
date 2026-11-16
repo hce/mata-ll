@@ -78,6 +78,34 @@ pub struct Op {
     pub span: Span,
     pub assoc: Assoc,
     pub prec: u8,
+    /// The occurrence denotes a LOCAL binder with a symbolic name — the
+    /// `<+>` of a `where` or `let` group. Its application is written as
+    /// the plain application it is (`Op::apply`).
+    pub local_symbol: bool,
+}
+
+impl Op {
+    /// The application `lhs op rhs` in the grouped tree. An operator of
+    /// the module scope is an `InfixApp` under its canonical name, and so
+    /// is a local function used in backticks, whose name is an ordinary
+    /// identifier. A local SYMBOLIC operator is the application `(op) lhs
+    /// rhs` of the variable instead: every stage downstream reads an
+    /// `InfixApp` with a symbolic name as an operator of the module scope
+    /// or the Prelude — its spelling selects native arithmetic, strictness
+    /// rows, the top-level definition of that name — while a variable
+    /// reference is resolved by scope everywhere, so the local operator
+    /// shadows a top-level one of the same name in every stage by
+    /// construction.
+    pub fn apply(&self, lhs: Expr, rhs: Expr) -> Expr {
+        if self.local_symbol {
+            Expr::App(
+                Box::new(Expr::App(Box::new(Expr::Var(self.name.clone())), Box::new(lhs))),
+                Box::new(rhs),
+            )
+        } else {
+            Expr::InfixApp { op: self.name.clone(), lhs: Box::new(lhs), rhs: Box::new(rhs) }
+        }
+    }
 }
 
 /// What a grouped chain is at its root: the operator applied last, or a
@@ -117,7 +145,8 @@ fn binding(assoc: Assoc, prec: u8) -> (u8, u8) {
 /// Group the chain `first (op operand)*` under the operators' fixities.
 /// `rest` pairs each operator with the operand to its right. Returns the
 /// grouped expression — `InfixApp` nodes named by the operators' canonical
-/// names, `Negate` for prefix minus — and what stands at its root, or the
+/// names (plain applications for local symbolic operators, `Op::apply`),
+/// `Negate` for prefix minus — and what stands at its root, or the
 /// error for a chain the fixities define no grouping for.
 pub fn group(first: Operand, rest: Vec<(Op, Operand)>) -> Result<(Expr, Top), Box<Diagnostic>> {
     let mut ops = Vec::with_capacity(rest.len());
@@ -248,11 +277,7 @@ impl Grouper {
             self.next_op += 1;
             let (_, rp) = binding(assoc, prec);
             let rhs = self.infix(rp, i)?;
-            lhs = Expr::InfixApp {
-                op: self.ops[i].name.clone(),
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
+            lhs = self.ops[i].apply(lhs, rhs);
             lhs_is_negation = false;
             last = Some(i);
         }

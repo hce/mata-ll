@@ -568,6 +568,14 @@ mll_test!(prefix_minus_not_atom, "prefix_minus_not_atom.mll");
 // F11: every multi-line construct shape continues across lines indented
 // past the enclosing block's column — one layout rule in the token stream.
 mll_test!(layout_continuation_lines, "layout_continuation_lines.mll");
+// A declaration is `(funlhs | pat) rhs` in every declaration group: infix
+// heads over full patterns and parenthesised heads at the top level and in
+// class and instance bodies, pattern bindings at the top level and in
+// let/where groups (lazy), and where/let groups with their own operators,
+// signatures and fixities (F12h, F12i).
+mll_test!(declaration_heads, "declaration_heads.mll");
+mll_test!(pattern_bindings, "pattern_bindings.mll");
+mll_test!(local_operator_scope, "local_operator_scope.mll");
 mll_test!(let_recursive_groups, "let_recursive_groups.mll");
 mll_test!(let_pattern_recursive, "let_pattern_recursive.mll");
 mll_test!(exceptions, "exceptions.mll");

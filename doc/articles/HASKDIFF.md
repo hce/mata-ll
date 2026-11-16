@@ -268,6 +268,15 @@ mata-ll's `export` replaces it. A plain `double :: Int -> Int` next to
 the `export` line is a compile error ("Duplicate type signatures"),
 even when both state the same type.
 
+The variables of a top-level pattern binding are top-level bindings and
+need their signatures too — `lo, hi :: Int` for `(lo, hi) = (1, 9)`;
+GHC infers them. Pattern bindings in `let` and `where` groups need
+none.
+
+An instance body takes no type signatures (GHC accepts them under
+`InstanceSigs`, which its default language enables): a method's type is
+declared in its class.
+
 ## The monomorphism restriction also covers let-bound functions
 
 GHC's monomorphism restriction exempts bindings with argument patterns:
@@ -414,8 +423,10 @@ that differ in any character (`<.>`, `<->`), stay apart.
 ## Fixity belongs to the operator, as in GHC; where it can be declared is narrower
 
 An operator occurrence groups by the fixity of what it denotes in the
-module that wrote it: a local binder used in backticks is `infixl 9`,
-a module's own operator has its own declaration (or `infixl 9`), an
+module that wrote it: a local binder — a parameter used in backticks, an
+operator a `where` or `let` group defines — has the fixity its own
+group declares for it (`infixl 9` without a declaration), a module's
+own operator has its own declaration (or `infixl 9`), an
 imported operator has the fixity its defining module declared, and an
 operator another module keeps private, or that an import leaves out,
 has no influence on an operator of the same spelling. A fixity
@@ -423,10 +434,11 @@ declaration for an operator the module does not define is rejected.
 All of this is GHC's behaviour. What differs is where a declaration
 may stand and what can carry one:
 
-- A fixity declaration is a top-level declaration. One for a class
-  method goes next to the class, not inside its body; `let` and `where`
-  groups take no fixity declarations (and cannot define symbolic
-  operators), so a locally bound operator is always `infixl 9`.
+- A fixity declaration stands where GHC lets it stand — at the top
+  level, in a class body for the class's methods, in a `where` or `let`
+  group for the group's own bindings — with one exception: it names
+  variables only. Constructor operators other than `:` do not exist, so
+  there is none to declare a fixity for.
 - A chain of infix type operators is grouped without the conflict
   check value operators get: an `infix` type operator nests rightward
   where GHC rejects the chain.
@@ -585,6 +597,14 @@ any other error.
 There is no exception type hierarchy. `error` throws a string,
 `try` catches it as `Either String a`. There are no custom exception
 types, `SomeException`, `IOException`, or `catches`.
+
+A failed match raises GHC's text without GHC's source location: a
+pattern binding whose pattern does not match raises `Non-exhaustive
+patterns in Just k` where GHC writes `FILE:5:7-35: Non-exhaustive
+patterns in Just k`, as a function without a matching equation raises
+`Non-exhaustive patterns in f`. (The do-bind failure below does carry
+its location: its text is the argument of `fail`, which a program can
+observe without an exception.)
 
 ## Do-bind failure is MonadFail; the exception is a string
 
@@ -749,8 +769,9 @@ Two small syntactic gaps against Haskell 2010's grammar:
 
 - Explicit brace-and-semicolon layout is supported for `case … of
   { p1 -> e1; p2 -> e2 }` but not for `do { a; b }` or `where { … }`;
-  those use the indentation rule only. A `;` outside a braced case is
-  simply not consumed.
+  those use the indentation rule only. A `;` separates the bindings of
+  a `let` or `where` group written on one line (`let a = 1; b = 2 in
+  …`); elsewhere outside a braced case it is not consumed.
 
 Both are loud (a parse error at the exact token), not silent deviations.
 

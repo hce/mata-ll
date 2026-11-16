@@ -177,6 +177,8 @@ impl Desugar<'_> {
                         patterns: b.patterns,
                         body: self.expr(b.body),
                         sig: b.sig,
+                        fixity: b.fixity,
+                        operand_cons: b.operand_cons,
                     }).collect();
                     Expr::Let { binds, body: Box::new(result) }
                 }

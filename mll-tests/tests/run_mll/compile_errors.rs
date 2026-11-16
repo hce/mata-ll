@@ -8439,3 +8439,201 @@ fn dotted_import_alias_is_refused_at_the_import() {
         &["A qualified import's alias is a single name, found 'Qual.Ops'", "write `as M`"],
     );
 }
+
+// A declaration is `(funlhs | pat) rhs` (Haskell 2010 §4.4.3), read by one
+// head parser in every declaration group. The accept side is
+// declaration_heads.mll, pattern_bindings.mll and local_operator_scope.mll
+// (GHC-goldened); these pin the heads and group declarations that stay
+// rejected, in GHC's words (F12h, F12i).
+
+/// A fixity declaration and a type signature belong to the group that
+/// binds the name (GHC: "The fixity signature for ‘<+>’ lacks an
+/// accompanying binding", "The type signature for ‘<+>’ lacks an
+/// accompanying binding") — also when an operator of that name is bound
+/// outside the group — and a name takes one fixity declaration per group
+/// (GHC: "Multiple fixity declarations").
+#[test]
+fn local_fixity_and_signature_need_a_binding_in_their_group() {
+    let e = expect_compile_error(
+        "f :: Int -> Int\nf n = n + 1\n  where\n    infixl 6 <+>\n    x = 1\nmain :: IO ()\nmain = print (f 2)\n",
+        &[],
+        &["The fixity signature for '<+>' lacks an accompanying binding", "at 4:14", "note:"],
+    );
+    assert!(e.starts_with("Parse error:"), "a syntax error of the group, got: {e}");
+    expect_compile_error(
+        "f :: Int -> Int\nf n = n + 1\n  where\n    (<+>) :: Int -> Int -> Int\n    x = 1\nmain :: IO ()\nmain = print (f 2)\n",
+        &[],
+        &["The type signature for '<+>' lacks an accompanying binding", "at 4:5"],
+    );
+    // The top level's `<+>` is another entity: the where group's fixity
+    // declaration does not reach it.
+    expect_compile_error(
+        "(<+>) :: Int -> Int -> Int\na <+> b = a - b\nf :: Int -> Int\nf n = n <+> 1\n  where\n    infixl 6 <+>\nmain :: IO ()\nmain = print (f 1)\n",
+        &[],
+        &["The fixity signature for '<+>' lacks an accompanying binding", "at 6:14"],
+    );
+    expect_compile_error(
+        "main :: IO ()\nmain = do\n  let infixl 6 `g`\n      h = 1 :: Int\n  print h\n",
+        &[],
+        &["The fixity signature for `g` lacks an accompanying binding", "at 3:17"],
+    );
+    expect_compile_error(
+        "f :: Int -> Int\nf n = n <+> 1\n  where\n    infixl 6 <+>\n    infixr 6 <+>\n    a <+> b = a - b\nmain :: IO ()\nmain = print (f 1)\n",
+        &[],
+        &["Multiple fixity declarations for '<+>': at 4:14 and again", "at 5:14"],
+    );
+}
+
+/// The operands of an infix head are patterns, and the head is read as
+/// one infix expression: a cons pattern without parentheses is an operand
+/// only where `:` binds tighter than the operator being defined (GHC's
+/// `checkPrecMatch`, "Precedence parsing error … cannot mix ‘:’ [infixr
+/// 5] and ‘+++’ [infixl 9] in the same infix expression"). Under `infixl
+/// 4 +++` the same head is accepted (declaration_heads.mll).
+#[test]
+fn cons_operand_of_an_infix_head_must_bind_tighter_than_the_operator() {
+    with_compiler_stack(|| {
+        // The default fixity, infixl 9.
+        expect_compile_error(
+            "(+++) :: [Int] -> [Int] -> [Int]\nx : xs +++ ys = x : (xs ++ ys)\n[] +++ ys = ys\nmain :: IO ()\nmain = print ([1] +++ [2])\n",
+            &[],
+            &[
+                "Precedence parsing error: cannot mix ':' [infixr 5] and '+++' [infixl 9] in the same infix expression",
+                "at 2:3",
+                "note:",
+                "'(x : xs)'",
+            ],
+        );
+        // The same precedence groups a LEFT operand only between two
+        // infixl operators, and `:` is infixr.
+        expect_compile_error(
+            "infixr 5 +++\n(+++) :: [Int] -> [Int] -> [Int]\nx : xs +++ ys = x : (xs ++ ys)\n[] +++ ys = ys\nmain :: IO ()\nmain = print ([1] +++ [2])\n",
+            &[],
+            &["cannot mix ':' [infixr 5] and '+++' [infixr 5]", "at 3:3"],
+        );
+        // A RIGHT operand at the same precedence needs both infixr; the
+        // message names the operators in source order.
+        expect_compile_error(
+            "infixl 5 ***\n(***) :: Int -> [Int] -> [Int]\nk *** x : xs = [k]\n_ *** [] = []\nmain :: IO ()\nmain = print (1 *** [2])\n",
+            &[],
+            &["cannot mix '***' [infixl 5] and ':' [infixr 5]", "at 3:9"],
+        );
+        // A where group's operator is checked against the group's fixity.
+        expect_compile_error(
+            "main :: IO ()\nmain = print ([1] +++ [2 :: Int])\n  where\n    x : xs +++ ys = x : (xs ++ ys)\n    [] +++ ys = ys\n",
+            &[],
+            &["cannot mix ':' [infixr 5] and '+++' [infixl 9]", "at 4:7"],
+        );
+        // An instance method is checked against the fixity its class
+        // declares for the method — here none, so infixl 9. (With `infixl
+        // 4 +>` in the class the head is accepted: declaration_heads.mll.)
+        expect_compile_error(
+            "class Sz a where\n  (+>) :: [Int] -> a -> Int\ndata U = U\ninstance Sz U where\n  x : _ +> U = x\n  [] +> U = 0\nmain :: IO ()\nmain = print ([1] +> U)\n",
+            &[],
+            &["cannot mix ':' [infixr 5] and '+>' [infixl 9]", "at 5:5"],
+        );
+    })
+}
+
+/// What a function head cannot be: an equation for a constructor operator
+/// (GHC reads `(:) a b = e` as a pattern binding and fails its types), a
+/// head with two operators (GHC: "Parse error in pattern: a +++ b"), and
+/// a parenthesised head without a further argument (GHC: "Parse error in
+/// pattern: x `op` y").
+#[test]
+fn heads_that_define_nothing_are_rejected() {
+    expect_compile_error(
+        "(:) a b = 1\nmain :: IO ()\nmain = print 1\n",
+        &[],
+        &["':' cannot be defined by an equation", "data constructor", "at 1:2"],
+    );
+    expect_compile_error(
+        "(+++) :: Int -> Int -> Int\na +++ b +++ c = a\nmain :: IO ()\nmain = print 1\n",
+        &[],
+        &["Parse error in pattern: a +++ b", "at 2:1", "note:", "ONE operator is being defined"],
+    );
+    expect_compile_error(
+        "op :: Int -> Int -> Int\n(x `op` y) = x\nmain :: IO ()\nmain = print 1\n",
+        &[],
+        &["Parse error in pattern: x `op` y", "at 2:1", "takes at least one more argument"],
+    );
+    expect_compile_error(
+        "f :: Int -> Int\n(f x) = x\nmain :: IO ()\nmain = print 1\n",
+        &[],
+        &["Parse error in pattern: f x", "at 2:1"],
+    );
+    // A line that begins with a pattern and has no right-hand side.
+    expect_compile_error(
+        "Foo bar\nmain :: IO ()\nmain = print 1\n",
+        &[],
+        &["parse error on input 'Foo'", "begins with the pattern 'Foo bar'", "at 1:1", "note:"],
+    );
+}
+
+/// A class or instance body takes function bindings only (Haskell 2010
+/// §4.3.1, §4.3.2; GHC: "Pattern bindings (except simple variables) not
+/// allowed in instance declaration"), and an instance body no signatures.
+#[test]
+fn class_and_instance_bodies_take_no_pattern_bindings() {
+    expect_compile_error(
+        "data V = V Int\ninstance Eq V where\n  V a == V b = a == b\n  Just x = Just 1\nmain :: IO ()\nmain = print 1\n",
+        &[],
+        &["Pattern bindings (except simple variables) not allowed in instance declaration: Just x", "at 4:3", "note:"],
+    );
+    expect_compile_error(
+        "class C a where\n  m :: a -> a\n  (x, y) = (1, 2)\nmain :: IO ()\nmain = print 1\n",
+        &[],
+        &["Pattern bindings (except simple variables) not allowed in class declaration: (x, y)", "at 3:3"],
+    );
+    expect_compile_error(
+        "data V = V Int\ninstance Eq V where\n  (==) :: V -> V -> Bool\n  V a == V b = a == b\nmain :: IO ()\nmain = print 1\n",
+        &[],
+        &["Illegal type signature in instance declaration: '(==) :: …'", "at 3:3", "InstanceSigs"],
+    );
+}
+
+/// The variables of a top-level pattern binding are top-level bindings:
+/// each needs its type signature (HASKDIFF, "All top-level bindings
+/// require type signatures"), a class context on one is GHC's
+/// "Overloaded signature conflicts with monomorphism restriction", a
+/// pattern names each variable once, and a variable the pattern binds is
+/// defined — a second definition of the name is a duplicate.
+#[test]
+fn top_level_pattern_binding_rules() {
+    expect_compile_error(
+        "lo :: Int\n(lo, hi) = (1, 2)\nmain :: IO ()\nmain = print lo\n",
+        &[],
+        &["Missing type signature for 'hi'", "at 2:1", "the pattern binding '(lo, hi) = …' defines 'hi'"],
+    );
+    expect_compile_error(
+        "lo, hi :: Num a => a\n(lo, hi) = (1, 2)\nmain :: IO ()\nmain = print (lo + hi :: Int)\n",
+        &[],
+        &["Overloaded signature conflicts with monomorphism restriction", "the signature of 'lo' has a class context", "at 2:1"],
+    );
+    expect_compile_error(
+        "a :: Int\n(a, a) = (1, 2)\nmain :: IO ()\nmain = print a\n",
+        &[],
+        &["Conflicting definitions for 'a' in a pattern binding"],
+    );
+    expect_compile_error(
+        "main :: IO ()\nmain = do\n  let Just a : a : _ = [Just (1 :: Int)]\n  print a\n",
+        &[],
+        &["Conflicting definitions for 'a' in a pattern binding", "at 3:16"],
+    );
+    expect_compile_error(
+        "f :: Int -> Int\nf x = 1\ng :: Int\n(f, g) = (id, 2)\nmain :: IO ()\nmain = print g\n",
+        &[],
+        &["Multiple declarations of 'f'", "at 4:1"],
+    );
+    expect_compile_error(
+        "x :: Int\nJust x = Just 1\nx = 2\nmain :: IO ()\nmain = print x\n",
+        &[],
+        &["Multiple declarations of 'x'", "at 3:1"],
+    );
+    // In a local group the same clash is the group's.
+    expect_compile_error(
+        "main :: IO ()\nmain = print k\n  where\n    Just k = Just (1 :: Int)\n    k = 2\n",
+        &[],
+        &["Conflicting definitions for 'k'"],
+    );
+}

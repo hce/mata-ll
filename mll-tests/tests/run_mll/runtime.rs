@@ -1053,3 +1053,50 @@ main = do
     lua.load(&lua_code).set_name("partial_match_under_error_binder").exec()
         .expect("each failure should raise the Prelude's error with the fall-through's message");
 }
+
+// A pattern binding is lazy (Haskell 2010 §4.4.3.2): nothing matches until
+// a variable of the pattern is demanded, and the failed match is then the
+// runtime error GHC raises for it, "Non-exhaustive patterns in <pattern>"
+// (GHC prefixes the source span). The accept side — and the proof that an
+// undemanded failing binding costs nothing — is pattern_bindings.mll; this
+// pins the failure, for a `let`, a `where` and a top-level binding (F12h).
+#[test]
+fn pattern_binding_failure_is_raised_where_a_variable_is_demanded() {
+    let cases = [
+        (
+            "main :: IO ()\nmain = do\n  let Just j = Nothing :: Maybe Int\n  putStrLn \"before\"\n  print j\n",
+            "Non-exhaustive patterns in Just j",
+        ),
+        (
+            "f :: [Int] -> Int\nf xs = if null xs then second else 0\n  where\n    _ : second : _ = xs\n\nmain :: IO ()\nmain = do\n  print (f [1])\n  putStrLn \"before\"\n  print (f [])\n",
+            "Non-exhaustive patterns in _ : second : _",
+        ),
+        (
+            "lo, hi :: Int\n(lo, [hi]) = (1, [])\n\nmain :: IO ()\nmain = do\n  putStrLn \"before\"\n  print lo\n",
+            "Non-exhaustive patterns in (lo, [hi])",
+        ),
+    ];
+    for (source, message) in cases {
+        let lua_code = compile(source, Path::new("."), &[])
+            .unwrap_or_else(|e| panic!("should compile:\n{source}\n{e}"))
+            .lua_code;
+        let lua = mlua::Lua::new();
+        let printed = lua.create_table().unwrap();
+        let sink = printed.clone();
+        let print_fn = lua
+            .create_function(move |_, line: String| sink.raw_set(sink.raw_len() + 1, line))
+            .unwrap();
+        lua.globals().set("print", print_fn).unwrap();
+        match lua.load(&lua_code).set_name("pattern_binding_failure").exec() {
+            Err(e) => {
+                let msg = format!("{e}");
+                assert!(msg.contains(message), "expected '{message}', got: {msg}");
+            }
+            Ok(()) => panic!("expected a runtime error from:\n{source}"),
+        }
+        // The statements before the demand ran: the binding itself did
+        // not fail where it stands.
+        let lines: Vec<String> = printed.sequence_values::<String>().collect::<mlua::Result<_>>().unwrap();
+        assert_eq!(lines.last().map(String::as_str), Some("before"), "in:\n{source}");
+    }
+}

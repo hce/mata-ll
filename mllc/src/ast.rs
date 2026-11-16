@@ -459,6 +459,35 @@ pub struct Clause {
     /// stage may (and does) ignore it. An all-boolean chain never lands
     /// here; it folds to `guards` exactly as before.
     pub raw_guards: Option<Vec<RawGuard>>,
+    /// The infix-constructor operands of this equation's infix head that
+    /// module resolution still has to check against the fixity of the
+    /// operator being defined (see [`HeadOperand`]). Empty for every
+    /// equation whose head is prefix, or infix over operands that are
+    /// atoms, applications or parenthesised.
+    pub operand_cons: Vec<HeadOperand>,
+}
+
+/// An operand of an infix definition head that is itself an
+/// UNPARENTHESISED infix-constructor pattern: the `x : xs` of
+/// `x : xs +++ ys = …`. Haskell 2010 §4.4.3 writes the head `pat varop
+/// pat`, and which of the head's operators is the `varop` at its root is
+/// a question of fixity: GHC reads the head as one infix expression and
+/// accepts the definition only where the constructor operator binds
+/// tighter than the operator being defined (`checkPrecMatch`) — under
+/// `infixl 4 +++` the head above is `(x : xs) +++ ys`, under the default
+/// `infixl 9` it is the "Precedence parsing error" `x : (xs +++ ys)`. The
+/// parser reads the operands as patterns and records each such operand
+/// here; module resolution, where the defined operator's fixity is known
+/// (it may be declared after the definition, or belong to a class of
+/// another module), runs the check (`Rename::check_head_operands`).
+#[derive(Debug, Clone)]
+pub struct HeadOperand {
+    /// The constructor operator at the operand's root, as written.
+    pub con: String,
+    /// Where that operator stands.
+    pub span: Span,
+    /// Is this the RIGHT operand of the head (else the left)?
+    pub right: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -505,6 +534,16 @@ pub struct LocalDef {
     /// signature is read as GHC reads it without ScopedTypeVariables:
     /// `where h :: a -> a` under `f :: a -> String` names a NEW `a`).
     pub sig: Option<Type>,
+    /// The binding's declared fixity, when its `where`/`let` group carries
+    /// a fixity declaration for it (`infixl 6 <+>`; Haskell 2010 §4.4.2: a
+    /// fixity declaration belongs to the declaration group that binds the
+    /// operator, and governs its uses in that group's scope). Read by
+    /// module resolution, which groups every infix chain in the binding's
+    /// scope by it (`modules::Scope`); nothing later looks at it. A
+    /// multi-equation local function has it on every one of its LocalDefs.
+    pub fixity: Option<(Assoc, u8)>,
+    /// As `Clause::operand_cons`, for a local equation with an infix head.
+    pub operand_cons: Vec<HeadOperand>,
 }
 
 /// The name prefix of a pattern-guard JOIN POINT: the lazily `let`-bound
@@ -519,6 +558,12 @@ pub struct LocalDef {
 pub const JOIN_POINT_PREFIX: &str = "__pgj_";
 
 impl LocalDef {
+    /// A binding as an equation alone gives it: no signature, no fixity
+    /// declaration, nothing left to check about its head.
+    pub fn new(name: String, patterns: Vec<Pattern>, body: Expr) -> Self {
+        LocalDef { name, patterns, body, sig: None, fixity: None, operand_cons: Vec::new() }
+    }
+
     /// Is this binding a pattern-guard join point (see `JOIN_POINT_PREFIX`)?
     pub fn is_join_point(&self) -> bool {
         self.patterns.is_empty() && self.sig.is_none() && self.name.starts_with(JOIN_POINT_PREFIX)
@@ -565,7 +610,7 @@ pub enum Pattern {
 
 impl Pattern {
     /// Call `f` on every variable this pattern binds, in source order — THE
-    /// enumeration of a surface pattern's binders (the parser's tuple-let
+    /// enumeration of a surface pattern's binders (the parser's pattern-binding
     /// selectors and the module resolver's scope tracking both need it; each
     /// once carried its own walk).
     pub fn for_each_var(&self, f: &mut impl FnMut(&str)) {
@@ -799,6 +844,8 @@ impl Expr {
                     patterns: ld.patterns,
                     body: f(ld.body),
                     sig: ld.sig,
+                    fixity: ld.fixity,
+                    operand_cons: ld.operand_cons,
                 }).collect(),
                 body: Box::new(f(*body)),
             },
@@ -811,6 +858,8 @@ impl Expr {
                         patterns: ld.patterns,
                         body: f(ld.body),
                         sig: ld.sig,
+                        fixity: ld.fixity,
+                        operand_cons: ld.operand_cons,
                     }).collect(),
                 },
                 DoStmt::PatternBind { pattern, expr, span, end } =>

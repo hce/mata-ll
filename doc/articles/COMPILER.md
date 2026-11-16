@@ -102,6 +102,54 @@ Two ordering facts that are easy to get wrong and matter:
   one operator), which cost `O.<+>`, `` `O.plus` `` and the alias that
   shares a constructor's name.
 
+- **A declaration has one grammar, wherever it stands.** Haskell 2010
+  §4.4.3 gives every declaration group the same `decl → gendecl |
+  (funlhs | pat) rhs`, and `parser.rs` has one reader for its head,
+  `parse_decl_head`, called by the top level (`parse_binding_decl`), by
+  `where` and `let` groups (`parse_local_decls`, the one loop behind
+  `parse_where` and `parse_let_binds`), and by class and instance bodies.
+  It returns a `DeclHead`: the names of a signature (`vars ::`, a `var`
+  an identifier or a parenthesised operator), a `FunLhs` (the function
+  being defined and its parameter patterns, from any of `var apat…`,
+  `pat varop pat`, `( funlhs ) apat…`), or the pattern of a pattern
+  binding. The operands of an infix head are read by the pattern parser
+  itself (`parse_pattern`), so a head's operands are whatever a pattern
+  is and the one operator the pattern parser leaves is the name being
+  defined — GHC's `isFunLhs` decides the same way. What follows the head
+  is `parse_rhs` (`= e` or guards, then `where`) for every group. Until
+  2026-11 there were five hand-written head parsers, each a subset: the
+  top level read `ident op atom`, class and instance bodies additionally
+  a parenthesised left operand, `where` and `let` groups a name and
+  atoms (no operator at all, so a local `(<+>) :: T` line fell out of
+  the block and was at one time read as a TOP-LEVEL declaration), and a
+  pattern binding existed as a tuple in `let` and `where` only.
+
+  Three things about a head are not syntax and are decided later.
+  (1) An operand that is an infix-constructor pattern without
+  parentheses (`x : xs +++ ys`) is an operand only if the constructor
+  binds tighter than the operator being defined — a question of that
+  operator's fixity, which may be declared below the definition or
+  belong to another module's class. The parser records such operands
+  (`Clause::operand_cons`, `LocalDef::operand_cons`, an
+  `ast::HeadOperand` each) and `Rename::check_head_operands` applies
+  GHC's `checkPrecMatch` once the fixity is known. (2) A local group's
+  fixity declarations are attached to the group's bindings when the
+  group closes (`close_local_group` → `attach_local_fixities`, next to
+  the signatures; `LocalDef::fixity`), and module resolution reads them
+  from there (below). (3) A top-level pattern binding lowers to value
+  bindings — a scrutinee `__pat_N` holding the MATCH (`case e of pat ->
+  (v1, …, vn)`, with the "Non-exhaustive patterns in pat" alternative
+  for a pattern that can fail) and one selector per variable — and the
+  scrutinee needs a type signature like every top-level binding; it is
+  the tuple of the variables' signatures, which `parse_module` writes
+  when the file is read (`top_pattern_signatures`). Checking the match
+  against that signature is what types the pattern and the right-hand
+  side from the variables' declared types. A local pattern binding
+  keeps the older lowering (`pattern_binding_defs`: the scrutinee holds
+  the right-hand side, each selector re-matches the pattern), which
+  needs no signature because local bindings are inferred. Both are lazy
+  by construction: nothing matches until a selector is demanded.
+
 - **"Declared twice" is decided in the parser, per source file.** Stages 3
   and 4 merge the Prelude, every import and the user's file into ONE
   declaration list. Stage 3 gives every module's declarations canonical
@@ -1320,8 +1368,21 @@ apart is done entirely in `modules.rs`, before the merge
   declaration with no such operator is an error). `Rename` groups a
   chain at the moment it binds the chain's operators (`Rename::operator`
   → `fixity::group`): the fixity looked up is that of the canonical
-  name just produced, `infixl 9` for a name in the local binder set, and
-  a chain with an operator bound to a scope-error placeholder is replaced
+  name just produced, and for a name in the local binder set the one
+  its own `where`/`let` group declares (`infixl 9` without a
+  declaration). The local binder set is a `modules::Scope`: the names,
+  plus the fixity of each name whose group carries a fixity declaration
+  for it (`Scope::bind_group` reads `LocalDef::fixity`); a binder
+  entering the scope shadows the name's outer meaning, fixity included.
+  An application of a local operator with a SYMBOLIC name is written
+  into the grouped tree as the plain application `(op) a b` of the
+  variable (`fixity::Op::apply`), not as an `InfixApp`: every later
+  stage reads an `InfixApp` with a symbolic name as an operator of the
+  module scope or the Prelude (its spelling selects native arithmetic,
+  strictness rows, the top-level definition of that name), while a
+  variable reference is resolved by scope in every stage — so a local
+  `<+>` or a local `+` shadows the outer one everywhere by construction.
+  A chain with an operator bound to a scope-error placeholder is replaced
   by that placeholder, so no grouping is chosen for a name that denotes
   nothing. `fixity.rs` holds the grouping itself (Haskell 2010 §10.6,
   including prefix minus and the section-operand rule) and its
@@ -1379,8 +1440,8 @@ apart is done entirely in `modules.rs`, before the merge
   desugaring that needs another Prelude function adds a `WiredIn` variant;
   a plain `Expr::Var("name")` in a desugaring would be an ordinary
   reference again, bound in the user's scope. The fresh BINDERS desugaring
-  introduces (`__lamN`, `__tup_N`, `__wtup_N`, `__compN`, `__sec`, `__pgK_N`,
-  `__tconN`) are a separate matter: they live in the `__` namespace, which
+  introduces (`__lamN`, `__tup_N`, `__wtup_N`, `__pat_N`, `__pv`, `__compN`,
+  `__sec`, `__pgK_N`, `__tconN`) are a separate matter: they live in the `__` namespace, which
   the lexer refuses in source.
 - **Names the compiler owns (`PreludeScope::claimed`, `ast::minted`).**
   Later stages also recognize the runtime library's functions (`map`,

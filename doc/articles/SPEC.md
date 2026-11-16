@@ -333,10 +333,35 @@ the name between its two operands, in addition to the prefix form:
     a |+| b = a + b      -- same as (|+|) a b = a + b
     x `add` y = x + y    -- same as add x y = x + y
 
-This infix definition form applies to top-level and local
-definitions. Inside a typeclass `instance`, however, an operator
-method must currently be defined in prefix form — `(#+#) (P a) (P b)
-= ...`, not `(P a) #+# (P b) = ...`; the latter is a parse error.
+A definition's left-hand side is Haskell 2010's (§4.4.3), the same
+at the top level, in a `where` or `let` group, in a class body and in
+an instance body:
+
+    funlhs → var apat {apat}           f x y = …      (<+>) a b = …
+           | pat varop pat             V a b |+| V c d = …
+           | ( funlhs ) apat {apat}    (x `op` y) z = …   (f .+. g) a = …
+
+The operands of an infix head are full patterns — a constructor
+application, a tuple, a list, a literal, an as-pattern, a wildcard —
+without parentheses around them: `V a b |+| V c d = V (a + c) (b + d)`,
+``N l v r `has` x | x == v = True``, `Just x <?> _ = x`, and in an
+instance `V a b == V c d = a == c && b == d`. An operand that is a cons
+pattern without parentheses is accepted where GHC accepts it: the head
+is read as one infix expression, so `x : xs +++ ys = …` defines `+++`
+only if `:` (infixr 5) binds tighter than `+++` — under `infixl 4 +++`
+it does; under the default `infixl 9` it is GHC's "Precedence parsing
+error", and `(x : xs) +++ ys` is the spelling. A head in parentheses
+takes further arguments: ``(x `op` y) z = x + y + z`` defines `op` with
+three.
+
+A `where` or `let` group is a declaration group like the top level:
+it defines operators (`a <+> b = …`), and its type signatures
+(`(<+>) :: Int -> Int -> Int`) and fixity declarations (`infixl 6
+<+>`, ``infixl 6 `dot` ``) belong to the group's own bindings. A local
+operator shadows an outer operator of the same name with its own type
+and its own fixity (`infixl 9` without a declaration); a fixity
+declaration or a signature for a name the group does not bind is an
+error, as in GHC.
 
 Multi parameter functions can be partly applied, just like in haskell.
 
@@ -1255,11 +1280,21 @@ failable one desugars with GHC's MonadFail fallback (the block's monad's
 `fail`, see Do-notation). Local-binding PARAMETERS
 (`let f (a, b) = e`, where-bindings) accept any pattern too, and a local
 function has as many equations as a top-level one, matched top to
-bottom with the partial-function fallback past the last. What remains
-out: a constructor pattern as the assignment LHS itself (`let Just x =
-m` — bind the value and match it with `case`, or use `Just x <- return
-m` in do). Constructor patterns in function definitions, case
-alternatives, and lambda arguments are fully supported.
+bottom with the partial-function fallback past the last.
+
+A PATTERN BINDING `pat = e` (Haskell 2010 §4.4.3.2) takes any pattern,
+at the top level and in `let`, do-`let` and `where` groups: `(lo, hi) =
+(1, 9)`, `Just k = lookup …`, `[p, q] = …`, `x : xs = …`, `whole@(a, _)
+= …`, with guards and a `where` block like any right-hand side. The
+variables are in scope for the right-hand side itself and for the
+sibling bindings. The binding is lazy: the match happens when one of
+its variables is first demanded — the whole pattern at once — and never
+if none is, so `let Just k = Nothing in 5` is `5`; a failed match
+raises `Non-exhaustive patterns in Just k`. At the top level each
+variable of the pattern needs its type signature, like every top-level
+binding (`lo, hi :: Int`), and the signature has no class context (GHC:
+"Overloaded signature conflicts with monomorphism restriction"). Class
+and instance bodies take no pattern bindings.
 
 Non-exhaustive function definitions and case expressions are rejected
 at compile time (the type checker performs exhaustiveness checking).
@@ -1427,12 +1462,11 @@ after it. An `in` at the statements' column after a let statement is a
 parse error, as under GHC (the layout rule begins a new statement
 there).
 
-Note: as stated under Pattern matching, `let`/`where` pattern BINDINGS
-today accept only variable and tuple patterns, so the refutable-binding
-semantics above apply to those forms; constructor-pattern bindings are
-not yet parsed. Local FUNCTIONS take any pattern, in as many equations
-as needed, with guards and a per-equation `where`, in `let` and `where`
-alike (see Pattern matching).
+Note: as stated under Pattern matching, a `let`/`where` pattern BINDING
+takes any pattern and is lazy — it never fails where it stands, only
+where a variable it binds is demanded. Local FUNCTIONS take any
+pattern, in as many equations as needed, with guards and a per-equation
+`where`, in `let` and `where` alike (see Pattern matching).
 
 # Lambda syntax
 

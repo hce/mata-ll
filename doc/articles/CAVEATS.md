@@ -472,6 +472,13 @@ one function separated by another binding — is a compile error
 ("Conflicting definitions for 'x'"), with both locations named, as in
 GHC.
 
+A group also takes PATTERN BINDINGS over any pattern (`let Just k = m`,
+`(a, b) = pair`, `x : xs = list`) and operator definitions with their
+own signature and fixity declaration (`infixl 6 <+>` / `(<+>) :: Int ->
+Int -> Int` / `a <+> b = …`), scoped to the group. A pattern binding is
+lazy: `let Just k = Nothing in 5` is `5`, and a use of `k` raises
+`Non-exhaustive patterns in Just k`.
+
 ## Do-block `<-` binds any pattern
 
 A monadic bind `pat <- action` accepts any pattern: a variable, `_`,

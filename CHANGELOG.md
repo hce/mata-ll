@@ -44,6 +44,106 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A declaration is `(funlhs | pat) rhs` in every declaration group:
+  infix definitions over full patterns, parenthesised function heads,
+  pattern bindings, and operators with their own signature and fixity
+  in `where` and `let`** (wrong rejection; formerly a silent scoping
+  miscompile). GHC accepts all of these and mata-ll rejected them:
+  `V a b |+| V c d = V (a + c) (b + d)` at the top level ("parse error
+  on input 'V'"), `k |*| V a b = …` ("Expected '=', found 'a'" — the
+  right operand was read as one atom), ``N l v r `has` x | x == v = …``
+  with a second equation ``L `has` _ = False``, ``(x, y) `pairPlus` (u,
+  v) = …``, `Just x <?> _ = x`; the parenthesised heads ``(x `op` y) z =
+  …`` and `(f .+. g) a = …` ("Expected operator" — the parenthesis was
+  read as a section); the pattern bindings `(lo, hi) = (1, 9)`, `Just k
+  = Just 5`, `[p, q] = [2, 3]` at the top level and `let Just k = …`,
+  `where Just r = …` locally (only tuple patterns in `let` and `where`
+  existed); and in a `where` or `let` group `infixl 6 <+>`, `(<+>) ::
+  Int -> Int -> Int` and `x <+> y = …` (parse errors on `infixl`, on the
+  `(` and "Expected pattern, found '|>'"; a local group could not define
+  an operator at all). Two functions each declaring their own `<+>` in
+  a `where` group — `(<+>) :: …` / `a <+> b = …` — were, until the
+  layout rule became a property of the token stream (below), silently
+  HOISTED to the top level: the `where` block ended at the `(` and the
+  lines were read as top-level declarations, so the two operators
+  collapsed into one definition.
+  Haskell 2010 §4.4.3 gives every declaration group one grammar, `decl →
+  gendecl | (funlhs | pat) rhs` with `funlhs → var apat {apat} | pat
+  varop pat | ( funlhs ) apat {apat}`, and the parser had five
+  hand-written subsets of it: the top level read `ident op atom`, class
+  and instance bodies additionally a parenthesised left operand, `where`
+  and `let` groups a name and atomic patterns, each its own signature
+  and tuple-binding code. Now one head parser (`parse_decl_head`) serves
+  the top level, `where`/`let` groups (one loop, `parse_local_decls`),
+  class bodies and instance bodies: a signature (`f ::`, `(<+>) ::`, `a,
+  b ::` — the multi-name form is new at the top level and in class
+  bodies), or a function head in any of the three forms, or a pattern.
+  The operands of an infix head are read by the pattern parser itself,
+  so they are whatever a pattern is — constructor applications, tuples,
+  lists, literals (negative ones included, `-1 |^| k = …`), as-patterns,
+  wildcards — and the operator the pattern parser leaves is the name
+  being defined, as GHC's `isFunLhs` decides. An operand that is a cons
+  pattern WITHOUT parentheses follows GHC's `checkPrecMatch`: `x : xs
+  +++ ys = …` defines `+++` only where `:` (infixr 5) binds tighter —
+  accepted under `infixl 4 +++`, and under the default `infixl 9` (or
+  `infixr 5` for a left operand) GHC's "Precedence parsing error: cannot
+  mix ':' [infixr 5] and '+++' [infixl 9] in the same infix
+  expression"; module resolution runs the check, where the operator's
+  fixity is known (it may be declared below the definition, or belong
+  to the class of an instance method). A head with two operators is
+  GHC's "Parse error in pattern: a +++ b", a parenthesised head without
+  a further argument "Parse error in pattern: x \`op\` y", and an
+  equation for an operator that starts with `:` is refused as the
+  constructor it is. A pattern binding takes any pattern, with guards
+  and a `where` block, in `let`, do-`let` and `where` groups and at the
+  top level, and is lazy as §4.4.3.2 requires: the match happens when a
+  variable of the pattern is first demanded (`let Just k = Nothing in 5`
+  is `5`; a top-level `Just never = Nothing` costs nothing), and a
+  failed match raises GHC's "Non-exhaustive patterns in Just k"
+  (without GHC's source span). Locally it lowers as tuple bindings
+  always did (a scrutinee binding and one lazy selector per variable);
+  at the top level the scrutinee binding holds the match — the
+  pattern's variables as a tuple — and takes the tuple of the variables'
+  signatures as its own, so the right-hand side is checked against the
+  variables' declared types. The variables of a top-level pattern
+  binding need type signatures like every top-level binding of mata-ll
+  ("Missing type signature for 'hi'", with the rule), and a class
+  context on one is GHC's "Overloaded signature conflicts with
+  monomorphism restriction". A `where` or `let` group's signatures and
+  fixity declarations belong to the group's own bindings (§4.4.1,
+  §4.4.2): a local operator shadows an outer one of the same name with
+  its own type and its own fixity — `n <+> 2 * 3` is `106` under a
+  group's `infixl 6 <+>` and `306` under another group's `infixl 8 <+>`
+  — in chains, sections and as a value, a local function takes a fixity
+  for its backtick use, a local group may redefine a Prelude operator
+  (`a + b = a - b` with `infixl 7 +`), and a fixity declaration or
+  signature without a binding in its group is GHC's error ("The fixity
+  signature for '<+>' lacks an accompanying binding"). Module
+  resolution carries the group fixities in its local scope
+  (`modules::Scope`) and writes the application of a local symbolic
+  operator as the plain application of the variable, so no later stage
+  can mistake it for the top-level or Prelude operator of that
+  spelling. Class and instance bodies take function bindings only:
+  a pattern binding there is GHC's "Pattern bindings (except simple
+  variables) not allowed in instance declaration", and a signature in
+  an instance body is refused with the reason (GHC's default language
+  accepts it; HASKDIFF). A `;` now separates the bindings of a `where`
+  group as it did a `let`'s. GHC-goldened cases `declaration_heads`
+  (the three head forms at the top level and in class and instance
+  bodies, with guards, several equations, literal, as-, tuple, list and
+  cons operands, the cons operand without parentheses under `infixl 4`
+  and `infixr 5`, parenthesised heads with one and two further
+  arguments, `A == A = True`), `pattern_bindings` (every pattern form
+  at the top level, in `let`, do-`let` and `where`, with guards and
+  `where`, mutual recursion through a top-level pattern binding, a
+  polymorphic one, and the laziness proofs) and `local_operator_scope`
+  (two groups with their own `<+>` and fixities next to a top-level
+  `<+>`, a nested group, a local backtick fixity, sections and
+  first-class use, a redefined `+` and `*`, local infix equations over
+  patterns with guards, the do-`let` form); a runtime test for the
+  failed match in `let`, `where` and at the top level; compile-error
+  tests for every rejection above. (F12h, F12i, Q31, Q61, U22, X3)
+
 - **Qualified operators and backtick-qualified names in every operator
   position, and a qualified name is one lexeme** (wrong rejection / wrong
   resolution). `1 O.<+> 2` after `import qualified Ops as O` died with
